@@ -103,6 +103,7 @@ if __name__ == "__main__":
             sync_tensorboard=True,
             monitor_gym=True,
             force=True,
+            settings=wandb.Settings(start_method="fork"),
         )
 
         env = make_vec_env(
