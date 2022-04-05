@@ -3,6 +3,7 @@ import numpy as np
 import os
 import platform
 
+import torch.autograd
 import torch.nn as nn
 
 import wandb
@@ -35,6 +36,7 @@ if __name__ == "__main__":
                         help='Directory to save logs to.')
     parser.add_argument('--model_path', type=str,
                         help='Path to the pretrained model.')
+    parser.add_argument('--detect_autograd_anomaly', action='store_true', help="Enable autograd anomaly detection")
     # SAC arguments
     parser.add_argument('--ent_coef', type=float, default=0.1, help='Entropy temperature')
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
@@ -66,6 +68,7 @@ if __name__ == "__main__":
                         help='Number of samples to approximate entropy with. ')
 
     args = parser.parse_args()
+    torch.autograd.set_detect_anomaly(args.detect_autograd_anomaly)
 
     if not args.save_interval:
         args.save_interval = args.timesteps
