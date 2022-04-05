@@ -87,8 +87,8 @@ if __name__ == "__main__":
 
     for seed in args.seed:
         print(f"Seed: {seed}")
-        args.run_name = f"{args.run_name}_s{seed}"
-        log_path = os.path.join(args.log_dir, args.proj_name, args.run_name)
+        run_name = f"{args.run_name}_s{seed}"
+        log_path = os.path.join(args.log_dir, args.proj_name, run_name)
         monitor_path = os.path.join(log_path, "monitor")
         model_path = os.path.join(log_path, "models")
         video_path = os.path.join(log_path, "video")
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         run = wandb.init(
             dir=log_path,
             project=args.proj_name,
-            name=args.run_name,
+            name=run_name,
             sync_tensorboard=True,
             monitor_gym=True,
             force=True,
@@ -121,7 +121,7 @@ if __name__ == "__main__":
             model = CspnSAC.load(args.model_path, env)
             model.tensorboard_log = None
             model.vi_aux_resp_grad_mode = args.vi_aux_resp_grad_mode
-            # model_name = f"sac_loadedpretrained_{args.env}_{args.proj_name}_{args.run_name}"
+            # model_name = f"sac_loadedpretrained_{args.env}_{args.proj_name}_{run_name}"
             sac_kwargs = None
         else:
             sac_kwargs = {
@@ -176,7 +176,7 @@ if __name__ == "__main__":
             total_timesteps=args.timesteps,
             log_interval=args.log_interval,
             reset_num_timesteps=not args.model_path,
-            tb_log_name=f"{args.proj_name}/{args.run_name}",
+            tb_log_name=f"{args.proj_name}/{run_name}",
             callback=WandbCallback(
                 gradient_save_freq=10000,
                 model_save_path=model_path,
