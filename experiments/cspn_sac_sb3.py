@@ -37,6 +37,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str,
                         help='Path to the pretrained model.')
     parser.add_argument('--detect_autograd_anomaly', action='store_true', help="Enable autograd anomaly detection")
+    parser.add_argument('--no_wandb', action='store_true', help="Don't log this run in WandB")
     # SAC arguments
     parser.add_argument('--ent_coef', type=float, default=0.1, help='Entropy temperature')
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
@@ -95,16 +96,17 @@ if __name__ == "__main__":
         for d in [log_path, monitor_path, model_path, video_path]:
             os.makedirs(d, exist_ok=True)
 
-        wandb.login(key=os.environ['WANDB_API_KEY'])
-        run = wandb.init(
-            dir=log_path,
-            project=args.proj_name,
-            name=run_name,
-            sync_tensorboard=True,
-            monitor_gym=True,
-            force=True,
-            settings=wandb.Settings(start_method="fork"),
-        )
+        if not args.no_wandb:
+            wandb.login(key=os.environ['WANDB_API_KEY'])
+            run = wandb.init(
+                dir=log_path,
+                project=args.proj_name,
+                name=run_name,
+                sync_tensorboard=True,
+                monitor_gym=True,
+                force=True,
+                settings=wandb.Settings(start_method="fork"),
+            )
 
         env = make_vec_env(
             env_id=args.env_name,
@@ -119,10 +121,36 @@ if __name__ == "__main__":
 
         if args.model_path:
             model = CspnSAC.load(args.model_path, env)
-            model.tensorboard_log = None
-            model.vi_aux_resp_grad_mode = args.vi_aux_resp_grad_mode
+            # model.tensorboard_log = None
+            # model.vi_aux_resp_grad_mode = args.vi_aux_resp_grad_mode
             # model_name = f"sac_loadedpretrained_{args.env}_{args.proj_name}_{run_name}"
-            sac_kwargs = None
+            model.seed = seed
+            model.learning_starts = args.learning_starts
+            # model.learning_rate = args.learning_rate
+            sac_kwargs = {
+                'env': model.env,
+                'seed': model.seed,
+                'verbose': model.verbose,
+                'ent_coef': model.ent_coef,
+                'learning_starts': model.learning_starts,
+                'device': model.device,
+                'learning_rate': model.learning_rate,
+                'policy_kwargs': {
+                    'cspn_args': {
+                        'R': model.actor.cspn.config.R,
+                        'D': model.actor.cspn.config.D,
+                        'I': model.actor.cspn.config.I,
+                        'S': model.actor.cspn.config.S,
+                        'dropout': model.actor.cspn.config.dropout,
+                        'sum_param_layers': model.actor.cspn.config.sum_param_layers,
+                        'dist_param_layers': model.actor.cspn.config.dist_param_layers,
+                        'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
+                        'vi_aux_resp_grad_mode': int(model.actor.vi_aux_resp_ll_with_grad) + \
+                                                 int(model.actor.vi_aux_resp_sample_with_grad),
+                        'vi_ent_approx_sample_size': model.actor.vi_ent_approx_sample_size,
+                    }
+                }
+            }
         else:
             sac_kwargs = {
                 'env': env,
@@ -155,14 +183,23 @@ if __name__ == "__main__":
                 model = CspnSAC(policy="CspnPolicy", **sac_kwargs)
             # model_name = f"sac_{'mlp' if args.mlp else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
 
+        if not args.no_wandb:
             run.config.update({
                 **sac_kwargs,
                 'machine': platform.node(),
             })
+            callback = WandbCallback(
+                gradient_save_freq=10000,
+                model_save_path=model_path,
+                model_save_freq=args.save_interval,
+                verbose=2,
+            )
+        else:
+            callback = None
 
-            logger = configure(log_path, ["stdout", "csv", "tensorboard"])
-            logger.output_formats[0].max_length = 50
-            model.set_logger(logger)
+        logger = configure(log_path, ["stdout", "csv", "tensorboard"])
+        logger.output_formats[0].max_length = 50
+        model.set_logger(logger)
 
         print(model.actor)
         print(model.critic)
@@ -177,11 +214,6 @@ if __name__ == "__main__":
             log_interval=args.log_interval,
             reset_num_timesteps=not args.model_path,
             tb_log_name=f"{args.proj_name}/{run_name}",
-            callback=WandbCallback(
-                gradient_save_freq=10000,
-                model_save_path=model_path,
-                model_save_freq=args.save_interval,
-                verbose=2,
-            ),
+            callback=callback,
         )
         run.finish()
