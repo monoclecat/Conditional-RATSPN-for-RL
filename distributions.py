@@ -164,48 +164,35 @@ class RatNormal(Leaf):
 
         return samples
 
-    def set_bounded_dist_params(self):
-        """
-            Set the dist params to their bounded values. This is called by the Cspn.set_weights() function to
-            save calling self.bounded_dist_params() later on.
-        """
-        self._dist_params_are_bounded = False
-        self.means, self.stds = self.bounded_dist_params()
-        self._dist_params_are_bounded = True
-
-    def bounded_dist_params(self) -> Tuple[th.Tensor, th.Tensor]:
-        if not self._dist_params_are_bounded:
+    def bound_dist_params(self):
+        sigma = self.stds
+        means = self.means
+        if self._no_tanh_log_prob_correction:
+            means = th.clamp(self.means, -6.0, 6.0)
+        else:
             if self.min_sigma:
                 if self.min_sigma < self.max_sigma:
                     sigma_ratio = th.sigmoid(self.stds)
                     sigma = self.min_sigma + (self.max_sigma - self.min_sigma) * sigma_ratio
                 else:
                     sigma = 1.0
-            else:
-                LOG_STD_MAX = 2
-                LOG_STD_MIN = -20
-                sigma = th.clamp(self.stds, LOG_STD_MIN, LOG_STD_MAX).exp()
 
-            means = self.means
             if self.max_mean:
                 assert self.min_mean is not None
                 # mean_range = self.max_mean - self.min_mean
                 # means = th.sigmoid(self.means) * mean_range + self.min_mean
                 means = th.clamp(means, self.min_mean, self.max_mean)
 
-            return means, sigma
-        else:
-            return self.means, self.stds
+        self.means = means
+        self.stds = sigma
 
     def _get_base_distribution(self) -> th.distributions.Distribution:
-        means, sigma = self.bounded_dist_params()
-        gauss = dist.Normal(means, sigma)
+        gauss = dist.Normal(self.means, self.stds)
         return gauss
 
     def moments(self):
         """Get the mean and variance"""
-        means, sigma = self.bounded_dist_params()
-        return means, sigma.pow(2)
+        return self.means, self.stds.pow(2)
 
     def gradient(self, x: th.Tensor, order: int):
         """Get the gradient up to a given order at the point x"""

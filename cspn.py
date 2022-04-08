@@ -346,16 +346,12 @@ class CSPN(RatSpn):
         features = features.flatten(start_dim=1)
         sum_weights_pre_output = self.sum_layers(features)
 
-        LOG_STD_MAX = 2
-        LOG_STD_MIN = -20
-
         # Set normalized sum node weights of the inner RatSpn layers
         i = 0
         for layer in self._inner_layers:
             if isinstance(layer, Sum):
                 weight_shape = (num_conditionals, layer.in_features, layer.in_channels, layer.out_channels, layer.num_repetitions)
                 weights = self.sum_param_heads[i](sum_weights_pre_output).view(weight_shape)
-                weights = th.clamp(weights, LOG_STD_MIN, LOG_STD_MAX)
                 layer.weights = F.log_softmax(weights, dim=2)
                 i += 1
             else:
@@ -364,7 +360,6 @@ class CSPN(RatSpn):
         # Set normalized weights of the root sum layer
         weight_shape = (num_conditionals, self.root.in_features, self.root.in_channels, self.root.out_channels, self.root.num_repetitions)
         weights = self.sum_param_heads[i](sum_weights_pre_output).view(weight_shape)
-        weights = th.clamp(weights, LOG_STD_MIN, LOG_STD_MAX)
         self.root.weights = F.log_softmax(weights, dim=2)
 
         # Sampling root weights need to have 5 dims as well
@@ -378,14 +373,16 @@ class CSPN(RatSpn):
             weight_shape = (num_conditionals, self._leaf.sum.in_features, self._leaf.sum.in_channels,
                             self._leaf.sum.out_channels, self._leaf.sum.num_repetitions)
             weights = self.sum_param_heads[i+1](sum_weights_pre_output).view(weight_shape)
-            weights = th.clamp(weights, LOG_STD_MIN, LOG_STD_MAX)
             self._leaf.sum.weights = F.log_softmax(weights, dim=2)
 
         # Set bounded weights of the Gaussian distributions in the leaves
         dist_param_shape = (num_conditionals, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         dist_weights_pre_output = self.dist_layers(features)
         dist_means = self.dist_mean_head(dist_weights_pre_output).view(dist_param_shape)
+        dist_means = th.clamp(dist_means, -6.0, 6.0)
         dist_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
+        LOG_STD_MAX = 2
+        LOG_STD_MIN = -15
+        dist_stds = th.clamp(dist_stds, LOG_STD_MIN, LOG_STD_MAX).exp()
         self._leaf.base_leaf.means = dist_means
         self._leaf.base_leaf.stds = dist_stds
-        self._leaf.base_leaf.set_bounded_dist_params()
