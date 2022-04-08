@@ -86,10 +86,13 @@ if __name__ == "__main__":
     if args.log_dir:
         assert os.path.exists(args.log_dir), f"The log_dir doesn't exist! {args.log_dir}"
 
+    if not args.no_wandb:
+        wandb.login(key=os.environ['WANDB_API_KEY'])
+
     for seed in args.seed:
         print(f"Seed: {seed}")
-        run_name = f"{args.run_name}_s{seed}"
-        log_path = os.path.join(args.log_dir, args.proj_name, run_name)
+        run_name_seed = f"{args.run_name}_s{seed}"
+        log_path = os.path.join(args.log_dir, args.proj_name, run_name_seed)
         monitor_path = os.path.join(log_path, "monitor")
         model_path = os.path.join(log_path, "models")
         video_path = os.path.join(log_path, "video")
@@ -97,13 +100,14 @@ if __name__ == "__main__":
             os.makedirs(d, exist_ok=True)
 
         if not args.no_wandb:
-            wandb.login(key=os.environ['WANDB_API_KEY'])
             run = wandb.init(
                 dir=log_path,
                 project=args.proj_name,
-                name=run_name,
+                name=run_name_seed,
+                group=args.run_name,
                 sync_tensorboard=True,
                 monitor_gym=True,
+                reinit=True,
                 force=True,
                 settings=wandb.Settings(start_method="fork"),
             )
@@ -115,7 +119,7 @@ if __name__ == "__main__":
             # vec_env_cls=SubprocVecEnv,
             # vec_env_kwargs={'start_method': 'fork'},
         )
-        # Without env as a VecVideoRecorder we need LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGLEW.so;
+        # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGLEW.so;
         env = VecVideoRecorder(env, video_folder=video_path,
                                record_video_trigger=lambda x: x % args.save_interval == 0, video_length=200)
 
@@ -123,7 +127,7 @@ if __name__ == "__main__":
             model = CspnSAC.load(args.model_path, env)
             # model.tensorboard_log = None
             # model.vi_aux_resp_grad_mode = args.vi_aux_resp_grad_mode
-            # model_name = f"sac_loadedpretrained_{args.env}_{args.proj_name}_{run_name}"
+            # model_name = f"sac_loadedpretrained_{args.env}_{args.proj_name}_{run_name_seed}"
             model.seed = seed
             model.learning_starts = args.learning_starts
             # model.learning_rate = args.learning_rate
@@ -213,7 +217,7 @@ if __name__ == "__main__":
             total_timesteps=args.timesteps,
             log_interval=args.log_interval,
             reset_num_timesteps=not args.model_path,
-            tb_log_name=f"{args.proj_name}/{run_name}",
+            tb_log_name=f"{args.proj_name}/{run_name_seed}",
             callback=callback,
         )
         run.finish()
