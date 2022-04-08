@@ -48,10 +48,6 @@ if __name__ == "__main__":
 
         model_dir = os.path.join('/', *model_path.split("/")[:-1])
         model_name = model_path.split("/")[-1].split(".")[0]
-        for env_name in ['HalfCheetah-v2', 'Humanoid-v3', 'Ant-v3', None]:
-            assert env_name is not None, "None of the environment names were contained in the model name!"
-            if env_name in model_name:
-                break
 
         results_path = os.path.join(model_dir, "inspect")
         for d in [results_path]:
@@ -59,7 +55,7 @@ if __name__ == "__main__":
                 os.makedirs(d)
 
         env = make_vec_env(
-            env_id=env_name,
+            env_id=args.env,
             n_envs=1,
             # monitor_dir=results_path,
             # monitor_dir=os.path.join(results_path, f"log_{args.exp_name}.txt"),
@@ -78,6 +74,7 @@ if __name__ == "__main__":
 
         obs = env.reset()
 
+        # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGLEW.so;
         if args.video:
             env.metadata['video.frames_per_second'] = 5
             env.metadata['video.output_frames_per_second'] = 30
