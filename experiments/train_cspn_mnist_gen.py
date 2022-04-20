@@ -263,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', '-ep', type=int, default=100)
     parser.add_argument('--learning_rate', '-lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--batch_size', '-bs', type=int, default=256)
+    parser.add_argument('--batch_size', '-bs', type=int, default=32)
     parser.add_argument('--results_dir', type=str, default='../../spn_experiments',
                         help='The base directory where the directory containing the results will be saved to.')
     parser.add_argument('--dataset_dir', type=str, default='../../spn_experiments/data',
@@ -304,7 +304,7 @@ if __name__ == "__main__":
     parser.add_argument('--learn_by_sampling', action='store_true', help='Learn in sampling mode.')
     parser.add_argument('--learn_by_sampling__sample_size', type=int, default=10,
                         help='When learning by sampling, this arg sets the number of samples generated for each label.')
-    parser.add_argument('--tanh', action='store_true', help='Apply tanh squashing to leaves.')
+    parser.add_argument('--no_tanh', action='store_true', help='Don\'t apply tanh squashing to leaves.')
     parser.add_argument('--sigmoid_std', action='store_true', help='Use sigmoid to set std.')
     parser.add_argument('--no_correction_term', action='store_true', help='Don\'t apply tanh correction term to logprob')
     parser.add_argument('--plot_vi_log', action='store_true',
@@ -336,8 +336,6 @@ if __name__ == "__main__":
     img_size = (1, 28, 28)  # 3 channels
     cond_size = 10
 
-    csv_log = os.path.join(results_dir, f"log_{args.exp_name}.csv")
-    logger = CsvLogger(csv_log)
     # Construct Cspn from config
     train_loader, test_loader = get_mnist_loaders(args.dataset_dir, use_cuda, batch_size=batch_size, device=device,
                                                   img_side_len=img_size[1], invert=args.invert, debug_mode=args.verbose)
@@ -361,7 +359,7 @@ if __name__ == "__main__":
         config.S = args.num_sums
         config.dropout = args.dropout
         config.leaf_base_class = RatNormal
-        if args.tanh:
+        if not args.no_tanh:
             config.tanh_squash = True
             config.leaf_base_kwargs = {'no_tanh_log_prob_correction': args.no_correction_term}
             # config.leaf_base_kwargs = {'min_mean': -5.0, 'max_mean': 5.0}
@@ -393,6 +391,9 @@ if __name__ == "__main__":
     lmbda = 1.0
     sample_interval = 1 if args.verbose else args.eval_interval  # number of epochs
     save_interval = 1 if args.verbose else args.save_interval  # number of epochs
+
+    csv_log = os.path.join(results_dir, f"log_{args.exp_name}.csv")
+    logger = CsvLogger(csv_log)
 
     epoch = 0
     if not args.no_eval_at_start:
@@ -463,7 +464,7 @@ if __name__ == "__main__":
             )
             for lay_nr, lay_dict in batch_ent_log.items():
                 for key, val in lay_dict.items():
-                    logger.add_to_avg_keys(**{f"{lay_nr}/{key}": val})
+                    logger.add_to_avg_keys(**{f"sum_layer{lay_nr}/{key}": val})
 
             if False and batch_index > 0 and batch_index % 1000 == 0:
                 exit()
