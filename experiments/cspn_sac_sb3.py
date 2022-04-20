@@ -6,9 +6,6 @@ import platform
 import torch.autograd
 import torch.nn as nn
 
-import wandb
-from wandb.integration.sb3 import WandbCallback
-
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
@@ -87,6 +84,8 @@ if __name__ == "__main__":
         assert os.path.exists(args.log_dir), f"The log_dir doesn't exist! {args.log_dir}"
 
     if not args.no_wandb:
+        import wandb
+        from wandb.integration.sb3 import WandbCallback
         wandb.login(key=os.environ['WANDB_API_KEY'])
 
     for seed in args.seed:
@@ -119,7 +118,7 @@ if __name__ == "__main__":
             # vec_env_cls=SubprocVecEnv,
             # vec_env_kwargs={'start_method': 'fork'},
         )
-        # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGLEW.so;
+        # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
         env = VecVideoRecorder(env, video_folder=video_path,
                                record_video_trigger=lambda x: x % args.save_interval == 0, video_length=200)
 
