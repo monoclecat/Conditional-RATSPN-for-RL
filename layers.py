@@ -504,7 +504,7 @@ class CrossProduct(AbstractLayer):
         """
 
         # Check if padding to next power of 2 is necessary
-        self._pad = 2 ** np.ceil(np.log2(in_features)).astype(np.int) - in_features
+        self._pad = 2 ** np.ceil(np.log2(in_features)).astype(int) - in_features
         super().__init__(2 ** np.ceil(np.log2(in_features)).astype(np.int), num_repetitions)
 
         self.in_channels = check_valid(in_channels, int, 1)
