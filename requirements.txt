@@ -15,11 +15,13 @@ arff
 pytest
 dataclasses
 
+mujoco_py<2.1.0.0
 gym
 pybullet
 torch
+torchvision
+tensorboard
 imageio
 scikit-image
-torchvision
 wandb
 pandas
