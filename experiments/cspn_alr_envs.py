@@ -25,7 +25,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_envs', type=int, default=1, help='Number of parallel environments to run.')
     parser.add_argument('--timesteps', type=int, default=int(1e6), help='Total timesteps to train model.')
     parser.add_argument('--save_interval', type=int, help='Save model and a video every save_interval timesteps.')
-    parser.add_argument('--log_interval', type=int, default=4, help='Log interval')
+    parser.add_argument('--log_interval', type=int, default=100, help='Log interval')
     parser.add_argument('--env_name', '-env', type=str, required=True, help='Gym environment to train on.')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on. cpu or cuda.')
     parser.add_argument('--proj_name', '-proj', type=str, default='test_proj', help='Project name for WandB')
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     # SAC arguments
     parser.add_argument('--ent_coef', type=float, default=0.1, help='Entropy temperature')
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--learning_starts', type=int, default=1000,
+    parser.add_argument('--learning_starts', type=int, default=100,
                         help='Nr. of steps to act randomly in the beginning.')
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
@@ -49,9 +49,6 @@ if __name__ == "__main__":
     parser.add_argument('--num_dist', '-I', type=int, default=3, help='Number of Gauss dists per pixel.')
     parser.add_argument('--num_sums', '-S', type=int, default=3, help='Number of sums per RV in each sum layer.')
     parser.add_argument('--dropout', type=float, default=0.0, help='Dropout to apply')
-    parser.add_argument('--no_relu', action='store_true',
-                        help='Don\'t use inner ReLU activations in the layers providing '
-                             'the CSPN parameters from the conditional.')
     parser.add_argument('--feat_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN feature layers.')
     parser.add_argument('--sum_param_layers', type=int, nargs='+',
@@ -69,8 +66,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # TODO
-    args.env_name = 'AssemblyProMP-v2'
+    is_mp_env = 'MP' in args.env_name
 
     torch.autograd.set_detect_anomaly(args.detect_autograd_anomaly)
 
@@ -119,8 +115,8 @@ if __name__ == "__main__":
 
         env = make_vec_env(env_id=args.env_name, seed=seed, n_envs=args.num_envs, monitor_dir=monitor_path)
         # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
-        env = VecVideoRecorder(env, video_folder=video_path,
-                               record_video_trigger=lambda x: x % args.save_interval == 0, video_length=200)
+        # env = VecVideoRecorder(env, video_folder=video_path,
+        #                        record_video_trigger=lambda x: x % args.save_interval == 0, video_length=1)
 
         if args.model_path:
             model = CspnSAC.load(args.model_path, env)
@@ -163,6 +159,11 @@ if __name__ == "__main__":
                 'learning_starts': args.learning_starts,
                 'device': args.device,
                 'learning_rate': args.learning_rate,
+                'train_freq': (1, "episode") if is_mp_env else (1, 'step'),
+                'replay_buffer_kwargs': {'handle_timeout_termination': False if is_mp_env else True},
+                'policy_kwargs': {
+                    'squash_output': False if is_mp_env else True,
+                }
             }
             if args.mlp:
                 model = EntropyLoggingSAC("MlpPolicy", **sac_kwargs)
@@ -176,13 +177,12 @@ if __name__ == "__main__":
                     'feat_layers': args.feat_layers,
                     'sum_param_layers': args.sum_param_layers,
                     'dist_param_layers': args.dist_param_layers,
-                    'cond_layers_inner_act': nn.Identity if args.no_relu else nn.ReLU,
+                    'cond_layers_inner_act': nn.Identity,
                     'vi_aux_resp_grad_mode': args.vi_aux_resp_grad_mode,
                     'vi_ent_approx_sample_size': args.vi_ent_sample_size,
                 }
-                sac_kwargs['policy_kwargs'] = {
-                    'cspn_args': cspn_args,
-                }
+                sac_kwargs['policy_kwargs']['cspn_args'] = cspn_args
+
                 model = CspnSAC(policy="CspnPolicy", **sac_kwargs)
             # model_name = f"sac_{'mlp' if args.mlp else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
 
@@ -192,7 +192,7 @@ if __name__ == "__main__":
                 'machine': platform.node(),
             })
             callback = WandbCallback(
-                gradient_save_freq=10000,
+                gradient_save_freq=1,
                 model_save_path=model_path,
                 model_save_freq=args.save_interval,
                 verbose=2,
