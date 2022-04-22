@@ -379,7 +379,8 @@ class CSPN(RatSpn):
         dist_param_shape = (num_conditionals, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         dist_weights_pre_output = self.dist_layers(features)
         dist_means = self.dist_mean_head(dist_weights_pre_output).view(dist_param_shape)
-        dist_means = th.clamp(dist_means, -6.0, 6.0)
+        if self.config.tanh_squash:
+            dist_means = th.clamp(dist_means, -6.0, 6.0)
         dist_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
         LOG_STD_MAX = 2
         LOG_STD_MIN = -15
