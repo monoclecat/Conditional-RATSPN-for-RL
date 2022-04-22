@@ -167,7 +167,7 @@ class RatNormal(Leaf):
     def bound_dist_params(self):
         sigma = self.stds
         means = self.means
-        if self._no_tanh_log_prob_correction:
+        if self._tanh_squash:
             means = th.clamp(self.means, -6.0, 6.0)
         else:
             if self.min_sigma:
