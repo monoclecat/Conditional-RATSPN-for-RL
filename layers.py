@@ -425,14 +425,12 @@ class Product(AbstractLayer):
         # Dimensions
         n, w, d, c, r = x.size()
         d_out = d // self.cardinality
+        x = x.view(n, w, d_out, self.cardinality, c, r)
 
         if reduction is None:
-            return x.view(n, w, d_out, self.cardinality, c, r)
+            return x
         elif reduction == 'sum':
-            x = x.view(n * w, d, c, r)
-            x = F.conv3d(x.unsqueeze(1), weight=th.ones(1, 1, self.cardinality, 1, 1, device=x.device),
-                         stride=(self.cardinality, 1, 1))
-            return x.view(n, w, d_out, c, r)
+            return x.sum(dim=3)
         else:
             raise NotImplementedError("No reduction other than sum is implemented. ")
 
