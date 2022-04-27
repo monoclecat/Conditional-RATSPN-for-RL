@@ -3,7 +3,7 @@ import numpy as np
 import os
 import platform
 
-import torch.autograd
+import torch as th
 import torch.nn as nn
 
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder
@@ -35,6 +35,9 @@ if __name__ == "__main__":
                         help='Path to the pretrained model.')
     parser.add_argument('--detect_autograd_anomaly', action='store_true', help="Enable autograd anomaly detection")
     parser.add_argument('--no_wandb', action='store_true', help="Don't log this run in WandB")
+    parser.add_argument('--no_video', action='store_true',
+                        help="Don't record videos of the agent. NOTE: This requires "
+                             "LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so to be set.")
     # SAC arguments
     parser.add_argument('--ent_coef', type=float, default=0.1, help='Entropy temperature')
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
@@ -66,7 +69,7 @@ if __name__ == "__main__":
                         help='Number of samples to approximate entropy with. ')
 
     args = parser.parse_args()
-    torch.autograd.set_detect_anomaly(args.detect_autograd_anomaly)
+    th.autograd.set_detect_anomaly(args.detect_autograd_anomaly)
 
     if not args.save_interval:
         args.save_interval = args.timesteps
@@ -118,9 +121,10 @@ if __name__ == "__main__":
             # vec_env_cls=SubprocVecEnv,
             # vec_env_kwargs={'start_method': 'fork'},
         )
-        # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
-        env = VecVideoRecorder(env, video_folder=video_path,
-                               record_video_trigger=lambda x: x % args.save_interval == 0, video_length=200)
+        if not args.no_video:
+            # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
+            env = VecVideoRecorder(env, video_folder=video_path,
+                                   record_video_trigger=lambda x: x % args.save_interval == 0, video_length=200)
 
         if args.model_path:
             model = CspnSAC.load(args.model_path, env)
