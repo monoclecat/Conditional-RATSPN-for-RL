@@ -11,16 +11,15 @@ import torch as th
 import torch.nn.functional as F
 from torch import nn
 import numpy as np
+from typing import Any, Callable, Dict, Optional, Type, Union
 
-from stable_baselines3.common.distributions import SquashedDiagGaussianDistribution, StateDependentNoiseDistribution
-from stable_baselines3.common.policies import BasePolicy, ContinuousCritic, register_policy
+from stable_baselines3.common.policies import BasePolicy, register_policy
+from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import (
     BaseFeaturesExtractor,
-    CombinedExtractor,
     FlattenExtractor,
     NatureCNN,
-    create_mlp,
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import Schedule
@@ -61,6 +60,7 @@ class CspnActor(BasePolicy):
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
             vi_aux_resp_grad_mode: int = 0,
             vi_ent_approx_sample_size: int = 5,
+            squash_output: bool = True,
             **kwargs
     ):
         super(CspnActor, self).__init__(
@@ -68,7 +68,7 @@ class CspnActor(BasePolicy):
             action_space,
             features_extractor=features_extractor,
             normalize_images=normalize_images,
-            squash_output=True,
+            squash_output=squash_output,
         )
 
         # Save arguments to re-create object at loading
@@ -92,7 +92,7 @@ class CspnActor(BasePolicy):
         config.S = S
         config.dropout = dropout
         config.leaf_base_class = RatNormal
-        config.tanh_squash = True
+        config.tanh_squash = squash_output
         config.cond_layers_inner_act = cond_layers_inner_act
         # config.leaf_base_kwargs = {'min_mean': 0.0, 'max_mean': 1.0}
         if False:
@@ -168,6 +168,7 @@ class CspnPolicy(SACPolicy):
             observation_space: gym.spaces.Space,
             action_space: gym.spaces.Space,
             lr_schedule: Schedule,
+            cspn_args: dict,
             net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
             critic_activation_fn: Type[nn.Module] = nn.ReLU,
             log_std_init: float = -3,
@@ -178,6 +179,7 @@ class CspnPolicy(SACPolicy):
             optimizer_kwargs: Optional[Dict[str, Any]] = None,
             n_critics: int = 2,
             share_features_extractor: bool = True,
+            squash_output: bool = True,
             **kwargs
     ):
         super(SACPolicy, self).__init__(
@@ -187,7 +189,7 @@ class CspnPolicy(SACPolicy):
             features_extractor_kwargs,
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
-            squash_output=True,
+            squash_output=squash_output,
         )
 
         if net_arch is None:
@@ -209,8 +211,7 @@ class CspnPolicy(SACPolicy):
             "normalize_images": normalize_images,
         }
         self.actor_kwargs = self.net_args.copy()
-        if 'cspn_args' in kwargs.keys():
-            self.actor_kwargs.update(kwargs['cspn_args'])
+        self.actor_kwargs.update(cspn_args)
 
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
@@ -229,6 +230,7 @@ class CspnPolicy(SACPolicy):
 
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CspnActor:
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        actor_kwargs['squash_output'] = self.squash_output
         return CspnActor(**actor_kwargs).to(self.device)
 
 
@@ -241,6 +243,9 @@ class CspnSAC(SAC):
     """
     def __init__(self, **kwargs):
         super(CspnSAC, self).__init__(**kwargs)
+        if self.action_space.bounded_above.all() and ~self.action_space.bounded_above.any() or \
+                not self.action_space.bounded_above.all() and self.action_space.bounded_above.any():
+            raise NotImplementedError("Case not covered yet where only part of the action space is bounded")
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
@@ -347,6 +352,54 @@ class CspnSAC(SAC):
             for layer_id, layer_dict in vi_ent_log.items():
                 for key, val in layer_dict.items():
                     self.logger.record(f"vi_ent_approx/sum_layer{layer_id}/{key}", np.mean(val))
+
+    def _sample_action(
+            self,
+            learning_starts: int,
+            action_noise: Optional[ActionNoise] = None,
+            n_envs: int = 1,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Sample an action according to the exploration policy.
+        This is either done by sampling the probability distribution of the policy,
+        or sampling a random action (from a uniform distribution over the action space)
+        or by adding noise to the deterministic output.
+
+        :param action_noise: Action noise that will be used for exploration
+            Required for deterministic policy (e.g. TD3). This can also be used
+            in addition to the stochastic policy for SAC.
+        :param learning_starts: Number of steps before learning for the warm-up phase.
+        :param n_envs:
+        :return: action to take in the environment
+            and scaled action that will be stored in the replay buffer.
+            The two differs when the action space is not normalized (bounds are not [-1, 1]).
+        """
+        # Select action randomly or according to policy
+        if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
+            # Warmup phase
+            unscaled_action = np.array([self.action_space.sample() for _ in range(n_envs)])
+        else:
+            # Note: when using continuous actions,
+            # we assume that the policy uses tanh to scale the action
+            # We use non-deterministic action in the case of SAC, for TD3, it does not matter
+            unscaled_action, _ = self.predict(self._last_obs, deterministic=False)
+
+        # Rescale the action from [low, high] to [-1, 1]
+        if isinstance(self.action_space, gym.spaces.Box) and self.actor.squash_output:
+            scaled_action = self.policy.scale_action(unscaled_action)
+
+            # Add noise to the action (improve exploration)
+            if action_noise is not None:
+                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
+
+            # We store the scaled action in the buffer
+            buffer_action = scaled_action
+            action = self.policy.unscale_action(scaled_action)
+        else:
+            # Discrete case or action space unbounded, no need to normalize or clip
+            buffer_action = unscaled_action
+            action = buffer_action
+        return action, buffer_action
 
 
 class EntropyLoggingSAC(SAC):
