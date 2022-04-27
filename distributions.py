@@ -78,7 +78,7 @@ class RatNormal(Leaf):
             # This correction term assumes the input to be squashed already
             # correction = th.log(1 - x**2 + 1e-6)
 
-        d = self._get_base_distribution()
+        d = dist.Normal(self.means, self.stds, validate_args=False)
         x = d.log_prob(x)  # Shape: [n, w, d, oc, r]
 
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
@@ -296,9 +296,11 @@ class IndependentMultivariate(Leaf):
     def _get_base_distribution(self):
         raise Exception("IndependentMultivariate does not have an explicit PyTorch base distribution.")
 
-    def sample(self, ctx: SamplingContext = None):
-        raise NotImplementedError("sample() has been split up into sample_index_style() and sample_onehot_style()!"
-                                  "Please choose one.")
+    def sample(self, mode: str = None, ctx: SamplingContext = None):
+        if mode == 'index':
+            return self.sample_index_style(ctx)
+        else:
+            return self.sample_onehot_style(ctx)
 
     def sample_index_style(self, ctx: SamplingContext = None) -> th.Tensor:
         if not ctx.is_root:

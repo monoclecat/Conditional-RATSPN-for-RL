@@ -80,10 +80,7 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
     with th.no_grad():
         if isinstance(model, CSPN):
             label = F.one_hot(label, 10).float().to(device)
-            if style == 'index':
-                samples = model.sample_index_style(n=samples_per_label, condition=label, is_mpe=mpe)
-            else:
-                samples = model.sample_onehot_style(n=samples_per_label, condition=label, is_mpe=mpe)
+            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe)
             if eval_ll:
                 log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
         else:
@@ -93,7 +90,24 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
         if model.config.tanh_squash:
             samples.mul_(0.5).add_(0.5)
         samples = samples.view(-1, *img_size[1:])
+        # plt.imshow(samples[0].cpu(), cmap='Greys')
+        # plt.show()
         plot_samples(samples, save_dir)
+        if False:
+            # To test sampling with evidence
+            if model.config.tanh_squash:
+                samples.sub_(0.5).mul_(2).atanh_()
+            zero = samples[0]
+            zero[0, :10] = 0.0
+            zero[0, 18:] = 0.0
+            zero[zero == 0.0] = th.nan
+            zero = zero.flatten(start_dim=1).expand(10, -1)
+            path_parts = save_dir.split('/')
+            evidence_samples = model.sample(condition=label, mode='index', evidence=zero, n=None, is_mpe=mpe)
+            if model.config.tanh_squash:
+                evidence_samples.mul_(0.5).add_(0.5)
+            evidence_samples = evidence_samples.view(-1, *img_size[1:])
+            plot_samples(evidence_samples, os.path.join('/', *path_parts[:-1], f"{path_parts[-1].split('_')[0]}_slice_evidence_zero.png"))
     result_str = f"{'MPE sample' if mpe else 'Sample'} average log-likelihood: {np.mean(log_like):.2f}"
     print(result_str)
 
@@ -419,7 +433,8 @@ if __name__ == "__main__":
             image = image.to(device)
             if model.config.tanh_squash:
                 image.sub_(0.5).mul_(2).atanh_()
-            # plt.imshow(image[0].permute(1, 2, 0), cmap='Greys)
+            # plt.imshow(image[0].permute(1, 2, 0).cpu(), cmap='Greys')
+            # plt.imshow(sample[0, 0].view(*img_size).permute(1, 2, 0).cpu(), cmap='Greys')
             # plt.show()
 
             # Inference
@@ -462,9 +477,10 @@ if __name__ == "__main__":
                 nll_loss=ll_loss, mse_loss=mse_loss, ent_loss=ent_loss, loss=loss,
                 vi_ent_approx=vi_ent_approx,
             )
-            for lay_nr, lay_dict in batch_ent_log.items():
-                for key, val in lay_dict.items():
-                    logger.add_to_avg_keys(**{f"sum_layer{lay_nr}/{key}": val})
+            if False:
+                for lay_nr, lay_dict in batch_ent_log.items():
+                    for key, val in lay_dict.items():
+                        logger.add_to_avg_keys(**{f"sum_layer{lay_nr}/{key}": val})
 
             if False and batch_index > 0 and batch_index % 1000 == 0:
                 exit()
@@ -496,103 +512,3 @@ if __name__ == "__main__":
         logger['batch'] = None
         logger.write()
         print(logger)
-
-        if args.plot_vi_log:  # epoch level
-            print("Plotting log data from variational inference entropy approximation...")
-            save_dir = os.path.join(results_dir, f"plots_epoch{epoch}")
-            os.makedirs(save_dir)
-            def make_data_struct(source_struct, target_struct):
-                for key, item in source_struct.items():
-                    if isinstance(item, dict):
-                        if key in target_struct.keys():
-                            target_struct[key] = make_data_struct(item, target_struct[key])
-                        else:
-                            target_struct[key] = make_data_struct(item, {})
-                    else:
-                        if key in target_struct.keys():
-                            target_struct[key] = np.concatenate((target_struct[key], np.asarray(item)),
-                                                                axis=None)
-                        else:
-                            target_struct[key] = np.asarray(item)
-                return target_struct
-
-            # for tag, log in {'no_shared_samples': temp_log, 'separate_samples': temp_log_separate_samples}.items():
-            for tag, log in {' ': temp_log}.items():
-                log_struct = {}
-                for i in range(len(log)):
-                    log_struct: dict = make_data_struct(log[i], log_struct)
-
-                for log_key in log_struct[1].keys():
-                    plt.figure()
-                    title_str = f"{log_key} over all sum layers ({len(log_struct.keys())} is root) - {tag}"
-                    plt.title(title_str)
-                    color_counter = 0
-                    for lay_nr, lay_dict in reversed(log_struct.items()):
-                        log_item = lay_dict[log_key]
-                        if isinstance(log_item, dict):
-                            plt.plot(
-                                range(len(log_item['mean'])),
-                                log_item['mean'],
-                                label=f"Sum layer {(lay_nr+1)//2}",
-                                color=f'C{color_counter}',
-                            )
-                            plt.fill_between(
-                                range(len(log_item['mean'])),
-                                log_item['min'],
-                                log_item['max'],
-                                # log_item['mean'] - log_item['std'],
-                                # log_item['mean'] + log_item['std'],
-                                color=f'C{color_counter}',
-                                alpha=0.2,
-                                )
-                        else:
-                            plt.plot(
-                                range(len(log_item)),
-                                log_item,
-                                label=f"Sum layer {(lay_nr+1)//2}",
-                                color=f'C{color_counter}',
-                            )
-                        color_counter += 1
-                    plt.legend()
-                    plt.savefig(os.path.join(save_dir, f"{tag}_{log_key}_over_all_sum_layers.png"))
-
-                color_counter = 0
-                for lay_nr, lay_dict in reversed(log_struct.items()):
-                    for log_key, log_item in lay_dict.items():
-                        if log_key in [
-                            'weight_ent', 'weighted_child_entropies', 'entropy',
-                        ]:
-                            continue
-                        plt.figure()
-                        title_str = f"Sum layer #{(lay_nr+1)//2} of {len(log_struct.keys())} " \
-                                    f"({len(log_struct.keys())} is root) - {tag}"
-                        plt.title(title_str)
-                        if isinstance(log_item, dict):
-                            plt.plot(
-                                range(len(log_item['mean'])),
-                                log_item['mean'],
-                                label=log_key,
-                                color=f'C{color_counter}',
-                            )
-                            plt.fill_between(
-                                range(len(log_item['mean'])),
-                                log_item['min'],
-                                log_item['max'],
-                                # log_item['mean'] - log_item['std'],
-                                # log_item['mean'] + log_item['std'],
-                                color=f'C{color_counter}',
-                                alpha=0.2,
-                                )
-                        else:
-                            plt.plot(
-                                range(len(log_item)),
-                                log_item,
-                                label=log_key,
-                                color=f'C{color_counter}',
-                            )
-                        plt.legend()
-                        plt.savefig(os.path.join(save_dir, f"{tag}_{log_key}_sum_layer_{(lay_nr+1)//2}.png"))
-                    color_counter += 1
-
-
-

@@ -362,23 +362,23 @@ class RatSpn(nn.Module):
                 # ctx = self._sampling_root.sample(context=ctx)
 
             if start_at_layer == 0:
-                if mode == 'index':
-                    # Sample from RatSpn root layer: Results are indices into the
-                    # stacked output channels of all repetitions
-                    # ctx.repetition_indices = th.zeros(n, dtype=int, device=self._device)
-                    ctx = self.root.sample_index_style(ctx=ctx)
-                    # parent_indices and repetition indices both have the same shape in the first three dimensions:
-                    # [nr_nodes, n, w]
-                    # nr_nodes is the number of nodes which are sampled in the current SamplingContext.
-                    # In RatSpn.sample() it will always be 1 as we are sampling the root node.
-                    # In the variational inference entropy approximation, nr_nodes will be different.
-                    # n is the number of samples drawn per node and per weight set.
-                    # w is the number of weight sets i.e. the number of conditionals that are given.
-                    # This applies only to the Cspn, in the RatSpn this will always be 1.
-                else:
-                    # Sample from RatSpn root layer: Results are one-hot vectors of the indices
-                    # into the stacked output channels of all repetitions
-                    ctx = self.root.sample_onehot_style(ctx=ctx)
+                ctx = self.root.sample(ctx=ctx, mode=mode)
+                # mode == 'index'
+                # Sample from RatSpn root layer: Results are indices into the
+                # stacked output channels of all repetitions
+                # ctx.repetition_indices = th.zeros(n, dtype=int, device=self._device)
+                # parent_indices and repetition indices both have the same shape in the first three dimensions:
+                # [nr_nodes, n, w]
+                # nr_nodes is the number of nodes which are sampled in the current SamplingContext.
+                # In RatSpn.sample() it will always be 1 as we are sampling the root node.
+                # In the variational inference entropy approximation, nr_nodes will be different.
+                # n is the number of samples drawn per node and per weight set.
+                # w is the number of weight sets i.e. the number of conditionals that are given.
+                # This applies only to the Cspn, in the RatSpn this will always be 1.
+
+                # mode == 'onehot'
+                # Sample from RatSpn root layer: Results are one-hot vectors of the indices
+                # into the stacked output channels of all repetitions
 
                 # The weights of the root sum node represent the input channel and repetitions in this manner:
                 # The CSPN case is assumed where the weights are different for each batch index condition.
@@ -403,19 +403,13 @@ class RatSpn(nn.Module):
             # Sample inner layers in reverse order (starting from topmost)
             # noinspection PyTypeChecker
             for layer in reversed(self._inner_layers[:(len(self._inner_layers)-start_at_layer+1)]):
-                if mode == 'index':
-                    ctx = layer.sample_index_style(ctx=ctx)
-                else:
-                    ctx = layer.sample_onehot_style(ctx=ctx)
+                ctx = layer.sample(ctx=ctx, mode=mode)
 
             if mode == 'onehot':
                 assert ctx.parent_indices.shape == (nr_nodes, n, w, self._leaf.out_features,
                                                     self._leaf.out_channels, self.config.R)
             # Sample leaf
-            if mode == 'index':
-                samples = self._leaf.sample_index_style(ctx=ctx)
-            else:
-                samples = self._leaf.sample_onehot_style(ctx=ctx)
+            samples = self._leaf.sample(ctx=ctx, mode=mode)
             if self.config.tanh_squash:
                 samples = samples.clamp(-6.0, 6.0).tanh()
 
@@ -439,11 +433,13 @@ class RatSpn(nn.Module):
 
             if evidence is not None:
                 # Update NaN entries in evidence with the sampled values
-                nan_indices = th.isnan(evidence)
+                nan_mask = th.isnan(evidence)
+                nan_mask = nan_mask.unsqueeze(0).expand(n, -1, -1)
 
                 # First make a copy such that the original object is not changed
                 evidence = evidence.clone()
-                evidence[nan_indices] = samples[nan_indices]
+                evidence = evidence.unsqueeze(0).repeat(n, 1, 1)
+                evidence[nan_mask] = samples[nan_mask]
                 return evidence
             else:
                 return samples

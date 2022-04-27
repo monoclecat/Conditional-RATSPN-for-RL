@@ -102,7 +102,7 @@ class Sum(AbstractLayer):
         Sum layer forward pass.
 
         Args:
-            x: Input of shape [batch, weight_sets, in_features, in_channels].
+            x: Input of shape [batch, weight_sets, in_features, in_channels, repetitions].
                 weight_sets: In CSPNs, there are separate weights for each batch element.
 
         Returns:
@@ -110,7 +110,7 @@ class Sum(AbstractLayer):
         """
         # Save input if input cache is enabled
         if self._is_input_cache_enabled:
-            self._input_cache = x.clone()
+            self._input_cache = x.detach().clone()
 
         # Apply dropout: Set random sum node children to 0 (-inf in log domain)
         if self.dropout > 0.0 and self.training:
@@ -141,16 +141,16 @@ class Sum(AbstractLayer):
 
         return x
 
-    def sample(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
-        raise NotImplementedError("sample() has been split up into sample_index_style() and sample_onehot_style()!"
-                                  "Please choose one.")
-
-    def sample_index_style(self, ctx: SamplingContext = None) -> SamplingContext:
+    def sample(self, mode: str = None, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
         """Method to sample from this layer, based on the parents output.
 
         Output is always a vector of indices into the channels.
 
         Args:
+            mode: Two sampling modes are supported:
+                'index': Sampling mechanism with indexes, which are non-differentiable.
+                'onehot': This sampling mechanism work with one-hot vectors, grouped into tensors.
+                          This way of sampling is differentiable, but also takes almost twice as long.
             ctx: Contains
                 repetition_indices (List[int]): An index into the repetition axis for each sample.
                     Can be None if `num_repetitions==1`.
@@ -159,6 +159,7 @@ class Sum(AbstractLayer):
         Returns:
             th.Tensor: Index into tensor which paths should be followed.
         """
+        assert mode is not None, "A sampling mode must be provided!"
 
         # Sum weights are of shape: [N, D, IC, OC, R]
         # We now want to use `indices` to access one in_channel for each in_feature x out_channels block
@@ -174,50 +175,80 @@ class Sum(AbstractLayer):
         if ctx.is_root:
             weights = weights.unsqueeze(0).expand(sample_size, -1, -1, -1, -1, -1)
             # weights from selected repetition with shape [n, w, d, ic, oc, r]
-            # In this sum layer there are oc * r nodes per feature. oc * r is our nr_nodes.
-            weights = weights.permute(5, 4, 0, 1, 2, 3)
-            # weights from selected repetition with shape [r, oc, n, w, d, ic]
-            # Reshape weights to [oc * r, n, w, d, ic]
-            # The nodes in the first dimension are taken from the first two weight dimensions [r, oc] like this:
-            # [0, 0], ..., [0, oc-1], [1, 0], ..., [1, oc-1], [2, 0], ..., [r-1, oc-1]
-            # This means the weights for the first oc nodes are the weights for repetition 0.
-            # This must coincide with the repetition indices.
-            weights = weights.reshape(oc * r, sample_size, w, d, ic)
+            if mode == 'index':
+                # In this sum layer there are oc * r nodes per feature. oc * r is our nr_nodes.
+                weights = weights.permute(5, 4, 0, 1, 2, 3)
+                # weights from selected repetition with shape [r, oc, n, w, d, ic]
+                # Reshape weights to [oc * r, n, w, d, ic]
+                # The nodes in the first dimension are taken from the first two weight dimensions [r, oc] like this:
+                # [0, 0], ..., [0, oc-1], [1, 0], ..., [1, oc-1], [2, 0], ..., [r-1, oc-1]
+                # This means the weights for the first oc nodes are the weights for repetition 0.
+                # This must coincide with the repetition indices.
+                weights = weights.reshape(oc * r, sample_size, w, d, ic)
 
-            ctx.repetition_indices = th.arange(r).to(self.__device).repeat_interleave(oc)
-            ctx.repetition_indices = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).repeat(
-                1, ctx.n, w
-            )
+                ctx.repetition_indices = th.arange(r).to(self.__device).repeat_interleave(oc)
+                ctx.repetition_indices = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).repeat(
+                    1, ctx.n, w
+                )
+            else:  # mode == 'onehot'
+                weights = weights.permute(4, 0, 1, 2, 3, 5)
+                # oc is our nr_nodes: [nr_nodes, n, w, d, ic, r]
 
         else:
-            # If this is not the root node, use the paths (out channels), specified by the parent layer
-            if ctx.repetition_indices is not None:
-                self._check_repetition_indices(ctx)
+            if mode == 'index':
+                # If this is not the root node, use the paths (out channels), specified by the parent layer
+                if ctx.repetition_indices is not None:
+                    self._check_repetition_indices(ctx)
 
-            weights = weights.expand(ctx.parent_indices.shape[0], sample_size, -1, -1, -1, -1, -1)
-            parent_indices = ctx.parent_indices.unsqueeze(4).unsqueeze(4)
-            if ctx.repetition_indices is not None:
-                rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                rep_ind = rep_ind.expand(-1, -1, -1, d, ic, oc, -1)
-                weights = th.gather(weights, dim=-1, index=rep_ind).squeeze(-1)
-                # weights from selected repetition with shape [nr_nodes, n, w, d, ic, oc]
-                parent_indices = parent_indices.expand(-1, -1, -1, -1, ic, -1)
-            else:
-                parent_indices = parent_indices.expand(-1, -1, -1, -1, ic, -1, -1)
-            weights = th.gather(weights, dim=5, index=parent_indices).squeeze(5)
-            # weights from selected parent with shape [nr_nodes, n, w, d, ic]
+                weights = weights.expand(ctx.parent_indices.shape[0], sample_size, -1, -1, -1, -1, -1)
+                parent_indices = ctx.parent_indices.unsqueeze(4).unsqueeze(4)
+                if ctx.repetition_indices is not None:
+                    rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                    rep_ind = rep_ind.expand(-1, -1, -1, d, ic, oc, -1)
+                    weights = th.gather(weights, dim=-1, index=rep_ind).squeeze(-1)
+                    # weights from selected repetition with shape [nr_nodes, n, w, d, ic, oc]
+                    parent_indices = parent_indices.expand(-1, -1, -1, -1, ic, -1)
+                else:
+                    parent_indices = parent_indices.expand(-1, -1, -1, -1, ic, -1, -1)
+                weights = th.gather(weights, dim=5, index=parent_indices).squeeze(5)
+                # weights from selected parent with shape [nr_nodes, n, w, d, ic]
+            else:  # mode == 'onehot'
+                assert ctx.parent_indices.detach().sum(4).max().item() == 1.0
+                weights = weights * ctx.parent_indices.unsqueeze(4)
+                # [nr_nodes, n, w, d, ic, oc, r]
+                weights = weights.sum(5)  # Sum out output_channel dimension
+                if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
+                    # Only one repetition is selected, remove repetition dim of weights
+                    weights = weights.sum(-1)
 
         # If evidence is given, adjust the weights with the likelihoods of the observed paths
         if self._is_input_cache_enabled and self._input_cache is not None:
-            raise NotImplementedError("Not yet adapted to new sampling method")
-            for i in range(w):
-                # Reweight the i-th samples weights by its likelihood values at the correct repetition
-                weights[i, :, :] += self._input_cache[i, :, :, ctx.repetition_indices[i]]
+            if mode == 'index':
+                rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                rep_ind = rep_ind.expand(-1, -1, -1, d, ic, -1)
+                inp_cache = self._input_cache.unsqueeze(0)
+                inp_cache = inp_cache.expand(rep_ind.size(0), sample_size, -1, -1, -1, -1)
+                # Both are now [nr_nodes, sample_size=n, w, d, ic, r]
+                weight_offsets = th.gather(inp_cache, dim=-1, index=rep_ind).squeeze(-1)
+                weights = weights + weight_offsets
+                # for i in range(w):
+                    # Reweigh the i-th samples weights by its likelihood values at the correct repetition
+                    # weights[i, :, :] += self._input_cache[i, :, :, ctx.repetition_indices[i]]
+            else:  # mode == 'onehot'
+                raise NotImplementedError("evidence-based sampling isn't implemented yet for the onehot case")
 
         # If sampling context is MPE, set max weight to 1 and rest to zero, such that the maximum index will be sampled
         if ctx.is_mpe:
-            # Get index of largest weight along in-channel dimension
-            indices = weights.argmax(dim=4)
+            if mode == 'index':
+                # Get index of largest weight along in-channel dimension
+                indices = weights.argmax(dim=4)
+            else:  # mode == 'onehot'
+                # Get index of largest weight along in-channel dimension
+                indices = weights.argmax(dim=4)
+                one_hot = F.one_hot(indices, num_classes=ic)
+                if one_hot.dim() == 6:
+                    # F.one_hot() expands the last dim, which is the ic dim. It must come before the repetition dim.
+                    one_hot = one_hot.permute(0, 1, 2, 3, 5, 4)
         else:
             # Create categorical distribution and use weights as logits.
             #
@@ -230,94 +261,34 @@ class Sum(AbstractLayer):
             # >> dist = th.distributions.Categorical(logits=weights)
             # >> indices = dist.sample()
 
-            one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=4)
-            cats = th.arange(ic, device=weights.device)
-            if weights.dim() == 6:
-                cats = cats.unsqueeze_(-1).expand(-1, r)
-            indices = (one_hot * cats).sum(4).long()
+            if mode == 'index':
+                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=4)
+                cats = th.arange(ic, device=weights.device)
+                if weights.dim() == 6:
+                    cats = cats.unsqueeze_(-1).expand(-1, r)
+                indices = (one_hot * cats).sum(4).long()
+            else:  # mode == 'onehot'
+                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=4)
 
-        # Update parent indices
-        ctx.parent_indices = indices
+        if mode == 'index':
+            # Update parent indices
+            ctx.parent_indices = indices
+        else:  # mode == 'onehot'
+            if one_hot.dim() == 5:
+                # Weights didn't have repetition dim, so re-instantiate it again.
+                one_hot = ctx.parent_indices.detach().sum(4).unsqueeze(4) * one_hot.unsqueeze(-1)
+            assert one_hot.detach().sum(4).max().item() == 1.0
+
+            # Update one-hot vectors to select the input channels of this layer.
+            ctx.parent_indices = one_hot
 
         return ctx
+
+    def sample_index_style(self, ctx: SamplingContext = None) -> SamplingContext:
+        return self.sample(mode='index', ctx=ctx)
 
     def sample_onehot_style(self, ctx: SamplingContext = None) -> SamplingContext:
-        """Method to sample from this layer, based on the parents output.
-
-        Output is always a one-hot vector of indices into the channels.
-
-        Args:
-            ctx: Contains
-                repetition_indices (List[int]): An index into the repetition axis for each sample.
-                    Can be None if `num_repetitions==1`.
-                parent_indices (th.Tensor): Parent sampling output.
-                n: Number of samples to draw for each set of weights.
-        Returns:
-            th.Tensor: Index into tensor which paths should be followed.
-        """
-
-        # Sum weights are of shape: [N, D, IC, OC, R]
-        # We now want to use the "hot" indices to access one in_channel for each in_feature x out_channels block
-        weights: th.Tensor = self.weights
-        if weights.dim() == 4:
-            weights = weights.unsqueeze(0)
-        # w is the number of weight sets
-        w, d, ic, oc, r = weights.shape
-        sample_size = ctx.n
-
-        # Create sampling context if this is a root layer
-        if ctx.is_root:
-            weights = weights.unsqueeze(0).expand(sample_size, -1, -1, -1, -1, -1)
-            # Shape [n, w, d, ic, oc, r]
-            weights = weights.permute(4, 0, 1, 2, 3, 5)
-            # oc is our nr_nodes: [nr_nodes, n, w, d, ic, r]
-        else:
-            assert ctx.parent_indices.detach().sum(4).max().item() == 1.0
-            weights = weights * ctx.parent_indices.unsqueeze(4)
-            # [nr_nodes, n, w, d, ic, oc, r]
-            weights = weights.sum(5)  # Sum out output_channel dimension
-            if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
-                # Only one repetition is selected, remove repetition dim of weights
-                weights = weights.sum(-1)
-
-        # If evidence is given, adjust the weights with the likelihoods of the observed paths
-        if self._is_input_cache_enabled and self._input_cache is not None:
-            raise NotImplementedError("Not yet adapted to new sampling method")
-            for i in range(w):
-                # Reweight the i-th samples weights by its likelihood values at the correct repetition
-                weights[i, :, :] += self._input_cache[i, :, :, ctx.repetition_indices[i]]
-
-        # If sampling context is MPE, set max weight to 1 and rest to zero, such that the maximum index will be sampled
-        if ctx.is_mpe:
-            # Get index of largest weight along in-channel dimension
-            indices = weights.argmax(dim=4)
-            one_hot = F.one_hot(indices, num_classes=ic)
-            if one_hot.dim() == 6:
-                # F.one_hot() expands the last dim, which is the ic dim. It must come before the repetition dim.
-                one_hot = one_hot.permute(0, 1, 2, 3, 5, 4)
-        else:
-            # Create categorical distribution and use weights as logits.
-            #
-            # Use the Gumble-Softmax trick to obtain one-hot indices of the categorical distribution
-            # represented by the given logits. (Use Gumble-Softmax instead of Categorical
-            # to allow for gradients).
-            #
-            # The code below is an approximation of:
-            #
-            # >> dist = th.distributions.Categorical(logits=weights)
-            # >> indices = dist.sample()
-
-            one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=4)
-
-        if one_hot.dim() == 5:
-            # Weights didn't have repetition dim, so re-instantiate it again.
-            one_hot = ctx.parent_indices.detach().sum(4).unsqueeze(4) * one_hot.unsqueeze(-1)
-        assert one_hot.detach().sum(4).max().item() == 1.0
-
-        # Update one-hot vectors to select the input channels of this layer.
-        ctx.parent_indices = one_hot
-
-        return ctx
+        return self.sample(mode='onehot', ctx=ctx)
 
     def depr_forward_grad(self, child_grads):
         weights = self.consolidated_weights.unsqueeze(2)
@@ -588,11 +559,7 @@ class CrossProduct(AbstractLayer):
         assert result.size() == (n, w, d_out, c * c, r)
         return result
 
-    def sample(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
-        raise NotImplementedError("sample() has been split up into sample_index_style() and sample_onehot_style()!"
-                                  "Please choose one.")
-
-    def sample_index_style(self, ctx: SamplingContext = None) -> SamplingContext:
+    def sample(self, mode: str = None, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
         """Method to sample from this layer, based on the parents output.
 
         Args:
@@ -604,6 +571,7 @@ class CrossProduct(AbstractLayer):
             th.Tensor: Index into tensor which paths should be followed.
                           Output should be of size: in_features, out_channels.
         """
+        assert mode is not None, "A sampling mode must be provided!"
 
         # If this is a root node
         if ctx.is_root:
@@ -615,24 +583,43 @@ class CrossProduct(AbstractLayer):
             # The parent and repetition indices are also repeated by the number of samples requested
             # and by the number of conditionals the CSPN weights have been set to.
             # In the RatSpn case, the number of conditionals (abbreviated by w) is 1.
-            indices = self.unraveled_channel_indices.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
-            # indices is [nr_nodes=oc, 1, 1, cardinality, 1]
-            indices = indices.repeat(
-                1, ctx.n, self.num_conditionals, self.in_features//self.cardinality, self.num_repetitions
-            )
-            # indices is [nr_nodes=oc, n, w, in_features, r]
+            if mode == 'index':
+                indices = self.unraveled_channel_indices.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
+                # indices is [nr_nodes=oc, 1, 1, cardinality, 1]
+                indices = indices.repeat(
+                    1, ctx.n, self.num_conditionals, self.in_features//self.cardinality, self.num_repetitions
+                )
+                # indices is [nr_nodes=oc, n, w, in_features, r]
+            else:  # mode == 'onehot'
+                indices = self.one_hot_in_channel_mapping.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
+                # indices is [nr_nodes=oc, 1, 1, cardinality, 1]
+                indices = indices.repeat(
+                    1, ctx.n, self.num_conditionals, self.in_features // self.cardinality, 1, self.num_repetitions
+                )
+                # indices is [nr_nodes=oc, n, w, in_features, r]
+
             oc, _ = self.unraveled_channel_indices.shape
 
             # repetition indices are left empty because they are implicitly given in parent_indices
         else:
-            nr_nodes, n, w, d = ctx.parent_indices.shape[:4]
-            # Map flattened indexes back to coordinates to obtain the chosen input_channel for each feature
-            indices = self.unraveled_channel_indices[ctx.parent_indices]
-            if ctx.parent_indices.dim() == 5:
-                r = ctx.parent_indices.size(4)
-                indices = indices.permute(0, 1, 2, 3, 5, 4).reshape(nr_nodes, n, w, d * self.cardinality, r)
-            else:
-                indices = indices.view(nr_nodes, n, w, -1)
+            if mode == 'index':
+                nr_nodes, n, w, d = ctx.parent_indices.shape[:4]
+                # Map flattened indexes back to coordinates to obtain the chosen input_channel for each feature
+                indices = self.unraveled_channel_indices[ctx.parent_indices]
+                if ctx.parent_indices.dim() == 5:
+                    r = ctx.parent_indices.size(4)
+                    indices = indices.permute(0, 1, 2, 3, 5, 4).reshape(nr_nodes, n, w, d * self.cardinality, r)
+                else:
+                    indices = indices.view(nr_nodes, n, w, -1)
+            else:  # mode == 'onehot'
+                nr_nodes, n, w, d, oc, r = ctx.parent_indices.shape
+                indices = ctx.parent_indices.permute(0, 1, 2, 3, 5, 4).unsqueeze(-1).unsqueeze(-1)
+                indices = indices * self.one_hot_in_channel_mapping
+                # Shape [nr_nodes, n, w, d, r, oc, 2, ic]
+                indices = indices.sum(dim=5)
+                # Shape [nr_nodes, n, w, d, r, 2, ic]
+                indices = indices.permute(0, 1, 2, 3, 5, 6, 4)  # [nr_nodes, n, w, d, 2, ic, r]
+                indices = indices.reshape(nr_nodes, n, w, d * self.cardinality, self.in_channels, r)
 
         # Remove padding
         if self._pad:
@@ -640,52 +627,12 @@ class CrossProduct(AbstractLayer):
 
         ctx.parent_indices = indices
         return ctx
+
+    def sample_index_style(self, ctx: SamplingContext = None) -> SamplingContext:
+        return self.sample(mode='index', ctx=ctx)
 
     def sample_onehot_style(self, ctx: SamplingContext = None) -> SamplingContext:
-        """Method to sample from this layer, based on the parents output.
-
-        Args:
-            ctx (SamplingContext):
-                n: Number of samples.
-                parent_indices (th.Tensor): Nodes selected by parent layer
-                repetition_indices (th.Tensor): Repetitions selected by parent layer
-        Returns:
-            th.Tensor: Index into tensor which paths should be followed.
-                          Output should be of size: in_features, out_channels.
-        """
-
-        # If this is a root node
-        if ctx.is_root:
-            # Sampling starting at a CrossProduct layer means sampling each node in the layer.
-
-            # There are oc * r * out_features nodes in this layer.
-            # We sample across all repetitions at the same time, so the parent_indices tensor has a repetition dim.
-
-            # The parent and repetition indices are also repeated by the number of samples requested
-            # and by the number of conditionals the CSPN weights have been set to.
-            # In the RatSpn case, the number of conditionals (abbreviated by w) is 1.
-            indices = self.one_hot_in_channel_mapping.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
-            # indices is [nr_nodes=oc, 1, 1, cardinality, 1]
-            indices = indices.repeat(
-                1, ctx.n, self.num_conditionals, self.in_features//self.cardinality, 1, self.num_repetitions
-            )
-            # indices is [nr_nodes=oc, n, w, in_features, r]
-        else:
-            nr_nodes, n, w, d, oc, r = ctx.parent_indices.shape
-            indices = ctx.parent_indices.permute(0, 1, 2, 3, 5, 4).unsqueeze(-1).unsqueeze(-1)
-            indices = indices * self.one_hot_in_channel_mapping
-            # Shape [nr_nodes, n, w, d, r, oc, 2, ic]
-            indices = indices.sum(dim=5)
-            # Shape [nr_nodes, n, w, d, r, 2, ic]
-            indices = indices.permute(0, 1, 2, 3, 5, 6, 4)  # [nr_nodes, n, w, d, 2, ic, r]
-            indices = indices.reshape(nr_nodes, n, w, d * self.cardinality, self.in_channels, r)
-
-        # Remove padding
-        if self._pad:
-            indices = indices[:, :, :, : -self._pad]
-
-        ctx.parent_indices = indices
-        return ctx
+        return self.sample(mode='onehot', ctx=ctx)
 
     def consolidate_weights(self, parent_weights):
         """
