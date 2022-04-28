@@ -19,13 +19,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
-    parser.add_argument('--mlp', action='store_true', help='Use a MLP actor')
+    parser.add_argument('--mlp_actor', action='store_true', help='Use a MLP actor')
+    parser.add_argument('--cspn_critic', action='store_true', help='Use a CSPN critic')
     parser.add_argument('--num_envs', type=int, default=1, help='Number of parallel environments to run.')
     parser.add_argument('--timesteps', type=int, default=int(1e6), help='Total timesteps to train model.')
     parser.add_argument('--save_interval', type=int, help='Save model and a video every save_interval timesteps.')
     parser.add_argument('--log_interval', type=int, default=4, help='Log interval')
     parser.add_argument('--env_name', '-env', type=str, required=True, help='Gym environment to train on.')
-    parser.add_argument('--device', type=str, default='cuda', help='Device to run on. cpu or cuda.')
+    parser.add_argument('--device', '-dev', type=str, default='cuda', help='Device to run on. cpu or cuda.')
     parser.add_argument('--proj_name', '-proj', type=str, default='test_proj', help='Project name for WandB')
     parser.add_argument('--run_name', '-name', type=str, default='test_run',
                         help='Name of this run for WandB. The seed will be automatically appended. ')
@@ -168,7 +169,7 @@ if __name__ == "__main__":
                 'device': args.device,
                 'learning_rate': args.learning_rate,
             }
-            if args.mlp:
+            if args.mlp_actor:
                 model = EntropyLoggingSAC("MlpPolicy", **sac_kwargs)
             else:
                 cspn_args = {
@@ -185,10 +186,11 @@ if __name__ == "__main__":
                     'vi_ent_approx_sample_size': args.vi_ent_sample_size,
                 }
                 sac_kwargs['policy_kwargs'] = {
-                    'cspn_args': cspn_args,
+                    'actor_cspn_args': cspn_args,
+                    'critic_cspn_args': cspn_args if args.cspn_critic else None,
                 }
                 model = CspnSAC(policy="CspnPolicy", **sac_kwargs)
-            # model_name = f"sac_{'mlp' if args.mlp else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
+            # model_name = f"sac_{'mlp' if args.mlp_actor else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
 
         if not args.no_wandb:
             run.config.update({
