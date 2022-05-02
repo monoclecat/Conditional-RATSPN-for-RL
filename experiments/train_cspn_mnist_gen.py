@@ -80,7 +80,7 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
     with th.no_grad():
         if isinstance(model, CSPN):
             label = F.one_hot(label, 10).float().to(device)
-            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe)
+            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).squeeze(0)
             if eval_ll:
                 log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
         else:
@@ -93,6 +93,55 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
         # plt.imshow(samples[0].cpu(), cmap='Greys')
         # plt.show()
         plot_samples(samples, save_dir)
+        if not mpe:
+            # To test sampling with evidence
+            path_parts = save_dir.split('/')
+            base_path = os.path.join('/', *path_parts[:-1], path_parts[-1].split('.')[0])
+            for layer_nr in range(model.config.D * 2):
+                layer_nr_dir = os.path.join(base_path, f"layer{layer_nr}")
+                os.makedirs(layer_nr_dir, exist_ok=True)
+                samples = model.sample(mode='onehot', n=10, start_at_layer=layer_nr, split_by_scope=True)
+                if layer_nr == 0:
+                    samples.unsqueeze_(-1)
+                # samples [nr_nodes, scopes, n, w, f, r]
+                samples = samples.permute(5, 0, 1, 2, 3, 4)
+                # samples [r, nr_nodes, scopes, n, w, f]
+                if samples.isnan().any():
+                    evidence_samples = samples.reshape(np.prod(samples.shape[:4]), *samples.shape[4:])
+                    if model.config.tanh_squash:
+                        evidence_samples = evidence_samples.atanh()
+                    evidence_samples = model.sample(
+                        condition=label, mode='index', evidence=evidence_samples,
+                        n=None, is_mpe=mpe,
+                    )
+                    if model.config.tanh_squash:
+                        evidence_samples.mul_(0.5).add_(0.5)
+                    evidence_samples = evidence_samples.view(*samples.shape)
+                    evidence_samples[~samples.isnan()] = 0.0
+                else:
+                    evidence_samples = th.zeros_like(samples)
+                if model.config.tanh_squash:
+                    samples.mul_(0.5).add_(0.5)
+                samples[samples.isnan()] = 0.0
+                samples = samples.view(*samples.shape[:5], 28, 28, 1)
+                evidence_samples = evidence_samples.view(*evidence_samples.shape[:5], 28, 28, 1)
+                tmp = th.cat([th.zeros_like(samples), samples, evidence_samples], dim=-1).cpu()
+                for rep in range(tmp.shape[0]):
+                    rep_dir = os.path.join(layer_nr_dir, f"rep{rep}")
+                    os.makedirs(rep_dir, exist_ok=True)
+                    for node in range(tmp.shape[1]):
+                        node_dir = os.path.join(rep_dir, f"node{node}")
+                        os.makedirs(node_dir, exist_ok=True)
+                        for scope in range(tmp.shape[2]):
+                            feat_dir = os.path.join(node_dir, f"layer{layer_nr}_rep{rep}_node{node}_scope{scope}.png")
+                            n = tmp.size(3)
+                            w = tmp.size(4)
+                            tmp_to_save = tmp[rep, node, scope].view(n*w, 28, 28, 3).permute(0, 3, 1, 2)
+
+                            arr = torchvision.utils.make_grid(tmp_to_save, nrow=10, padding=1).cpu()
+                            arr = skimage.img_as_ubyte(arr.permute(1, 2, 0).numpy())
+                            imageio.imwrite(feat_dir, arr)
+
         if False:
             # To test sampling with evidence
             if model.config.tanh_squash:
@@ -273,7 +322,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', '-dev', type=str, default='cpu', choices=['cpu', 'cuda'])
+    parser.add_argument('--device', '-dev', type=str, default='cuda', choices=['cpu', 'cuda'])
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', '-ep', type=int, default=100)
     parser.add_argument('--learning_rate', '-lr', type=float, default=1e-3, help='Learning rate')
@@ -285,7 +334,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str,
                         help='Path to the pretrained model. If it is given, '
                              'all other SPN config parameters are ignored.')
-    parser.add_argument('--exp_name', type=str, default='cspn_test',
+    parser.add_argument('--exp_name', '-name', type=str, default='cspn_test',
                         help='Experiment name. The results dir will contain it.')
     parser.add_argument('--repetitions', '-R', type=int, default=5, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int, default=3, help='Depth of the CSPN.')
@@ -302,14 +351,8 @@ if __name__ == "__main__":
     parser.add_argument('--eval_interval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')
     parser.add_argument('--ratspn', action='store_true', help='Use a RATSPN and not a CSPN')
-    parser.add_argument('--ent_approx_separate_samples', action='store_true',
-                        help='When approximating the entropy, don\'t share child samples for each sum in a layer.')
-    parser.add_argument('--ent_approx__leaf_ent_closed_form', action='store_true',
-                        help='Approximate the leaf entropies in closed form instead of approximating it.')
     parser.add_argument('--ent_approx__sample_size', type=int, default=5,
                         help='When approximating entropy, use this sample size. ')
-    parser.add_argument('--ent_approx_sample_with_grad', action='store_true',
-                        help='When approximating the entropy, sample children in a differentiable way.')
     parser.add_argument('--ent_loss_coef', type=float, default=0.0,
                         help='Factor for entropy loss. Default 0.0. '
                              'If 0.0, no gradients are calculated w.r.t. the entropy.')
@@ -321,9 +364,6 @@ if __name__ == "__main__":
     parser.add_argument('--no_tanh', action='store_true', help='Don\'t apply tanh squashing to leaves.')
     parser.add_argument('--sigmoid_std', action='store_true', help='Use sigmoid to set std.')
     parser.add_argument('--no_correction_term', action='store_true', help='Don\'t apply tanh correction term to logprob')
-    parser.add_argument('--plot_vi_log', action='store_true',
-                        help='Collect information from variational inference entropy '
-                             'approx. and plot it at the end of the epoch.')
     args = parser.parse_args()
 
     if args.model_path:
@@ -425,8 +465,6 @@ if __name__ == "__main__":
             lmbda = 0.5
         t_start = time.time()
         logger.reset(epoch)
-        temp_log = []
-        temp_log_separate_samples = []
         for batch_index, (image, label) in enumerate(train_loader):
             # Send data to correct device
             label = label.to(device)
@@ -440,7 +478,9 @@ if __name__ == "__main__":
             # Inference
             optimizer.zero_grad()
             data = image.reshape(image.shape[0], -1)
-            mse_loss = ll_loss = ent_loss = vi_ent_approx_separate_samples = vi_ent_approx = th.zeros(1).to(device)
+            mse_loss = ll_loss = ent_loss = vi_ent_approx = th.zeros(1).to(device)
+            def bookmark():
+                pass
             if args.ratspn:
                 output: th.Tensor = model(x=data)
                 loss_ce = F.cross_entropy(output.squeeze(1), label)
@@ -457,18 +497,13 @@ if __name__ == "__main__":
                 else:
                     output: th.Tensor = model(x=data, condition=label)
                     ll_loss = -output.mean()
-                vi_ent_approx, batch_ent_log = model.vi_entropy_approx(
-                    sample_size=args.ent_approx__sample_size, condition=label, verbose=True,
-                    aux_resp_ll_with_grad=True, aux_resp_sample_with_grad=True,
-                )
-                vi_ent_approx = vi_ent_approx.mean()
-                # vi_ent_approx_separate_samples = vi_ent_approx_separate_samples.mean()
-                if args.plot_vi_log:
-                    temp_log.append(batch_ent_log)
-                # temp_log_separate_samples.append(batch_ent_log_separate_samples)
-                # sample = model.sample(n=3, condition=None)
-                if args.ent_loss_coef > 0.0:
-                    ent_loss = -args.ent_loss_coef * vi_ent_approx
+                    vi_ent_approx, batch_ent_log = model.vi_entropy_approx(
+                        sample_size=args.ent_approx__sample_size, condition=label, verbose=True,
+                        aux_resp_ll_with_grad=True, aux_resp_sample_with_grad=True,
+                    )
+                    vi_ent_approx = vi_ent_approx.mean()
+                    if args.ent_loss_coef > 0.0:
+                        ent_loss = -args.ent_loss_coef * vi_ent_approx
                 loss = mse_loss + ll_loss + ent_loss
 
             loss.backward()
@@ -482,11 +517,6 @@ if __name__ == "__main__":
                     for key, val in lay_dict.items():
                         logger.add_to_avg_keys(**{f"sum_layer{lay_nr}/{key}": val})
 
-            if False and batch_index > 0 and batch_index % 1000 == 0:
-                exit()
-                logger['time'] = time.time() - t_start
-                logger['batch'] = batch_index
-                print(logger)
             # Log stuff
             if args.verbose:
                 logger['time'] = time.time()-t_start
