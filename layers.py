@@ -592,7 +592,7 @@ class CrossProduct(AbstractLayer):
                 # indices is [nr_nodes=oc, n, w, in_features, r]
             else:  # mode == 'onehot'
                 indices = self.one_hot_in_channel_mapping.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
-                # indices is [nr_nodes=oc, 1, 1, cardinality, 1]
+                # indices is [nr_nodes=oc, 1, 1, cardinality, in_channels, 1]
                 indices = indices.repeat(
                     1, ctx.n, self.num_conditionals, self.in_features // self.cardinality, 1, self.num_repetitions
                 )

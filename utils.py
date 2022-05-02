@@ -48,6 +48,10 @@ class SamplingContext:
     # Number of samples
     n: int = None
 
+    # Number of scopes of the layer we are starting sampling at. This is only needed if the scopes of each
+    # sampled nodes should be made explicit in the Spn's full scope.
+    scopes: int = None
+
     # Indices into the out_channels dimension
     parent_indices: th.Tensor = None
 
