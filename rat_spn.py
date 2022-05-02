@@ -122,6 +122,14 @@ class RatSpn(nn.Module):
         # Obtain permutation indices
         self._make_random_repetition_permutation_indices()
 
+    @property
+    def max_layer_index(self):
+        return len(self._inner_layers) + 1
+
+    @property
+    def num_layers(self):
+        return self.max_layer_index + 1
+
     def _make_random_repetition_permutation_indices(self):
         """Create random permutation indices for each repetition."""
         permutation = []
@@ -313,7 +321,7 @@ class RatSpn(nn.Module):
         return self.sample(evidence=evidence, is_mpe=True)
 
     def sample(self, mode: str = None, n=1, class_index=None, evidence: th.Tensor = None, is_mpe: bool = False,
-               start_at_layer: int = 0, split_by_scope: bool = False):
+               start_at_layer: int = None, split_by_scope: bool = False):
         """
         Sample from the distribution represented by this SPN.
 
@@ -331,7 +339,8 @@ class RatSpn(nn.Module):
                 distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
                 sampled values.
             is_mpe: Flag to perform max sampling (MPE).
-            start_at_layer: Layer to start sampling from. 0 = Root layer, 1 = Child layer of root layer, ...
+            start_at_layer: Layer to start sampling from. None or self.max_layer_index = Root layer,
+                self.num_layers-1 = Child layer of root layer, ...
             split_by_scope: In an inner layer, a node's sample doesn't
                 cover the entire feature set f, but rather a scope of it. split_by_scope allows makes the
                 scope of a single node's samples visible in the entire Spn's scope, as features in f not
@@ -360,7 +369,10 @@ class RatSpn(nn.Module):
         assert class_index is None or evidence is None, "Cannot provide both, evidence and class indices."
         assert n is None or evidence is None, "Cannot provide both, number of samples to generate (n) and evidence."
 
-        has_rep_dim = start_at_layer > 0
+        if start_at_layer is None:
+            start_at_layer = self.max_layer_index
+        has_rep_dim = start_at_layer < self.max_layer_index
+        layer_index = start_at_layer
 
         # Check if evidence contains nans
         if evidence is not None:
@@ -383,21 +395,16 @@ class RatSpn(nn.Module):
                 ctx = SamplingContext(n=n, is_mpe=is_mpe)
                 # ctx = self._sampling_root.sample(context=ctx)
 
-            if start_at_layer == 0:
+            if layer_index == self.max_layer_index:
+                layer_index -= 1
                 ctx.scopes = 1
                 ctx = self.root.sample(ctx=ctx, mode=mode)
+                # ctx.parent_indices [nr_nodes=self.config.C, n, w, d, r=1], squeeze out rep dim
+                ctx.parent_indices = ctx.parent_indices.squeeze(-1)
+
                 # mode == 'index'
                 # Sample from RatSpn root layer: Results are indices into the
                 # stacked output channels of all repetitions
-                # ctx.repetition_indices = th.zeros(n, dtype=int, device=self._device)
-                # parent_indices and repetition indices both have the same shape in the first three dimensions:
-                # [nr_nodes, n, w]
-                # nr_nodes is the number of nodes which are sampled in the current SamplingContext.
-                # In RatSpn.sample() it will always be 1 as we are sampling the root node.
-                # In the variational inference entropy approximation, nr_nodes will be different.
-                # n is the number of samples drawn per node and per weight set.
-                # w is the number of weight sets i.e. the number of conditionals that are given.
-                # This applies only to the Cspn, in the RatSpn this will always be 1.
 
                 # mode == 'onehot'
                 # Sample from RatSpn root layer: Results are one-hot vectors of the indices
@@ -414,8 +421,8 @@ class RatSpn(nn.Module):
                 if mode == 'index':
                     # To match the index to the correct repetition and its input channel, we do the following
                     ctx.repetition_indices = (ctx.parent_indices % self.config.R).squeeze(3)
+                    # [nr_nodes, n, w, 1]
                     ctx.parent_indices = th.div(ctx.parent_indices, self.config.R, rounding_mode='trunc')
-                    start_at_layer += 1  # otherwise list index would be out of bounds
                 else:
                     assert ctx.parent_indices.shape == (1, ctx.n, self.root.weights.size(0),
                                                         1, self.root.weights.size(2), 1)
@@ -425,7 +432,7 @@ class RatSpn(nn.Module):
             # Continue at layers
             # Sample inner layers in reverse order (starting from topmost)
             # noinspection PyTypeChecker
-            for layer in reversed(self._inner_layers[:(len(self._inner_layers)-start_at_layer+1)]):
+            for layer in reversed(self._inner_layers[:layer_index]):
                 if ctx.scopes is None:
                     if isinstance(layer, Sum):
                         ctx.scopes = layer.in_features
@@ -453,24 +460,19 @@ class RatSpn(nn.Module):
             if mode == 'index':
                 if ctx.repetition_indices is not None:
                     rep_sel_inv_perm = self.inv_permutation.T[ctx.repetition_indices]
-                    samples = th.gather(samples, dim=-1, index=rep_sel_inv_perm)
                 else:
                     rep_sel_inv_perm = self.inv_permutation.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-                    nr_nodes, n, w, f, r = samples.shape
-                    rep_sel_inv_perm = rep_sel_inv_perm.expand(nr_nodes, n, w, -1, -1)
-                    samples = th.gather(samples, dim=-2, index=rep_sel_inv_perm)
+                    # The squeeze(1) is only for the case that split_by_scope is True and ctx.scopes == 1
+                    # rep_sel_inv_perm = rep_sel_inv_perm.expand(*samples.shape[:-2], -1, -1).squeeze(1)
             else:
                 rep_sel_inv_perm = self.inv_permutation * ctx.parent_indices.detach().sum(-2).long()
                 if not has_rep_dim:
                     rep_sel_inv_perm = rep_sel_inv_perm.sum(-1)
-                if split_by_scope:
-                    rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1)
-                    rep_sel_inv_perm = rep_sel_inv_perm.expand(-1, ctx.scopes, *rep_sel_inv_perm.shape[2:])
-                    # if samples.dim() == 5:
-                        # rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1).expand(-1, ctx.scopes, -1, -1, -1)
-                    # else:
-                        # rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1).expand(-1, ctx.scopes, -1, -1, -1, -1)
-                samples = th.gather(samples, dim=-2 if has_rep_dim else -1, index=rep_sel_inv_perm)
+
+            if split_by_scope:
+                rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1)
+            rep_sel_inv_perm = rep_sel_inv_perm.expand_as(samples)
+            samples = th.gather(samples, dim=-2 if has_rep_dim else -1, index=rep_sel_inv_perm)
 
             if self.config.tanh_squash:
                 samples = samples.clamp(-6.0, 6.0).tanh()
@@ -494,88 +496,35 @@ class RatSpn(nn.Module):
     def sample_onehot_style(self, **kwargs):
         return self.sample(mode='onehot', **kwargs)
 
-    @staticmethod
-    def calc_aux_responsibility(layer, child_entropies, sample_ll):
-        if layer.weights.dim() == 4:
-            # RatSpns only have one set of weights, so we must augment the weight_set dimension
-            weights = layer.weights.unsqueeze(0)
-        else:
-            weights = layer.weights
-        log_weights = weights.unsqueeze(0)
-        weights = log_weights.exp()
-        weight_entropy = -(weights * log_weights).sum(dim=3)
-        weighted_ch_ents = th.sum(child_entropies.unsqueeze(4) * weights, dim=3)
-        aux_resp_ent = log_weights + sample_ll.unsqueeze(4)
-        sample_ll = layer(sample_ll)
-        aux_resp_ent -= sample_ll.unsqueeze(3)
-
-        # aux_dev_5samples = aux_resp_ent[:5].mean(dim=0, keepdim=True)
-        # aux_dev_5samples = th.sum(weights * aux_dev_5samples, dim=3)
-        # aux_dev_1sample = aux_resp_ent[:1].mean(dim=0, keepdim=True)
-        # aux_dev_1sample = th.sum(weights * aux_dev_1sample, dim=3)
-
-        aux_resp_ent = aux_resp_ent.mean(dim=0, keepdim=True)
-        aux_resp_ent = th.sum(weights * aux_resp_ent, dim=3)
-
-        # aux_dev_5samples = (aux_dev_5samples - aux_resp_ent).abs()
-        # aux_dev_1sample = (aux_dev_1sample - aux_resp_ent).abs()
-        # print(f"Abs. dev. of aux. resp. ent. {aux_resp_ent.mean():.4f} from {aux_resp_ent.shape[0]} samples: "
-              # f"5 samples -> {aux_dev_5samples.mean():.4f}, "
-              # f"1 sample -> {aux_dev_1sample.mean():.4f}")
-
-        entropy = weight_entropy + weighted_ch_ents + aux_resp_ent
-        return entropy, sample_ll
-
-    def vi_entropy_approx(self, sample_size=10, verbose=False, aux_resp_ll_with_grad=False,
-                          aux_resp_sample_with_grad=False):
-        """
-        Approximate the entropy of the root sum node via variational inference,
-        as done in the Variational Inference by Policy Search paper.
-
-        Args:
-            sample_size: Number of samples to approximate the expected entropy of the responsibility with.
-            verbose: Return logging data
-            aux_resp_ll_with_grad: When approximating the auxiliary responsibility from log-likelihoods
-                of child samples, backpropagate the gradient through the LL calculation.
-                This argument will be ignored if this function is called in a th.no_grad() context.
-            aux_resp_sample_with_grad: May only be True if aux_resp_ll_with_grad is True too. Backpropagate through
-                the sampling of the child nodes as well.
-                This argument will be ignored if this function is called in a th.no_grad() context.
-        """
-        assert not self.config.gmm_leaves, "VI entropy not tested on GMM leaves yet."
-        assert self.config.C == 1, "For C > 1, we must calculate starting from self._sampling_root!"
-        assert not aux_resp_sample_with_grad or (aux_resp_sample_with_grad and aux_resp_ll_with_grad), \
-            "aux_resp_sample_with_grad may only be True if aux_resp_ll_with_grad is True as well."
-        root_weights_over_rep = th.empty(1)  # For PyCharm
-        log_weights = th.empty(1)
+    def layer_vi_entropy_approx(self, layer_index=0, child_entropies: th.Tensor = None,
+                               sample_size=10, verbose=False):
+        assert child_entropies is not None or layer_index == 0, \
+            "When sampling from a layer other than the leaf layer, child entropies must be provided!"
+        assert layer_index <= self.max_layer_index, f"layer_index is {layer_index} but must not be larger than " \
+                                                    f"{self.max_layer_index}"
+        log_weights = th.empty(1)  # To satisfy PyCharm type checker
         logging = {}
 
-        child_ll = self._leaf.sample_onehot_style(SamplingContext(n=sample_size, is_mpe=False))
-        child_ll = self._leaf(child_ll)
-        child_entropies = -child_ll.mean(dim=0, keepdim=True)
-
-        for i in range(len(self._inner_layers) + 1):
-            if i < len(self._inner_layers):
-                layer = self._inner_layers[i]
+        if layer_index == 0:
+            child_ll = self._leaf.sample_onehot_style(SamplingContext(n=sample_size, is_mpe=False))
+            child_ll = self._leaf(child_ll)
+            child_entropies = -child_ll.mean(dim=0, keepdim=True)
+        else:
+            layer_index -= 1
+            if layer_index < len(self._inner_layers):
+                layer = self._inner_layers[layer_index]
             else:
                 layer = self.root
 
             if isinstance(layer, CrossProduct):
                 child_entropies = layer(child_entropies)
             else:
-                with th.set_grad_enabled(aux_resp_ll_with_grad and th.is_grad_enabled()):
+                with th.no_grad():
                     ctx = SamplingContext(n=sample_size, is_mpe=False)
-                    if aux_resp_sample_with_grad and th.is_grad_enabled():
-                        # noinspection PyTypeChecker
-                        for child_layer in reversed(self._inner_layers[:i]):
-                            ctx = child_layer.sample_onehot_style(ctx)
-                        child_sample = self._leaf.sample_onehot_style(ctx)
-                    else:
-                        with th.no_grad():
-                            # noinspection PyTypeChecker
-                            for child_layer in reversed(self._inner_layers[:i]):
-                                ctx = child_layer.sample_index_style(ctx)
-                            child_sample = self._leaf.sample_index_style(ctx)
+                    # noinspection PyTypeChecker
+                    for child_layer in reversed(self._inner_layers[:layer_index]):
+                        ctx = child_layer.sample_index_style(ctx)
+                    child_sample = self._leaf.sample_index_style(ctx)
 
                     if child_sample.dim() == 4:
                         # child_sample is missing repetition dim. This happens when R=1.
@@ -595,10 +544,10 @@ class RatSpn(nn.Module):
                     child_ll = child_ll.mean(dim=1)
 
                     # noinspection PyTypeChecker
-                    for child_layer in self._inner_layers[:i]:
+                    for child_layer in self._inner_layers[:layer_index]:
                         child_ll = child_layer(child_ll)
 
-                    if i == len(self._inner_layers):
+                    if layer_index == len(self._inner_layers):
                         # Now we are dealing with a log-likelihood tensor with the shape [ic, w, 1, ic, r],
                         # where child_ll[0,0,:,:,0] are the log-likelihoods of the ic nodes in the first repetition
                         # given the samples from the first node of that repetition.
@@ -644,14 +593,14 @@ class RatSpn(nn.Module):
                     child_ll = child_ll.unsqueeze(3)  # [w, d, ic, 1, r]
 
                 weight_entropy = -(layer.weights.exp() * layer.weights).sum(dim=2)
-                if not i == len(self._inner_layers):
+                if not layer_index == len(self._inner_layers):
                     log_weights = layer.weights
                 weights = log_weights.exp()
                 child_entropies.squeeze_(0)
                 weighted_ch_ents = th.sum(child_entropies.unsqueeze(3) * weights, dim=2)
                 aux_responsibility = log_weights.detach() + child_ll - ll
                 weighted_aux_responsibility = th.sum(weights * aux_responsibility, dim=2)
-                if i == len(self._inner_layers):
+                if layer_index == len(self._inner_layers):
                     weight_entropy = weight_entropy.squeeze(-1)
                     weights = root_weights_over_rep.exp().sum(dim=2).softmax(dim=-1)
                     weighted_ch_ents = th.sum(weighted_ch_ents * weights, dim=-1)
@@ -665,51 +614,42 @@ class RatSpn(nn.Module):
                         'weighted_child_ent': weighted_ch_ents.detach(),
                         'weighted_aux_resp': weighted_aux_responsibility.detach(),
                     }
-                    logging[i] = {}
+                    logging[layer_index] = {}
                     for rep in range(weight_entropy.size(-1)):
                         rep_key = f"rep{rep}"
                         rep = th.as_tensor(rep, device=self._device)
                         for key, metric in metrics.items():
-                            logging[i].update({
+                            logging[layer_index].update({
                                 f"{rep_key}/{key}/min": metric.index_select(-1, rep).min().item(),
                                 f"{rep_key}/{key}/max": metric.index_select(-1, rep).max().item(),
                                 f"{rep_key}/{key}/mean": metric.index_select(-1, rep).mean().item(),
                                 f"{rep_key}/{key}/std": metric.index_select(-1, rep).std(dim=0).mean().item(),
                             })
 
-        return child_entropies.flatten(), logging
+        return child_entropies, logging
 
-    def old_vi_entropy_approx(self, sample_size):
+    def vi_entropy_approx(self, sample_size=10, verbose=False):
+        """
+        Approximate the entropy of the root sum node via variational inference,
+        as done in the Variational Inference by Policy Search paper.
+
+        Args:
+            sample_size: Number of samples to approximate the expected entropy of the responsibility with.
+            verbose: Return logging data
+        """
         assert not self.config.gmm_leaves, "VI entropy not tested on GMM leaves yet."
-        # To calculate the entropies layer by layer, starting from the leaves.
-        # We repurpose the samples of the leaves when moving up through the layers.
-        ctx = SamplingContext(n=sample_size, is_mpe=False)
-        sample = self._leaf.sample(ctx)
-        sample_ll = self._leaf(sample)
-        del sample
+        assert self.config.C == 1, "For C > 1, we must calculate starting from self._sampling_root!"
+        logging = {}
 
-        # Apply permutation
-        # sample_ll = self._randomize(sample_ll)
-        child_entropies = -sample_ll.mean(dim=0, keepdim=True)
-        # deviation_5samples = (child_entropies + sample_ll[:5].mean(dim=0, keepdim=True)).abs()
-        # deviation_1sample = (child_entropies + sample_ll[:1].mean(dim=0, keepdim=True)).abs()
-        # print(f"Abs. dev. of child_ents {child_entropies.mean():.4f} from {sample_size} samples: "
-              # f"5 samples -> {deviation_5samples.mean():.4f}, "
-              # f"1 sample -> {deviation_1sample.mean():.4f}")
-        for layer in self._inner_layers:
-            if isinstance(layer, CrossProduct):
-                child_entropies = layer(child_entropies)
-                sample_ll = layer(sample_ll)
-            else:
-                child_entropies, sample_ll = self.calc_aux_responsibility(layer, child_entropies, sample_ll)
+        child_entropies = None
+        for layer_index in range(self.num_layers):
+            child_entropies, layer_log = self.layer_vi_entropy_approx(
+                layer_index=layer_index, child_entropies=child_entropies,
+                sample_size=sample_size, verbose=verbose
+            )
+            logging.update(layer_log)
 
-        n, w, d, c, r = sample_ll.size()
-        assert d == 1  # number of features should be 1 at this point
-        child_entropies = child_entropies.view(1, w, d, c * r, 1)
-        sample_ll = sample_ll.view(n, w, d, c * r, 1)
-        child_entropies, sample_ll = self.calc_aux_responsibility(self.root, child_entropies, sample_ll)
-        child_entropies = child_entropies.flatten()
-        return child_entropies
+        return child_entropies.flatten(), logging
 
     def consolidate_weights(self):
         """
