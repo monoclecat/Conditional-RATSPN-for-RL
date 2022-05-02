@@ -175,25 +175,8 @@ class Sum(AbstractLayer):
         if ctx.is_root:
             weights = weights.unsqueeze(0).expand(sample_size, -1, -1, -1, -1, -1)
             # weights from selected repetition with shape [n, w, d, ic, oc, r]
-            if mode == 'index':
-                # In this sum layer there are oc * r nodes per feature. oc * r is our nr_nodes.
-                weights = weights.permute(5, 4, 0, 1, 2, 3)
-                # weights from selected repetition with shape [r, oc, n, w, d, ic]
-                # Reshape weights to [oc * r, n, w, d, ic]
-                # The nodes in the first dimension are taken from the first two weight dimensions [r, oc] like this:
-                # [0, 0], ..., [0, oc-1], [1, 0], ..., [1, oc-1], [2, 0], ..., [r-1, oc-1]
-                # This means the weights for the first oc nodes are the weights for repetition 0.
-                # This must coincide with the repetition indices.
-                weights = weights.reshape(oc * r, sample_size, w, d, ic)
-
-                ctx.repetition_indices = th.arange(r).to(self.__device).repeat_interleave(oc)
-                ctx.repetition_indices = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).repeat(
-                    1, ctx.n, w
-                )
-            else:  # mode == 'onehot'
-                weights = weights.permute(4, 0, 1, 2, 3, 5)
-                # oc is our nr_nodes: [nr_nodes, n, w, d, ic, r]
-
+            weights = weights.permute(4, 0, 1, 2, 3, 5)
+            # oc is our nr_nodes: [nr_nodes=oc, n, w, d, ic, r]
         else:
             if mode == 'index':
                 # If this is not the root node, use the paths (out channels), specified by the parent layer
@@ -224,16 +207,16 @@ class Sum(AbstractLayer):
         # If evidence is given, adjust the weights with the likelihoods of the observed paths
         if self._is_input_cache_enabled and self._input_cache is not None:
             if mode == 'index':
-                rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                rep_ind = rep_ind.expand(-1, -1, -1, d, ic, -1)
                 inp_cache = self._input_cache.unsqueeze(0)
-                inp_cache = inp_cache.expand(rep_ind.size(0), sample_size, -1, -1, -1, -1)
-                # Both are now [nr_nodes, sample_size=n, w, d, ic, r]
-                weight_offsets = th.gather(inp_cache, dim=-1, index=rep_ind).squeeze(-1)
+                if ctx.repetition_indices is not None:
+                    rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                    rep_ind = rep_ind.expand(-1, -1, -1, d, ic, -1)
+                    inp_cache = inp_cache.expand(rep_ind.size(0), sample_size, -1, -1, -1, -1)
+                    # Both are now [nr_nodes, sample_size=n, w, d, ic, r]
+                    weight_offsets = th.gather(inp_cache, dim=-1, index=rep_ind).squeeze(-1)
+                else:
+                    weight_offsets = inp_cache
                 weights = weights + weight_offsets
-                # for i in range(w):
-                    # Reweigh the i-th samples weights by its likelihood values at the correct repetition
-                    # weights[i, :, :] += self._input_cache[i, :, :, ctx.repetition_indices[i]]
             else:  # mode == 'onehot'
                 raise NotImplementedError("evidence-based sampling isn't implemented yet for the onehot case")
 
