@@ -391,23 +391,22 @@ class RatSpn(nn.Module):
             if layer_index == self.max_layer_index:
                 layer_index -= 1
                 ctx.scopes = 1
-                if self.config.C > 1:
-                    if class_index is None:
-                        ctx = self._sampling_root.sample(ctx=ctx, mode=mode)
-                    else:
-                        ctx.parent_indices = th.as_tensor(class_index).repeat_interleave(n)
-                        ctx.n = n * len(class_index)
-                        ctx.parent_indices = ctx.parent_indices.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                if class_index is not None:
+                    ctx.parent_indices = th.as_tensor(class_index).repeat_interleave(n)
+                    if mode == 'onehot':
+                        ctx.parent_indices = F.one_hot(ctx.parent_indices, num_classes=self.config.C)
+                    ctx.n = n * len(class_index)
+                    ctx.parent_indices = ctx.parent_indices.unsqueeze(1).unsqueeze(1).unsqueeze(0).unsqueeze(-1)
 
                 ctx = self.root.sample(ctx=ctx, mode=mode)
-                # ctx.parent_indices [nr_nodes, n, w, d, r=1] contains indexes of output channels of the next layer
-                ctx.parent_indices = ctx.parent_indices.squeeze(-1)
 
                 # mode == 'index'
+                # ctx.parent_indices [nr_nodes, n, w, d, r=1] contains indexes of output channels of the next layer
                 # Sample from RatSpn root layer: Results are indices into the
                 # stacked output channels of all repetitions
 
                 # mode == 'onehot'
+                # ctx.parent_indices [nr_nodes, n, w, d, ic, r=1] contains indexes of output channels of the next layer
                 # Sample from RatSpn root layer: Results are one-hot vectors of the indices
                 # into the stacked output channels of all repetitions
 
@@ -420,15 +419,15 @@ class RatSpn(nn.Module):
                 # This weight vector was used as the logits in a IC*R-categorical distribution,
                 # yielding indexes [0,C*R-1].
                 if mode == 'index':
+                    ctx.parent_indices = ctx.parent_indices.squeeze(-1)
                     # To match the index to the correct repetition and its input channel, we do the following
                     ctx.repetition_indices = (ctx.parent_indices % self.config.R).squeeze(3)
                     # [nr_nodes, n, w, 1]
                     ctx.parent_indices = th.div(ctx.parent_indices, self.config.R, rounding_mode='trunc')
                 else:
-                    assert ctx.parent_indices.shape == (1, ctx.n, self.root.weights.size(0),
-                                                        1, self.root.weights.size(2), 1)
                     nr_nodes, n, w, _, _, _ = ctx.parent_indices.shape
                     ctx.parent_indices = ctx.parent_indices.view(nr_nodes, n, w, 1, -1, self.config.R)
+                    # ctx.parent_indices [nr_nodes, n, w, d, ic, r]
 
             # Continue at layers
             # Sample inner layers in reverse order (starting from topmost)
