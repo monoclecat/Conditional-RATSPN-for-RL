@@ -308,8 +308,11 @@ class RatSpn(nn.Module):
         """
         return self.sample(evidence=evidence, is_mpe=True)
 
-    def sample(self, mode: str = None, n=1, class_index=None, evidence: th.Tensor = None, is_mpe: bool = False,
-               start_at_layer: int = None, split_by_scope: bool = False):
+    def sample(
+            self, mode: str = None, n=1, class_index=None, evidence: th.Tensor = None, is_mpe: bool = False,
+            layer_index: int = None, do_sample_postprocessing: bool = True,
+            post_processing_kwargs: dict = None,
+    ) -> SamplingContext:
         """
         Sample from the distribution represented by this SPN.
 
@@ -327,40 +330,41 @@ class RatSpn(nn.Module):
                 distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
                 sampled values.
             is_mpe: Flag to perform max sampling (MPE).
-            start_at_layer: Layer to start sampling from. None or self.max_layer_index = Root layer,
+            layer_index: Layer to start sampling from. None or self.max_layer_index = Root layer,
                 self.num_layers-1 = Child layer of root layer, ...
-            split_by_scope: In an inner layer, a node's sample doesn't
-                cover the entire feature set f, but rather a scope of it. split_by_scope allows makes the
-                scope of a single node's samples visible in the entire Spn's scope, as features in f not
-                covered by this node are filled with NaNs.
+            do_sample_postprocessing: If True, samples will be given to sample_postprocessing to fill in evidence,
+                split by scope, be squashed, etc.
+            post_processing_kwargs: Keyword args to the postprocessing.
+                split_by_scope (bool), invert_permutation (bool)
 
         Returns:
-            th.Tensor: Samples generated according to the distribution specified by the SPN.
-                When sampling the root sum node of the SPN, the tensor will be of size [nr_nodes, n, w, f]:
-                    nr_nodes: Dimension over the nodes being sampled. When sampling from the root sum node,
-                        nr_nodes will be self.config.C (usually 1). When sampling from an inner layer,
-                        the size of this dimension will be the number of that layer's output channels.
-                    n: Number of samples being drawn per weight set (dimension `w`).
-                    w: Dimension over weight sets. In the RatSpn case, w is always 1. In the Cspn case, the SPN
-                        represents a conditional distribution. w is the number of conditionals the Spn was given
-                        prior to calling this function (see Cspn.sample()).
-                    f: f = self.config.F is the number of features of the Spn as a whole.
-                Inner layers of the Spn have an additional repetition dimension. When sampling an inner layer, the
-                sample tensor will be of size [nr_nodes, n, w, f, r]
-                    r: Dimension over the repetitions.
-                Sampling with split_by_scope = True adds another dimension [nr_nodes, s, n, w, f, r]
-                    s: Number of scopes in the layer that is sampled from.
+            SamplingContext with
+                sample (th.Tensor): Samples generated according to the distribution specified by the SPN.
+                    When sampling the root sum node of the SPN, the tensor will be of size [nr_nodes, n, w, f]:
+                        nr_nodes: Dimension over the nodes being sampled. When sampling from the root sum node,
+                            nr_nodes will be self.config.C (usually 1). When sampling from an inner layer,
+                            the size of this dimension will be the number of that layer's output channels.
+                        n: Number of samples being drawn per weight set (dimension `w`).
+                        w: Dimension over weight sets. In the RatSpn case, w is always 1. In the Cspn case, the SPN
+                            represents a conditional distribution. w is the number of conditionals the Spn was given
+                            prior to calling this function (see Cspn.sample()).
+                        f: f = self.config.F is the number of features of the Spn as a whole.
+                    Inner layers of the Spn have an additional repetition dimension. When sampling an inner layer, the
+                    sample tensor will be of size [nr_nodes, n, w, f, r]
+                        r: Dimension over the repetitions.
+                    Sampling with split_by_scope = True adds another dimension [nr_nodes, s, n, w, f, r]
+                        s: Number of scopes in the layer that is sampled from.
 
 
         """
+        if post_processing_kwargs is None:
+            post_processing_kwargs = {}
         assert mode is not None, "A sampling mode must be provided!"
         assert class_index is None or evidence is None, "Cannot provide both, evidence and class indices."
         assert n is None or evidence is None, "Cannot provide both, number of samples to generate (n) and evidence."
 
-        if start_at_layer is None:
-            start_at_layer = self.max_layer_index
-        has_rep_dim = start_at_layer < self.max_layer_index
-        layer_index = start_at_layer
+        if layer_index is None:
+            layer_index = self.max_layer_index
 
         # Check if evidence contains nans
         if evidence is not None:
@@ -371,23 +375,31 @@ class RatSpn(nn.Module):
 
         with provide_evidence(self, evidence, requires_grad=(mode == 'onehot')):  # May be None but that's ok
             # If class is given, use it as base index
-            if class_index is not None:
+            # if class_index is not None:
                 # Create new sampling context
-                raise NotImplementedError("This case has not been touched yet. Please verify.")
-                ctx = SamplingContext(n=n,
-                                      parent_indices=class_index.repeat(n, 1).unsqueeze(-1).to(self._device),
-                                      repetition_indices=th.zeros((n, class_index.shape[0]), dtype=int, device=self._device),
-                                      is_mpe=is_mpe)
-            else:
-                # Start sampling one of the C root nodes TODO: check what happens if C=1
-                ctx = SamplingContext(n=n, is_mpe=is_mpe)
-                # ctx = self._sampling_root.sample(context=ctx)
+                # raise NotImplementedError("This case has not been touched yet. Please verify.")
+                # ctx = SamplingContext(n=n,
+                                      # parent_indices=class_index.repeat(n, 1).unsqueeze(-1).to(self._device),
+                                      # repetition_indices=th.zeros((n, class_index.shape[0]), dtype=int, device=self._device),
+                                      # is_mpe=is_mpe)
+            ctx = SamplingContext(
+                n=n, is_mpe=is_mpe, sampling_mode=mode, needs_squashing=self.config.tanh_squash,
+                sampled_with_evidence=evidence is not None,
+            )
 
             if layer_index == self.max_layer_index:
                 layer_index -= 1
                 ctx.scopes = 1
+                if self.config.C > 1:
+                    if class_index is None:
+                        ctx = self._sampling_root.sample(ctx=ctx, mode=mode)
+                    else:
+                        ctx.parent_indices = th.as_tensor(class_index).repeat_interleave(n)
+                        ctx.n = n * len(class_index)
+                        ctx.parent_indices = ctx.parent_indices.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+
                 ctx = self.root.sample(ctx=ctx, mode=mode)
-                # ctx.parent_indices [nr_nodes=self.config.C, n, w, d, r=1], squeeze out rep dim
+                # ctx.parent_indices [nr_nodes, n, w, d, r=1] contains indexes of output channels of the next layer
                 ctx.parent_indices = ctx.parent_indices.squeeze(-1)
 
                 # mode == 'index'
@@ -430,22 +442,53 @@ class RatSpn(nn.Module):
 
             # Sample leaf
             samples = self._leaf.sample(ctx=ctx, mode=mode)
+            ctx.sample = samples
 
-            if split_by_scope:
-                assert self.config.F % ctx.scopes == 0, "Size of entire scope is not divisible by the number of" \
-                                                        " scopes in the layer we are sampling from. What do?"
-                features_per_scope = self.config.F // ctx.scopes
+        if do_sample_postprocessing:
+            ctx = self.sample_postprocessing(ctx, evidence, **post_processing_kwargs)
 
-                samples = samples.unsqueeze(1)
-                samples = samples.repeat(1, ctx.scopes, *([1] * (samples.dim()-2)))
+        return ctx
 
-                for i in range(ctx.scopes):
-                    mask = th.ones(self.config.F, dtype=th.bool)
-                    mask[i * features_per_scope:(i + 1) * features_per_scope] = False
-                    samples[:, i, :, :, mask, ...] = th.nan
+    def sample_postprocessing(
+            self, ctx: SamplingContext, evidence: th.Tensor = None, split_by_scope: bool = False,
+            invert_permutation: bool = True,
+    ) -> SamplingContext:
+        """
+        Apply postprocessing to samples.
 
-            # Each repetition has its own inverted permutation which we now apply to the samples.
-            if mode == 'index':
+        Args:
+            ctx: SamplingContext returned by sample().
+            evidence: Evidence that can be provided to condition the samples. If evidence is given, `n` and
+                `class_index` must be `None`. Evidence must contain NaN values which will be imputed according to the
+                distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
+                sampled values.
+            split_by_scope: Arg to postprocessing: In an inner layer, a node's sample doesn't
+                cover the entire feature set f, but rather a scope of it. split_by_scope allows makes the
+                scope of a single node's samples visible in the entire Spn's scope, as features in f not
+                covered by this node are filled with NaNs.
+            invert_permutation: Invert permutation of data features.
+
+        Returns:
+            A modified SamplingContext.
+        """
+        has_rep_dim = ctx.sample.dim() == 5
+        sample = ctx.sample
+        if split_by_scope:
+            assert self.config.F % ctx.scopes == 0, "Size of entire scope is not divisible by the number of" \
+                                                    " scopes in the layer we are sampling from. What do?"
+            features_per_scope = self.config.F // ctx.scopes
+
+            samples = sample.unsqueeze(1)
+            samples = sample.repeat(1, ctx.scopes, *([1] * (samples.dim()-2)))
+
+            for i in range(ctx.scopes):
+                mask = th.ones(self.config.F, dtype=th.bool)
+                mask[i * features_per_scope:(i + 1) * features_per_scope] = False
+                samples[:, i, :, :, mask, ...] = th.nan
+
+        # Each repetition has its own inverted permutation which we now apply to the samples.
+        if invert_permutation:
+            if ctx.sampling_mode == 'index':
                 if ctx.repetition_indices is not None:
                     rep_sel_inv_perm = self.inv_permutation.T[ctx.repetition_indices]
                 else:
@@ -459,24 +502,30 @@ class RatSpn(nn.Module):
 
             if split_by_scope:
                 rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1)
-            rep_sel_inv_perm = rep_sel_inv_perm.expand_as(samples)
-            samples = th.gather(samples, dim=-2 if has_rep_dim else -1, index=rep_sel_inv_perm)
+            rep_sel_inv_perm = rep_sel_inv_perm.expand_as(sample)
+            sample = th.gather(sample, dim=-2 if has_rep_dim else -1, index=rep_sel_inv_perm)
+            ctx.permutation_inverted = True
 
+        if self.config.tanh_squash:
+            sample = sample.clamp(-6.0, 6.0).tanh()
+            ctx.needs_squashing = False
+
+        if evidence is not None:
             if self.config.tanh_squash:
-                samples = samples.clamp(-6.0, 6.0).tanh()
+                evidence = evidence.clamp(-6.0, 6.0).tanh()
+            # Update NaN entries in evidence with the sampled values
+            nan_mask = th.isnan(evidence)
 
-            if evidence is not None:
-                if self.config.tanh_squash:
-                    evidence = evidence.clamp(-6.0, 6.0).tanh()
-                # Update NaN entries in evidence with the sampled values
-                nan_mask = th.isnan(evidence)
+            # First make a copy such that the original object is not changed
+            evidence = evidence.clone()
+            evidence[nan_mask] = sample.squeeze(0)[nan_mask]
+            sample = evidence
+            ctx.evidence_filled_in = True
 
-                # First make a copy such that the original object is not changed
-                evidence = evidence.clone()
-                evidence[nan_mask] = samples.squeeze(0)[nan_mask]
-                return evidence
-            else:
-                return samples
+        ctx.sample = sample
+        ctx.parent_indices = None
+        ctx.repetition_indices = None
+        return ctx
 
     def sample_index_style(self, **kwargs):
         return self.sample(mode='index', **kwargs)
