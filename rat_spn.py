@@ -211,21 +211,6 @@ class RatSpn(nn.Module):
 
         return x
 
-    def _forward_layers(self, x):
-        """
-        Forward pass through the inner sum and product layers.
-
-        Args:
-            x: Input.
-
-        Returns:
-            th.Tensor: Output of the last layer before the root layer.
-        """
-        # Forward to inner product and sum layers
-        for layer in self._inner_layers:
-            x = layer(x)
-        return x
-
     def _build(self):
         """Construct the internal architecture of the RatSpn."""
         # Build the SPN bottom up:
