@@ -30,6 +30,7 @@ def print_cspn_params(cspn):
 
 @dataclass
 class CspnConfig(RatSpnConfig):
+    is_ratspn: bool = False
     F_cond: tuple = 0
     feat_layers: list = None
     conv_kernel_size: int = 5
@@ -65,7 +66,7 @@ class CSPN(RatSpn):
         self.replace_layer_params()
         self.create_feat_layers(config.F_cond)
 
-    def forward(self, x: th.Tensor, condition: th.Tensor = None) -> th.Tensor:
+    def forward(self, x: th.Tensor, condition: th.Tensor = None, **kwargs) -> th.Tensor:
         """
         Forward pass through RatSpn. Computes the conditional log-likelihood P(X | C).
 
@@ -73,7 +74,7 @@ class CSPN(RatSpn):
             x: Input of shape [batch, weight_sets, in_features, channel].
                 batch: Number of samples per weight set (= per conditional in the CSPN sense).
                 weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
-
+            condition: Conditional for the distribution
         Returns:
             th.Tensor: Conditional log-likelihood P(X | C) of the input.
         """
@@ -89,10 +90,11 @@ class CSPN(RatSpn):
         elif x.dim() == 2:
             assert x.shape[0] == weight_sets, \
                 f"Dim of input is 2. This means that each input sample belongs to one conditional. " \
-                f"But the number of samples ({x.shape[0]}) doesn't match the number of conditionals ({weight_sets})!"
+                f"But the number of samples ({x.shape[0]}) doesn't match the number of conditionals ({weight_sets})!" \
+                f"Did you forget to set the weights of the CSPN?"
             x = x.unsqueeze(0)
 
-        return super().forward(x)
+        return super().forward(x, **kwargs)
 
     def vi_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> th.Tensor:
         if condition is not None:
@@ -220,27 +222,27 @@ class CSPN(RatSpn):
     def replace_layer_params(self):
         for layer in self._inner_layers:
             if isinstance(layer, Sum):
-                placeholder = th.zeros_like(layer.weights)
-                del layer.weights
-                layer.weights = placeholder
-        placeholder = th.zeros_like(self.root.weights)
-        del self.root.weights
-        self.root.weights = placeholder
+                placeholder = th.zeros_like(layer.weight_param)
+                del layer.weight_param
+                layer.weight_param = placeholder
+        placeholder = th.zeros_like(self.root.weight_param)
+        del self.root.weight_param
+        self.root.weight_param = placeholder
 
-        placeholder = th.zeros_like(self._sampling_root.weights)
-        del self._sampling_root.weights
-        self._sampling_root.weights = placeholder
+        placeholder = th.zeros_like(self._sampling_root.weight_param)
+        del self._sampling_root.weight_param
+        self._sampling_root.weight_param = placeholder
 
         if isinstance(self._leaf, GaussianMixture):
-            placeholder = th.zeros_like(self._leaf.sum.weights)
-            del self._leaf.sum.weights
-            self._leaf.sum.weights = placeholder
+            placeholder = th.zeros_like(self._leaf.sum.weight_param)
+            del self._leaf.sum.weight_param
+            self._leaf.sum.weight_param = placeholder
 
-        placeholder = th.zeros_like(self._leaf.base_leaf.means)
-        del self._leaf.base_leaf.means
-        del self._leaf.base_leaf.stds
-        self._leaf.base_leaf.means = placeholder
-        self._leaf.base_leaf.stds = placeholder
+        placeholder = th.zeros_like(self._leaf.base_leaf.mean_param)
+        del self._leaf.base_leaf.mean_param
+        del self._leaf.base_leaf.std_param
+        self._leaf.base_leaf.mean_param = placeholder
+        self._leaf.base_leaf.std_param = placeholder
 
     def create_feat_layers(self, feature_dim: tuple):
         assert len(feature_dim) == 3 or len(feature_dim) == 1, \
@@ -320,9 +322,10 @@ class CSPN(RatSpn):
             dist_layers = [nn.Identity()]
         self.dist_layers = nn.Sequential(*dist_layers)
 
-        self.dist_mean_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.means.numel())
-        self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.stds.numel())
-        print(f"Dist layer has {self._leaf.base_leaf.means.numel()} + {self._leaf.base_leaf.stds.numel()} weights.")
+        self.dist_mean_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.mean_param.numel())
+        self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.std_param.numel())
+        print(f"Dist layer has {self._leaf.base_leaf.mean_param.numel()} + "
+              f"{self._leaf.base_leaf.std_param.numel()} weights.")
 
     def create_one_hot_in_channel_mapping(self):
         for lay in self._inner_layers:
@@ -352,7 +355,7 @@ class CSPN(RatSpn):
             if isinstance(layer, Sum):
                 weight_shape = (num_conditionals, layer.in_features, layer.in_channels, layer.out_channels, layer.num_repetitions)
                 weights = self.sum_param_heads[i](sum_weights_pre_output).view(weight_shape)
-                layer.weights = F.log_softmax(weights, dim=2)
+                layer.weight_param = F.log_softmax(weights, dim=2)
                 i += 1
             else:
                 layer.num_conditionals = num_conditionals
@@ -360,12 +363,12 @@ class CSPN(RatSpn):
         # Set normalized weights of the root sum layer
         weight_shape = (num_conditionals, self.root.in_features, self.root.in_channels, self.root.out_channels, self.root.num_repetitions)
         weights = self.sum_param_heads[i](sum_weights_pre_output).view(weight_shape)
-        self.root.weights = F.log_softmax(weights, dim=2)
+        self.root.weight_param = F.log_softmax(weights, dim=2)
 
         # Sampling root weights need to have 5 dims as well
         weight_shape = (num_conditionals, 1, 1, 1, 1)
-        self._sampling_root.weights = th.ones(weight_shape).to(self.root.weights.device)
-        self._sampling_root.weights = self._sampling_root.weights.mul_(1/self.config.C).log_()
+        self._sampling_root.weight_param = th.ones(weight_shape).to(self.root.weights.device)
+        self._sampling_root.weight_param = self._sampling_root.weights.mul_(1/self.config.C).log_()
 
         # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
         if isinstance(self._leaf, GaussianMixture):
@@ -373,17 +376,13 @@ class CSPN(RatSpn):
             weight_shape = (num_conditionals, self._leaf.sum.in_features, self._leaf.sum.in_channels,
                             self._leaf.sum.out_channels, self._leaf.sum.num_repetitions)
             weights = self.sum_param_heads[i+1](sum_weights_pre_output).view(weight_shape)
-            self._leaf.sum.weights = F.log_softmax(weights, dim=2)
+            self._leaf.sum.weight_param = F.log_softmax(weights, dim=2)
 
         # Set bounded weights of the Gaussian distributions in the leaves
         dist_param_shape = (num_conditionals, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         dist_weights_pre_output = self.dist_layers(features)
         dist_means = self.dist_mean_head(dist_weights_pre_output).view(dist_param_shape)
-        if self.config.tanh_squash:
-            dist_means = th.clamp(dist_means, -6.0, 6.0)
         dist_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
-        LOG_STD_MAX = 2
-        LOG_STD_MIN = -15
-        dist_stds = th.clamp(dist_stds, LOG_STD_MIN, LOG_STD_MAX).exp()
-        self._leaf.base_leaf.means = dist_means
-        self._leaf.base_leaf.stds = dist_stds
+        self._leaf.base_leaf.mean_param = self._leaf.base_leaf.bounded_means(dist_means)
+        self._leaf.base_leaf.std_param = self._leaf.base_leaf.bounded_stds(dist_stds)
+

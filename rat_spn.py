@@ -47,6 +47,7 @@ class RatSpnConfig:
     gmm_leaves: bool  # If true, the leaves are Gaussian mixtures
     """
 
+    is_ratspn: bool = True
     in_features: int = None
     D: int = None
     S: int = None
@@ -122,13 +123,8 @@ class RatSpn(nn.Module):
         # Obtain permutation indices
         self._make_random_repetition_permutation_indices()
 
-    @property
-    def max_layer_index(self):
-        return len(self._inner_layers) + 1
-
-    @property
-    def num_layers(self):
-        return self.max_layer_index + 1
+        self.max_layer_index = len(self._inner_layers) + 1
+        self.num_layers = self.max_layer_index + 1
 
     def _make_random_repetition_permutation_indices(self):
         """Create random permutation indices for each repetition."""
@@ -241,7 +237,7 @@ class RatSpn(nn.Module):
 
             # Sum layer
             sumlayer = Sum(in_features=in_features, in_channels=sum_in_channels, num_repetitions=self.config.R,
-                           out_channels=self.config.S, dropout=self.config.dropout)
+                           out_channels=self.config.S, dropout=self.config.dropout, ratspn=self.config.is_ratspn)
             self._inner_layers.append(sumlayer)
 
             # Product layer
@@ -253,12 +249,15 @@ class RatSpn(nn.Module):
 
         # Construct root layer
         self.root = Sum(
-            in_channels=self.config.R * sum_in_channels, in_features=1, num_repetitions=1, out_channels=self.config.C
+            in_channels=self.config.R * sum_in_channels, in_features=1, num_repetitions=1, out_channels=self.config.C,
+            ratspn=self.config.is_ratspn,
         )
 
         # Construct sampling root with weights according to priors for sampling
-        self._sampling_root = Sum(in_channels=self.config.C, in_features=1, out_channels=1, num_repetitions=1)
-        self._sampling_root.weights = nn.Parameter(
+        self._sampling_root = Sum(
+            in_channels=self.config.C, in_features=1, out_channels=1, num_repetitions=1, ratspn=self.config.is_ratspn,
+        )
+        self._sampling_root.weight_param = nn.Parameter(
             th.ones(size=(1, self.config.C, 1, 1)) * th.tensor(1 / self.config.C), requires_grad=False
         )
 
@@ -278,7 +277,8 @@ class RatSpn(nn.Module):
                 num_repetitions=self.config.R, cardinality=cardinality, dropout=self.config.dropout,
                 tanh_squash=self.config.tanh_squash,
                 leaf_base_class=self.config.leaf_base_class,
-                leaf_base_kwargs=self.config.leaf_base_kwargs
+                leaf_base_kwargs=self.config.leaf_base_kwargs,
+                ratspn=self.config.is_ratspn,
             )
 
     @property

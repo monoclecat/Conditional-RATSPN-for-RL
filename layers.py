@@ -43,7 +43,8 @@ class AbstractLayer(nn.Module, ABC):
 
 class Sum(AbstractLayer):
     def __init__(
-        self, in_channels: int, in_features: int, out_channels: int, num_repetitions: int = 1, dropout: float = 0.0
+        self, in_channels: int, in_features: int, out_channels: int, ratspn: bool, num_repetitions: int,
+            dropout: float = 0.0,
     ):
         """
         Create a Sum layer.
@@ -57,16 +58,18 @@ class Sum(AbstractLayer):
             out_channels (int): Multiplicity of a sum node for a given scope set.
             num_repetitions(int): Number of layer repetitions in parallel.
             dropout (float, optional): Dropout percentage.
+            ratspn (bool): If True, weights will be log-normalized at each function call.
         """
         super().__init__(in_features, num_repetitions)
 
         self.in_channels = check_valid(in_channels, int, 1)
         self.out_channels = check_valid(out_channels, int, 1)
         self.dropout = nn.Parameter(th.tensor(check_valid(dropout, float, 0.0, 1.0)), requires_grad=False)
+        self.ratspn = ratspn
 
         # Weights, such that each sumnode has its own weights
         ws = th.randn(self.in_features, self.in_channels, self.out_channels, self.num_repetitions)
-        self.weights = nn.Parameter(ws)
+        self.weight_param = nn.Parameter(ws)
         self._bernoulli_dist = th.distributions.Bernoulli(probs=self.dropout)
 
         self.out_shape = f"(N, {self.in_features}, {self.out_channels}, {self.num_repetitions})"
@@ -95,7 +98,15 @@ class Sum(AbstractLayer):
     @property
     def __device(self):
         """Hack to obtain the current device, this layer lives on."""
-        return self.weights.device
+        return self.weight_param.device
+
+    @property
+    def weights(self):
+        if self.ratspn:
+            # weight_param [d, ic, oc, r]
+            return F.log_softmax(self.weight_param, dim=1)
+        else:
+            return self.weight_param
 
     def forward(self, x: th.Tensor):
         """
@@ -120,11 +131,12 @@ class Sum(AbstractLayer):
         # Dimensions
         n, w, d, ic, r = x.size()
         x = x.unsqueeze(4)  # Shape: [n, w, d, ic, 1, r]
+        weights: th.Tensor = self.weights
+
         if self.weights.dim() == 4:
             # RatSpns only have one set of weights, so we must augment the weight_set dimension
-            weights = self.weights.unsqueeze(0)
-        else:
-            weights = self.weights
+            weights = weights.unsqueeze(0)
+
         # Weights is of shape [n, d, ic, oc, r]
         oc = weights.size(3)
         # The weights must be expanded by the batch dimension so all samples of one conditional see the same weights.

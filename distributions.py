@@ -25,7 +25,8 @@ class RatNormal(Leaf):
         self,
         in_features: int,
         out_channels: int,
-        num_repetitions: int = 1,
+        ratspn: bool,
+        num_repetitions: int,
         dropout: float = 0.0,
         tanh_squash: bool = False,
         min_sigma: float = None,
@@ -40,21 +41,23 @@ class RatNormal(Leaf):
             in_features: Number of input features.
             out_channels: Number of parallel representations for each input feature.
             tanh_bounds: If set, a correction term is applied to the log probs.
+            ratspn (bool): If True, dist params will be bounded at each function call.
         """
         super().__init__(in_features, out_channels, num_repetitions, dropout)
 
         # Create gaussian means and stds
-        self.means = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
+        self.mean_param = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
 
         self._tanh_squash = tanh_squash
         self._no_tanh_log_prob_correction = no_tanh_log_prob_correction
+        self._ratspn = ratspn
 
         if min_sigma is not None and max_sigma is not None:
             # Init from normal
-            self.stds = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
+            self.std_param = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
         else:
             # Init uniform between 0 and 1
-            self.stds = nn.Parameter(th.rand(1, in_features, out_channels, num_repetitions))
+            self.std_param = nn.Parameter(th.rand(1, in_features, out_channels, num_repetitions))
 
         self.min_sigma = check_valid(min_sigma, float, 0.0, max_sigma, allow_none=True)
         self.max_sigma = check_valid(max_sigma, float, min_sigma, allow_none=True)
@@ -62,6 +65,35 @@ class RatNormal(Leaf):
         self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
 
         self._dist_params_are_bounded = False
+
+    def bounded_means(self, means: th.Tensor = None):
+        if means is None:
+            means = self.mean_param
+        if self._tanh_squash:
+            means = th.clamp(means, -6.0, 6.0)
+        return means
+
+    def bounded_stds(self, stds: th.Tensor = None):
+        if stds is None:
+            stds = self.std_param
+        LOG_STD_MAX = 2
+        LOG_STD_MIN = -15
+        stds = th.clamp(stds, LOG_STD_MIN, LOG_STD_MAX).exp()
+        return stds
+
+    @property
+    def means(self):
+        if self._ratspn:
+            return self.bounded_means()
+        else:
+            return self.mean_param
+
+    @property
+    def stds(self):
+        if self._ratspn:
+            return self.bounded_stds()
+        else:
+            return self.std_param
 
     def set_no_tanh_log_prob_correction(self):
         self._no_tanh_log_prob_correction = False
@@ -222,7 +254,8 @@ class IndependentMultivariate(Leaf):
         in_features: int,
         out_channels: int,
         cardinality: int,
-        num_repetitions: int = 1,
+        ratspn: bool,
+        num_repetitions: int,
         dropout: float = 0.0,
         tanh_squash: bool = False,
         leaf_base_class: Leaf = RatNormal,
@@ -237,7 +270,7 @@ class IndependentMultivariate(Leaf):
             in_features: Number of input features.
             dropout: Dropout probabilities.
             leaf_base_class (Leaf): The encapsulating base leaf layer class.
-
+            ratspn (bool): If True, dist params will be bounded at each function call.
         """
         super(IndependentMultivariate, self).__init__(in_features, out_channels, num_repetitions, dropout)
         if leaf_base_kwargs is None:
@@ -249,6 +282,7 @@ class IndependentMultivariate(Leaf):
             dropout=dropout,
             num_repetitions=num_repetitions,
             tanh_squash=tanh_squash,
+            ratspn=ratspn,
             **leaf_base_kwargs,
         )
         self._pad = (cardinality - self.in_features % cardinality) % cardinality
