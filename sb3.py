@@ -71,7 +71,6 @@ class CspnActor(BasePolicy):
             dist_param_layers: int,
             normalize_images: bool = True,
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
-            vi_aux_resp_grad_mode: int = 0,
             vi_ent_approx_sample_size: int = 5,
             squash_output: bool = True,
             **kwargs
@@ -87,8 +86,6 @@ class CspnActor(BasePolicy):
         # Save arguments to re-create object at loading
         self.features_dim = features_dim
         self.vi_ent_approx_sample_size = vi_ent_approx_sample_size
-        self.vi_aux_resp_ll_with_grad = vi_aux_resp_grad_mode >= 1
-        self.vi_aux_resp_sample_with_grad = vi_aux_resp_grad_mode == 2
 
         action_dim = get_action_dim(self.action_space)
 
@@ -131,20 +128,18 @@ class CspnActor(BasePolicy):
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         features = self.extract_features(obs)
         if th.is_grad_enabled():
-            action = self.cspn.sample_onehot_style(condition=features, is_mpe=deterministic)
+            action = self.cspn.sample_onehot_style(condition=features, is_mpe=deterministic).sample
         else:
-            action = self.cspn.sample_index_style(condition=features, is_mpe=deterministic)
+            action = self.cspn.sample_index_style(condition=features, is_mpe=deterministic).sample
         return action.squeeze(0)
 
-    def action_entropy(self, obs: th.Tensor) -> Tuple[th.Tensor, th.Tensor, dict]:
+    def action_entropy(self, obs: th.Tensor, log_ent_metrics: bool = True) -> Tuple[th.Tensor, th.Tensor, dict]:
         # return action and entropy
         features = self.extract_features(obs)
-        action = self.cspn.sample_onehot_style(condition=features, is_mpe=False).squeeze(0)
+        action = self.cspn.sample_onehot_style(condition=features, is_mpe=False).sample.squeeze(0).squeeze(0)
         entropy, vi_ent_log = self.cspn.vi_entropy_approx(
-            condition=None, verbose=True,
+            condition=None, verbose=log_ent_metrics,
             sample_size=self.vi_ent_approx_sample_size,
-            aux_resp_ll_with_grad=self.vi_aux_resp_ll_with_grad,
-            aux_resp_sample_with_grad=self.vi_aux_resp_sample_with_grad,
         )
         return action, entropy, vi_ent_log
 
@@ -194,7 +189,6 @@ class CspnCritic(BaseModel):
             sum_param_layers: int,
             dist_param_layers: int,
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
-            vi_aux_resp_grad_mode: int = 0,
             vi_ent_approx_sample_size: int = 5,
             normalize_images: bool = True,
             n_critics: int = 2,
@@ -215,8 +209,6 @@ class CspnCritic(BaseModel):
 
         self.share_features_extractor = share_features_extractor
         self.vi_ent_approx_sample_size = vi_ent_approx_sample_size
-        self.vi_aux_resp_ll_with_grad = vi_aux_resp_grad_mode >= 1
-        self.vi_aux_resp_sample_with_grad = vi_aux_resp_grad_mode == 2
         self.n_critics = n_critics
         self.q_networks = []
         for idx in range(n_critics):
@@ -278,8 +270,6 @@ class CspnCritic(BaseModel):
         return tuple(q_net.vi_entropy_approx(
             condition=features, verbose=True,
             sample_size=self.vi_ent_approx_sample_size,
-            aux_resp_ll_with_grad=self.vi_aux_resp_ll_with_grad,
-            aux_resp_sample_with_grad=self.vi_aux_resp_sample_with_grad,
         ) for q_net in self.q_networks)
 
 
@@ -458,7 +448,8 @@ class CspnSAC(SAC):
 
             with th.no_grad():
                 # Select action according to policy
-                next_actions, next_entropy, _ = self.actor.action_entropy(replay_data.next_observations)
+                next_actions, next_entropy, _ = self.actor.action_entropy(replay_data.next_observations,
+                                                                          log_ent_metrics=False)
                 # Compute the next Q values: min over all critics targets
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
@@ -507,6 +498,20 @@ class CspnSAC(SAC):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+
+            if False:
+                samples = self.actor.cspn.sample_index_style(
+                    condition=replay_data.observations.float(), n=10, is_mpe=False, start_at_layer=1)
+                nr_nodes, n, w, d, r = samples.shape
+                first_rep = samples[:, :, :, :, 0]
+                actions = first_rep.view(nr_nodes * n * w, d)
+                expanded_obs = replay_data.observations.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1)
+                expanded_obs = expanded_obs.reshape(nr_nodes * n * w, expanded_obs.size(-1))
+                q_vals = th.cat(self.critic(expanded_obs, actions), dim=1)
+                min_q_vals, _ =  th.min(q_vals, dim=1, keepdim=True)
+                min_q_vals = min_q_vals.view(nr_nodes, n, w)
+                one_state = min_q_vals[:, :, 0]
+                print(1)
 
         self._n_updates += gradient_steps
 

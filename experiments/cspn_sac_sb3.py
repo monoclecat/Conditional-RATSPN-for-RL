@@ -61,11 +61,6 @@ if __name__ == "__main__":
     parser.add_argument('--dist_param_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN dist param layers.')
     # VI entropy arguments
-    parser.add_argument('--vi_aux_resp_grad_mode', '-ent_grad_mode', type=int, default=0,
-                        help='Set gradient mode for auxiliary responsibility in variational inference '
-                             'entropy approximation. 0: No grad, '
-                             '1: Grad only for LL computation of child node samples, '
-                             '2: Grad also for child node sampling.')
     parser.add_argument('--vi_ent_sample_size', '-ent_sample_size', type=int, default=5,
                         help='Number of samples to approximate entropy with. ')
 
@@ -153,8 +148,6 @@ if __name__ == "__main__":
                         'sum_param_layers': model.actor.cspn.config.sum_param_layers,
                         'dist_param_layers': model.actor.cspn.config.dist_param_layers,
                         'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
-                        'vi_aux_resp_grad_mode': int(model.actor.vi_aux_resp_ll_with_grad) + \
-                                                 int(model.actor.vi_aux_resp_sample_with_grad),
                         'vi_ent_approx_sample_size': model.actor.vi_ent_approx_sample_size,
                     }
                 }
@@ -182,7 +175,6 @@ if __name__ == "__main__":
                     'sum_param_layers': args.sum_param_layers,
                     'dist_param_layers': args.dist_param_layers,
                     'cond_layers_inner_act': nn.Identity if args.no_relu else nn.ReLU,
-                    'vi_aux_resp_grad_mode': args.vi_aux_resp_grad_mode,
                     'vi_ent_approx_sample_size': args.vi_ent_sample_size,
                 }
                 sac_kwargs['policy_kwargs'] = {
