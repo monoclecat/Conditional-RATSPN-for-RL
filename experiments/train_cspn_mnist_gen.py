@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from distributions import RatNormal
 from cspn import CSPN, CspnConfig, print_cspn_params
 from rat_spn import RatSpn, RatSpnConfig
+from experiments.train_mnist import count_params
 
 
 def time_delta(t_delta: float) -> str:
@@ -80,11 +81,11 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
     with th.no_grad():
         if isinstance(model, CSPN):
             label = F.one_hot(label, 10).float().to(device)
-            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).squeeze(0)
+            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).sample.squeeze(0)
             if eval_ll:
                 log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
         else:
-            samples = model.sample(n=samples_per_label, class_index=label)
+            samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample.squeeze(0)
             if eval_ll:
                 log_like.append(model(x=samples).mean().tolist())
         if model.config.tanh_squash:
@@ -93,14 +94,14 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
         # plt.imshow(samples[0].cpu(), cmap='Greys')
         # plt.show()
         plot_samples(samples, save_dir)
-        if not mpe:
+        if False and not mpe:
             # To test sampling with evidence
             path_parts = save_dir.split('/')
             base_path = os.path.join('/', *path_parts[:-1], path_parts[-1].split('.')[0])
             for layer_nr in range(model.config.D * 2):
                 layer_nr_dir = os.path.join(base_path, f"layer{layer_nr}")
                 os.makedirs(layer_nr_dir, exist_ok=True)
-                samples = model.sample(mode='onehot', n=10, start_at_layer=layer_nr, split_by_scope=True)
+                samples = model.sample(mode='index', n=10, start_at_layer=layer_nr, split_by_scope=True).sample
                 if layer_nr == 0:
                     samples.unsqueeze_(-1)
                 # samples [nr_nodes, scopes, n, w, f, r]
@@ -113,7 +114,7 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
                     evidence_samples = model.sample(
                         condition=label, mode='index', evidence=evidence_samples,
                         n=None, is_mpe=mpe,
-                    )
+                    ).sample
                     if model.config.tanh_squash:
                         evidence_samples.mul_(0.5).add_(0.5)
                     evidence_samples = evidence_samples.view(*samples.shape)
@@ -152,7 +153,7 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
             zero[zero == 0.0] = th.nan
             zero = zero.flatten(start_dim=1).expand(10, -1)
             path_parts = save_dir.split('/')
-            evidence_samples = model.sample(condition=label, mode='index', evidence=zero, n=None, is_mpe=mpe)
+            evidence_samples = model.sample(condition=label, mode='index', evidence=zero, n=None, is_mpe=mpe).sample
             if model.config.tanh_squash:
                 evidence_samples.mul_(0.5).add_(0.5)
             evidence_samples = evidence_samples.view(-1, *img_size[1:])
@@ -324,7 +325,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', '-dev', type=str, default='cuda', choices=['cpu', 'cuda'])
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', '-ep', type=int, default=100)
+    parser.add_argument('--epochs', '-ep', type=int, default=10000)
     parser.add_argument('--learning_rate', '-lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--batch_size', '-bs', type=int, default=32)
     parser.add_argument('--results_dir', type=str, default='../../spn_experiments',
@@ -351,6 +352,8 @@ if __name__ == "__main__":
     parser.add_argument('--eval_interval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')
     parser.add_argument('--ratspn', action='store_true', help='Use a RATSPN and not a CSPN')
+    parser.add_argument('--no_ent_approx', '-no_ent', action='store_true', help="Don't compute entropy")
+    parser.add_argument('--sample_onehot', action='store_true', help="When evaluating model, sample onehot style.")
     parser.add_argument('--ent_approx__sample_size', type=int, default=5,
                         help='When approximating entropy, use this sample size. ')
     parser.add_argument('--ent_loss_coef', type=float, default=0.0,
@@ -424,8 +427,6 @@ if __name__ == "__main__":
             config.leaf_base_kwargs['max_sigma'] = 1.0
         if args.ratspn:
             model = RatSpn(config)
-            raise NotImplementedError("The log normalization of parameters in the layers "
-                                      "themselves was removed and must be redone.")
             count_params(model)
         else:
             model = CSPN(config)
@@ -453,9 +454,11 @@ if __name__ == "__main__":
     if not args.no_eval_at_start:
         print("Evaluating model ...")
         save_path = os.path.join(sample_dir, f"epoch-{epoch:03}_{args.exp_name}.png")
-        evaluate_sampling(model, save_path, device, img_size)
+        evaluate_sampling(model, save_path, device, img_size,
+                          style='onehot' if args.sample_onehot else 'index')
         save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:03}_{args.exp_name}.png")
-        evaluate_sampling(model, save_path, device, img_size, mpe=True)
+        evaluate_sampling(model, save_path, device, img_size, mpe=True,
+                          style='onehot' if args.sample_onehot else 'index')
         logger.reset(epoch)
         logger['mnist_test_ll'] = evaluate_model(model, device, test_loader, "MNIST test")
         logger.average()
@@ -481,12 +484,13 @@ if __name__ == "__main__":
             mse_loss = ll_loss = ent_loss = vi_ent_approx = th.zeros(1).to(device)
             def bookmark():
                 pass
-            if args.ratspn:
+            if model.is_ratspn:
                 output: th.Tensor = model(x=data)
                 loss_ce = F.cross_entropy(output.squeeze(1), label)
                 ll_loss = -output.mean()
                 loss = (1 - lmbda) * ll_loss + lmbda * loss_ce
-                vi_ent_approx = model.vi_entropy_approx(sample_size=10).mean()
+                if not args.no_ent_approx:
+                    vi_ent_approx = model.vi_entropy_approx(sample_size=args.ent_approx__sample_size).mean()
             else:
                 label = F.one_hot(label, cond_size).float().to(device)
                 if args.learn_by_sampling:
@@ -499,7 +503,6 @@ if __name__ == "__main__":
                     ll_loss = -output.mean()
                     vi_ent_approx, batch_ent_log = model.vi_entropy_approx(
                         sample_size=args.ent_approx__sample_size, condition=label, verbose=True,
-                        aux_resp_ll_with_grad=True, aux_resp_sample_with_grad=True,
                     )
                     vi_ent_approx = vi_ent_approx.mean()
                     if args.ent_loss_coef > 0.0:
@@ -532,9 +535,11 @@ if __name__ == "__main__":
         if epoch % sample_interval == (sample_interval-1):
             print("Evaluating model ...")
             save_path = os.path.join(sample_dir, f"epoch-{epoch:03}_{args.exp_name}.png")
-            evaluate_sampling(model, save_path, device, img_size)
+            evaluate_sampling(model, save_path, device, img_size,
+                              style='onehot' if args.sample_onehot else 'index')
             save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:03}_{args.exp_name}.png")
-            evaluate_sampling(model, save_path, device, img_size, mpe=True)
+            evaluate_sampling(model, save_path, device, img_size, mpe=True,
+                              style='onehot' if args.sample_onehot else 'index')
             logger['mnist_test_ll'] = evaluate_model(model, device, test_loader, "MNIST test")
 
         logger.average()
