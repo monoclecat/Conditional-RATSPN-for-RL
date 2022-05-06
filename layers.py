@@ -102,9 +102,10 @@ class Sum(AbstractLayer):
 
     @property
     def weights(self):
+        # weights should be [w, d, ic, oc, r]. In the RatSpn case, w is always 1
         if self.ratspn:
             # weight_param [d, ic, oc, r]
-            return F.log_softmax(self.weight_param, dim=1)
+            return F.log_softmax(self.weight_param, dim=1).unsqueeze(0)
         else:
             return self.weight_param
 
@@ -133,11 +134,7 @@ class Sum(AbstractLayer):
         x = x.unsqueeze(4)  # Shape: [n, w, d, ic, 1, r]
         weights: th.Tensor = self.weights
 
-        if self.weights.dim() == 4:
-            # RatSpns only have one set of weights, so we must augment the weight_set dimension
-            weights = weights.unsqueeze(0)
-
-        # Weights is of shape [n, d, ic, oc, r]
+        # Weights is of shape [w, d, ic, oc, r]
         oc = weights.size(3)
         # The weights must be expanded by the batch dimension so all samples of one conditional see the same weights.
         log_weights = weights.unsqueeze(0)
@@ -177,8 +174,6 @@ class Sum(AbstractLayer):
         # We now want to use `indices` to access one in_channel for each in_feature x out_channels block
         # index is of size in_feature
         weights: th.Tensor = self.weights
-        if weights.dim() == 4:
-            weights = weights.unsqueeze(0)
         # w is the number of weight sets
         w, d, ic, oc, r = weights.shape
         sample_size = ctx.n
