@@ -543,8 +543,13 @@ class RatSpn(nn.Module):
         logging = {}
 
         if layer_index == 0:
-            child_samples = self._leaf.sample_index_style(SamplingContext(n=sample_size, is_mpe=False))
-            child_ll = self._leaf(child_samples)
+            ctx = self.sample(
+                mode='index', n=sample_size, layer_index=layer_index, is_mpe=False,
+                do_sample_postprocessing=False
+            )
+            child_samples = ctx.sample
+
+            child_ll = self.forward(x=ctx.sample, layer_index=layer_index, x_needs_permutation=False)
             child_entropies = -child_ll.mean(dim=0, keepdim=True)
         else:
             layer_index -= 1
@@ -559,7 +564,7 @@ class RatSpn(nn.Module):
             else:
                 with th.no_grad():
                     ctx = self.sample(
-                        mode='index', n=sample_size, layer_index=layer_index, is_mpe=True,
+                        mode='index', n=sample_size, layer_index=layer_index, is_mpe=False,
                         do_sample_postprocessing=False
                     )
                     child_samples = ctx.sample
@@ -577,8 +582,6 @@ class RatSpn(nn.Module):
                     # child_ll [nr_nodes * n, w, d, nr_nodes, r]
 
                     child_ll = child_ll.view(nr_nodes, n, w, d, nr_nodes, r)
-
-                    # We can average over the sample_size dimension with size 'n' here already.
                     child_ll = child_ll.mean(dim=1)
 
                     if layer_index == len(self._inner_layers):
