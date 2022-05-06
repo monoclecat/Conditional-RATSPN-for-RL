@@ -163,7 +163,7 @@ class RatSpn(nn.Module):
 
         return x
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: th.Tensor, layer_index: int = None, x_needs_permutation: bool = True) -> th.Tensor:
         """
         Forward pass through RatSpn. Computes the conditional log-likelihood P(X | C).
 
@@ -171,40 +171,43 @@ class RatSpn(nn.Module):
             x: Input of shape [batch, weight_sets, in_features, channel].
                 batch: Number of samples per weight set (= per conditional in the CSPN sense).
                 weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
-
+            layer_index: Evaluate log-likelihood of x at layer
+            x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
+                permuted in the forward pass.
         Returns:
             th.Tensor: Conditional log-likelihood P(X | C) of the input.
         """
+        if layer_index is None:
+            layer_index = self.max_layer_index
+
         if x.dim() == 2:
             x = x.unsqueeze(1)
-        # Apply feature randomization for each repetition
-        x = self._randomize(x)
+
+        if x_needs_permutation:
+            # Apply feature randomization for each repetition
+            x = self._randomize(x)
 
         # Apply leaf distributions
         x = self._leaf(x)
 
-        # Pass through intermediate layers
-        x = self._forward_layers(x)
+        # Forward to inner product and sum layers
+        for layer in self._inner_layers[:layer_index]:
+            x = layer(x)
 
-        # Merge results from the different repetitions into the channel dimension
-        n, w, d, c, r = x.size()
-        assert d == 1  # number of features should be 1 at this point
-        # x = th.as_tensor(np.arange(x.shape[-2] * x.shape[-1])).reshape(x.shape[-2], x.shape[-1]).repeat(256, 1, 1, 1)
-        # a = th.as_tensor([-10.0, -1.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0]).log_softmax(dim=0)
-        # a = th.as_tensor([-10.0] * c)
-        # a[1] = -1.0
-        # a = a.log_softmax(dim=0)
-        # x = a.unsqueeze(2).repeat(n, w, d, 1, r)
-        x = x.view(n, w, d, c * r, 1)
+        if layer_index == self.max_layer_index:
+            # Merge results from the different repetitions into the channel dimension
+            n, w, d, c, r = x.size()
+            assert d == 1  # number of features should be 1 at this point
+            x = x.view(n, w, d, c * r, 1)
 
-        # Apply C sum node outputs
-        x = self.root(x)
+            # Apply C sum node outputs
+            x = self.root(x)
 
-        # Remove repetition dimension
-        x = x.squeeze(4)
+            # Remove repetition dimension
+            x = x.squeeze(4)
 
-        # Remove in_features dimension
-        x = x.squeeze(2)
+            # Remove in_features dimension
+            x = x.squeeze(2)
 
         return x
 
