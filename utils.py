@@ -61,6 +61,17 @@ class SamplingContext:
     # MPE flag, if true, will perform most probable explanation sampling
     is_mpe: bool = False
 
+    sample: th.Tensor = None
+    sampled_with_evidence: bool = None
+    sampling_mode: str = None
+    evidence_filled_in: bool = False
+    is_split_by_scope: bool = False
+    needs_squashing: bool = None
+
+    # If False, the sample is the direct output of the leaves. The leaf features are the scrambled input features.
+    # If True, the samples are feature-aligned with the data
+    permutation_inverted: bool = False
+
     def __setattr__(self, key, value):
         if hasattr(self, key):
             super().__setattr__(key, value)

@@ -121,102 +121,66 @@ class RatNormal(Leaf):
 
         return x
 
-    def sample(self, ctx: SamplingContext = None):
-        raise NotImplementedError("sample() has been split up into sample_index_style() and sample_onehot_style()!"
-                                  "Please choose one.")
-
-    def sample_index_style(self, ctx: SamplingContext = None) -> th.Tensor:
+    def sample(self, mode: str = None, ctx: SamplingContext = None):
         """
         Perform sampling, given indices from the parent layer that indicate which of the multiple representations
         for each input shall be used.
         """
+        means, stds = self.means, self.stds
+        selected_means, selected_stds, rep_ind = None, None, None
+
         if ctx.is_root:
-            if ctx.is_mpe:
-                samples: th.Tensor = self.means.unsqueeze(0).expand(ctx.n, -1, -1, -1, -1)
-            else:
-                gauss = dist.Normal(self.means, self.stds)
-                samples: th.Tensor = gauss.rsample(sample_shape=(ctx.n,))
-        else:
+            selected_means = means.unsqueeze(0).expand(ctx.n, -1, -1, -1, -1)
+            if not ctx.is_mpe:
+                selected_stds = stds.unsqueeze(0).expand(ctx.n, -1, -1, -1, -1)
+        elif mode == 'index':
             nr_nodes, n, w = ctx.parent_indices.shape[:3]
-            _, d, i, r = self.means.shape
-            selected_means = self.means.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1, -1, -1)
-            selected_stds = self.stds.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1, -1, -1)
+            _, d, i, r = means.shape
+            selected_means = means.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1, -1, -1)
 
             if ctx.repetition_indices is not None:
                 rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 rep_ind = rep_ind.expand(-1, -1, -1, d, i, -1)
                 selected_means = th.gather(selected_means, dim=-1, index=rep_ind).squeeze(-1)
-                selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind).squeeze(-1)
 
             # Select means and std in the output_channel dimension
             par_ind = ctx.parent_indices.unsqueeze(4)
             selected_means = th.gather(selected_means, dim=4, index=par_ind).squeeze(4)
-            selected_stds = th.gather(selected_stds, dim=4, index=par_ind).squeeze(4)
+            if not ctx.is_mpe:
+                selected_stds = stds.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1, -1, -1)
+                if ctx.repetition_indices is not None:
+                    selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind).squeeze(-1)
+                selected_stds = th.gather(selected_stds, dim=4, index=par_ind).squeeze(4)
 
-            if ctx.is_mpe:
-                samples = selected_means
-            else:
-                gauss = dist.Normal(selected_means, selected_stds)
-                samples = gauss.rsample()
-
-        return samples
-
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> th.Tensor:
-        """
-        Perform sampling, given indices from the parent layer that indicate which of the multiple representations
-        for each input shall be used.
-        """
-        if ctx.is_root:
-            if ctx.is_mpe:
-                samples: th.Tensor = self.means.unsqueeze(0).expand(ctx.n, -1, -1, -1, -1)
-            else:
-                gauss = dist.Normal(self.means, self.stds)
-                samples: th.Tensor = gauss.rsample(sample_shape=(ctx.n,))
-        else:
+        else:  # mode == 'onehot'
             # ctx.parent_indices shape [nr_nodes, n, w, f, oc, r]
-            # self.means shape [w, f, oc, r]
-            selected_means = self.means * ctx.parent_indices
+            # means shape [w, f, oc, r]
+            selected_means = means * ctx.parent_indices
             assert ctx.parent_indices.detach().sum(4).max().item() == 1.0
             selected_means = selected_means.sum(4)
             if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
                 # Only one repetition is selected, remove repetition dim of parameters
                 selected_means = selected_means.sum(-1)
 
-            if ctx.is_mpe:
-                samples = selected_means
-            else:
-                selected_stds = self.stds * ctx.parent_indices
+            if not ctx.is_mpe:
+                selected_stds = stds * ctx.parent_indices
                 selected_stds = selected_stds.sum(4)
                 if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
                     # Only one repetition is selected, remove repetition dim of parameters
                     selected_stds = selected_stds.sum(-1)
 
-                gauss = dist.Normal(selected_means, selected_stds)
-                samples = gauss.rsample()
-
+        if ctx.is_mpe:
+            samples = selected_means
+        else:
+            gauss = dist.Normal(selected_means, selected_stds)
+            samples = gauss.rsample()
         return samples
 
-    def bound_dist_params(self):
-        sigma = self.stds
-        means = self.means
-        if self._tanh_squash:
-            means = th.clamp(self.means, -6.0, 6.0)
-        else:
-            if self.min_sigma:
-                if self.min_sigma < self.max_sigma:
-                    sigma_ratio = th.sigmoid(self.stds)
-                    sigma = self.min_sigma + (self.max_sigma - self.min_sigma) * sigma_ratio
-                else:
-                    sigma = 1.0
+    def sample_index_style(self, ctx: SamplingContext = None) -> th.Tensor:
+        return self.sample(mode='index', ctx=ctx)
 
-            if self.max_mean:
-                assert self.min_mean is not None
-                # mean_range = self.max_mean - self.min_mean
-                # means = th.sigmoid(self.means) * mean_range + self.min_mean
-                means = th.clamp(means, self.min_mean, self.max_mean)
-
-        self.means = means
-        self.stds = sigma
+    def sample_onehot_style(self, ctx: SamplingContext = None) -> th.Tensor:
+        return self.sample(mode='onehot', ctx=ctx)
 
     def _get_base_distribution(self) -> th.distributions.Distribution:
         gauss = dist.Normal(self.means, self.stds)

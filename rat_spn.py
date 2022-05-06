@@ -150,8 +150,9 @@ class RatSpn(nn.Module):
         """
         # Expand input to the number of repetitions
         n, w = x.shape[:2]
-        x = x.unsqueeze(3)  # Make space for repetition axis
-        x = x.repeat((1, 1, 1, self.config.R))  # Repeat R times
+        if x.dim() == 3:
+            x = x.unsqueeze(3)  # Make space for repetition axis
+            x = x.repeat((1, 1, 1, self.config.R))  # Repeat R times
 
         # Random permutation
         perm_indices = self.permutation.unsqueeze(0).unsqueeze(0).expand(n, w, -1, -1)
