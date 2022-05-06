@@ -295,32 +295,21 @@ class IndependentMultivariate(Leaf):
         raise Exception("IndependentMultivariate does not have an explicit PyTorch base distribution.")
 
     def sample(self, mode: str = None, ctx: SamplingContext = None):
-        if mode == 'index':
-            return self.sample_index_style(ctx)
-        else:
-            return self.sample_onehot_style(ctx)
+        if not ctx.is_root:
+            ctx = self.prod.sample(ctx=ctx)
+
+            # Remove padding
+            if self._pad:
+                ctx.parent_indices = ctx.parent_indices[:, :, :, :-self._pad]
+
+        samples = self.base_leaf.sample(ctx=ctx, mode=mode)
+        return samples
 
     def sample_index_style(self, ctx: SamplingContext = None) -> th.Tensor:
-        if not ctx.is_root:
-            ctx = self.prod.sample(ctx=ctx)
-
-            # Remove padding
-            if self._pad:
-                ctx.parent_indices = ctx.parent_indices[:, :, :, :-self._pad]
-
-        samples = self.base_leaf.sample_index_style(ctx=ctx)
-        return samples
+        return self.sample(ctx=ctx, mode='index')
 
     def sample_onehot_style(self, ctx: SamplingContext = None) -> th.Tensor:
-        if not ctx.is_root:
-            ctx = self.prod.sample(ctx=ctx)
-
-            # Remove padding
-            if self._pad:
-                ctx.parent_indices = ctx.parent_indices[:, :, :, :-self._pad]
-
-        samples = self.base_leaf.sample_onehot_style(ctx=ctx)
-        return samples
+        return self.sample(ctx=ctx, mode='onehot')
 
     def moments(self):
         """Get the mean, variance and third central moment (unnormalized skew)"""
