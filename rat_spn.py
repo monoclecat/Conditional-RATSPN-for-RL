@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Type, List
+from typing import Dict, Type, List, Union, Optional, Tuple
 import math
 
 import numpy as np
@@ -123,8 +123,23 @@ class RatSpn(nn.Module):
         # Obtain permutation indices
         self._make_random_repetition_permutation_indices()
 
-        self.max_layer_index = len(self._inner_layers) + 1
-        self.num_layers = self.max_layer_index + 1
+        self.__max_layer_index = len(self._inner_layers) + 1
+        self.num_layers = self.__max_layer_index + 1
+
+    @property
+    def max_layer_index(self):
+        return self.__max_layer_index
+
+    def layer_index_to_obj(self, layer_index):
+        if layer_index == 0:
+            return self._leaf
+        elif layer_index < self.__max_layer_index:
+            return self._inner_layers[layer_index-1]
+        elif layer_index == self.__max_layer_index:
+            return self.root
+        else:
+            raise IndexError(f"layer_index must take a value between 0 and {self.max_layer_index}, "
+                             f"but it was {layer_index}!")
 
     def _make_random_repetition_permutation_indices(self):
         """Create random permutation indices for each repetition."""
@@ -533,127 +548,159 @@ class RatSpn(nn.Module):
     def sample_onehot_style(self, **kwargs):
         return self.sample(mode='onehot', **kwargs)
 
+    def approx_responsibilities(self, layer_index, sample_size: int = 5, return_samples: bool = False) \
+            -> Tuple[th.Tensor, Optional[th.Tensor]]:
+        """
+        Approximate the responsibilities of a Sum layer in the Spn.
+        For this it draws samples of the child nodes of the layer. These samples can be returned as well.
+
+        Args:
+            layer_index: The layer index to evaluate. The layer must be a Sum layer.
+            sample_size: Number of samples to evaluate responsibilities on.
+                Responsibilities can't be computed in closed form.
+            return_samples: If True, the samples are returned which were used to calculate the responsibilities.
+
+        Returns: Tuple of
+            responsibilities: th.Tensor of shape [w, d, oc of child layer, oc, r of child layer].
+            samples: th.Tensor of shape [ic, samples per node, w, f, r]
+                (w is the number of weight sets = the number of conditionals, f = self.config.F)
+
+        """
+        layer = self.layer_index_to_obj(layer_index)
+        assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
+        ctx = self.sample(
+            mode='index', n=sample_size, layer_index=layer_index-1, is_mpe=True,
+            do_sample_postprocessing=False
+        )
+        samples = ctx.sample
+        # child_samples [nr_nodes (= oc of current layer), sample_size, w, self.config.F, r]
+
+        # We sampled all ic nodes of each repetition in the child layer
+        ic, n, w, f, r = samples.shape
+
+        # Combine first two dims of samples
+        # samples[ic, n] -> [ic * n]: [0,0] -> [0], ..., [0, n-1] -> [n-1], [1, 0] -> [n], ...
+        child_ll = self.forward(x=samples.view(ic * n, w, f, r), layer_index=layer_index-1,
+                                x_needs_permutation=False)
+        d = child_ll.shape[2]
+        # child_ll [ic * n, w, d, ic, r]
+
+        child_ll = child_ll.view(ic, n, w, d, ic, r)
+        child_ll = child_ll.mean(dim=1)
+
+        if layer_index == self.max_layer_index:  # layer is root sum layer
+            # Now we are dealing with a log-likelihood tensor with the shape [ic, w, 1, ic, r],
+            # where child_ll[0,0,:,:,0] are the log-likelihoods of the ic nodes in the first repetition
+            # given the samples from the first node of that repetition.
+            # The problem is that the weights of the root sum node don't recognize different, separated
+            # repetitions, so we reshape the weights to make the repetition dimension explicit again.
+            # This is equivalent to splitting up the root sum node into one sum node per repetition,
+            # with another sum node sitting on top.
+            root_weights_over_rep = layer.weights.view(w, 1, r, ic).permute(0, 1, 3, 2).unsqueeze(-2)
+            log_weights = th.log_softmax(root_weights_over_rep, dim=2)
+            # child_ll and the weights are log-scaled, so we add them together.
+            ll = child_ll.unsqueeze(-2) + log_weights.unsqueeze(0)
+            # ll shape [ic, w, 1, ic, r]
+            ll = th.logsumexp(ll, dim=3)
+        else:
+            ll = layer(child_ll)
+            log_weights = layer.weights
+
+            # We have the log-likelihood of the current sum layer w.r.t. the samples from its children.
+            # We permute the dims so this tensor is of shape [w, d, ic, oc, r]
+        ll = ll.permute(1, 2, 0, 3, 4)
+
+        # child_ll now contains the log-likelihood of the samples from all of its 'ic' nodes per feature and
+        # repetition - ic * d * r in total.
+        # child_ll contains the LL of the samples of each node evaluated among all other nodes - separated
+        # by repetition and feature.
+        # The tensor shape is [ic, w, d, ic, r]. Looking at one weight set, one feature and one repetition,
+        # we are looking at the slice [:, 0, 0, :, 0].
+        # The first dimension is the dimension of the samples - there are 'ic' of them.
+        # The 4th dimension is the dimension of the LLs of the nodes for those samples.
+        # So [4, 0, 0, :, 0] contains the LLs of all nodes given the sample from the fifth node.
+        # Likewise, [:, 0, 0, 2, 0] contains the LLs of the samples of all nodes, evaluated at the third node.
+        # We needed the full child_ll tensor to compute the LLs of the current layer, but now we only
+        # require the LLs of each node's own samples.
+        child_ll = child_ll[range(ic), :, :, range(ic), :]  # [ic, w, d, r]
+        child_ll = child_ll.permute(1, 2, 0, 3)
+        child_ll = child_ll.unsqueeze(3)  # [w, d, ic, 1, r]
+
+        responsibilities: th.Tensor = log_weights.detach() + child_ll - ll
+        return responsibilities, (samples if return_samples else None)
+
     def layer_entropy_approx(self, layer_index=0, child_entropies: th.Tensor = None,
-                             sample_size=10, verbose=False, return_child_samples=False):
+                             sample_size=5, verbose=False):
+        """
+
+        Args:
+            layer_index:
+            child_entropies: th.Tensor of shape [w, d, oc of child layer == ic of this layer, r]
+            sample_size:
+            verbose:
+            return_child_samples:
+
+        Returns: Tuple of
+            node_entropies: th.Tensor of size [w, d, oc of child layer == ic of this layer, r]
+            child_samples: th.Tensor
+
+        """
         assert child_entropies is not None or layer_index == 0, \
             "When sampling from a layer other than the leaf layer, child entropies must be provided!"
-        assert layer_index <= self.max_layer_index, f"layer_index is {layer_index} but must not be larger than " \
-                                                    f"{self.max_layer_index}"
-        log_weights = th.empty(1)  # To satisfy PyCharm type checker
         logging = {}
 
         if layer_index == 0:
             ctx = self.sample(
-                mode='index', n=sample_size, layer_index=layer_index, is_mpe=False,
+                mode='onehot', n=sample_size, layer_index=layer_index, is_mpe=False,
                 do_sample_postprocessing=False
             )
-            child_samples = ctx.sample
 
             child_ll = self.forward(x=ctx.sample, layer_index=layer_index, x_needs_permutation=False)
-            child_entropies = -child_ll.mean(dim=0, keepdim=True)
+            node_entropies = -child_ll.mean(dim=0)
         else:
-            layer_index -= 1
-            if layer_index < len(self._inner_layers):
-                layer = self._inner_layers[layer_index]
-            else:
-                layer = self.root
+            layer = self.layer_index_to_obj(layer_index)
 
             if isinstance(layer, CrossProduct):
-                child_entropies = layer(child_entropies)
-                child_samples = None
+                node_entropies = layer(child_entropies.unsqueeze(0)).squeeze(0)
             else:
                 with th.no_grad():
-                    ctx = self.sample(
-                        mode='index', n=sample_size, layer_index=layer_index, is_mpe=False,
-                        do_sample_postprocessing=False
-                    )
-                    child_samples = ctx.sample
-                    # child_samples [nr_nodes (= oc of current layer), sample_size, w, self.config.F, r]
+                    aux_responsibility, _ = self.approx_responsibilities(layer_index=layer_index,
+                                                                         sample_size=sample_size)
+                w, d, ic, oc, r = aux_responsibility.shape
 
-                    # The nr_nodes is the number of input channels (ic) to the
-                    # current layer - we sampled all its input channels.
-                    nr_nodes, n, w, f, r = child_samples.shape
-
-                    # Combine first two dims of child_ll.
-                    # child_ll [0,0] -> [0], ..., [0, n-1] -> [n-1], [1, 0] -> [n], ...
-                    child_samples = child_samples.view(nr_nodes * n, w, f, r)
-                    child_ll = self.forward(x=child_samples, layer_index=layer_index, x_needs_permutation=False)
-                    d = child_ll.shape[2]
-                    # child_ll [nr_nodes * n, w, d, nr_nodes, r]
-
-                    child_ll = child_ll.view(nr_nodes, n, w, d, nr_nodes, r)
-                    child_ll = child_ll.mean(dim=1)
-
-                    if layer_index == len(self._inner_layers):
-                        # Now we are dealing with a log-likelihood tensor with the shape [ic, w, 1, ic, r],
-                        # where child_ll[0,0,:,:,0] are the log-likelihoods of the ic nodes in the first repetition
-                        # given the samples from the first node of that repetition.
-                        # The problem is that the weights of the root sum node don't recognize different, separated
-                        # repetitions, so we reshape the weights to make the repetition dimension explicit again.
-                        # This is equivalent to splitting up the root sum node into one sum node per repetition,
-                        # with another sum node sitting on top.
-                        root_weights_over_rep = layer.weights.view(w, 1, r, nr_nodes).permute(0, 1, 3, 2).unsqueeze(-2)
-                        log_weights = th.log_softmax(root_weights_over_rep, dim=2)
-                        # child_ll and the weights are log-scaled, so we add them together.
-                        ll = child_ll.unsqueeze(-2) + log_weights.unsqueeze(0)
-                        # ll shape [nr_nodes, w, 1, nr_nodes, r]
-                        ll = th.logsumexp(ll, dim=3)
-
-                        # first reshape the tensor to get the nodes over which we sampled into
-                        # the first dimension.
-                        # ll = child_ll.permute(0, 4, 1, 2, 3).reshape(nr_nodes * r, w, 1, nr_nodes)
-                        # ll[0,0,:,:] are the log-likelihoods of the samples from the first node computed among the 'nr_nodes'
-                        # other nodes within that repetition. But the root sum nodes wants the log-likelihoods of the
-                        # other 'nr_nodes*(r-1)' nodes w.r.t. to that same sample as well! They are all zero.
-
-                    else:
-                        ll = layer(child_ll)
-
-                        # We have the log-likelihood of the current sum layer w.r.t. the samples from its children.
-                        # We permute the dims so this tensor is of shape [w, d, nr_nodes, oc, r]
-                    ll = ll.permute(1, 2, 0, 3, 4)
-
-                    # child_ll now contains the log-likelihood of the samples from all of its 'nr_nodes' nodes per feature and
-                    # repetition - nr_nodes * d * r in total.
-                    # child_ll contains the LL of the samples of each node evaluated among all other nodes - separated
-                    # by repetition and feature.
-                    # The tensor shape is [nr_nodes, w, d, nr_nodes, r]. Looking at one weight set, one feature and one repetition,
-                    # we are looking at the slice [:, 0, 0, :, 0].
-                    # The first dimension is the dimension of the samples - there are 'nr_nodes' of them.
-                    # The 4th dimension is the dimension of the LLs of the nodes for those samples.
-                    # So [4, 0, 0, :, 0] contains the LLs of all nodes given the sample from the fifth node.
-                    # Likewise, [:, 0, 0, 2, 0] contains the LLs of the samples of all nodes, evaluated at the third node.
-                    # We needed the full child_ll tensor to compute the LLs of the current layer, but now we only
-                    # require the LLs of each node's own samples.
-                    child_ll = child_ll[range(nr_nodes), :, :, range(nr_nodes), :]  # [nr_nodes, w, d, r]
-                    child_ll = child_ll.permute(1, 2, 0, 3)
-                    child_ll = child_ll.unsqueeze(3)  # [w, d, nr_nodes, 1, r]
-
-                layer_log_weights = layer.weights
                 # layer.weights is a property that normalizes the weights every time in the RatSpn case.
                 # By calling it only once we save computation.
-                weight_entropy = -(layer_log_weights.exp() * layer_log_weights).sum(dim=2)
-                if not layer_index == len(self._inner_layers):
-                    # In the other case, log_weights has already been set.
-                    log_weights = layer_log_weights
-                weights = log_weights.exp()
-                child_entropies.squeeze_(0)
-                weighted_ch_ents = th.sum(child_entropies.unsqueeze(3) * weights, dim=2)
-                aux_responsibility = log_weights.detach() + child_ll - ll
-                weighted_aux_responsibility = th.sum(weights * aux_responsibility, dim=2)
-                if layer_index == len(self._inner_layers):
-                    weight_entropy = weight_entropy.squeeze(-1)
-                    weights = root_weights_over_rep.exp().sum(dim=2).softmax(dim=-1)
-                    weighted_ch_ents = th.sum(weighted_ch_ents * weights, dim=-1)
-                    weighted_aux_responsibility = th.sum(weights * weighted_aux_responsibility, dim=-1)
-                child_entropies = weight_entropy + weighted_ch_ents + weighted_aux_responsibility
-                child_entropies.unsqueeze_(0)
+                layer_log_weights = layer.weights
+                weights = layer_log_weights.exp()
+                weight_entropy = th.sum(-weights * layer_log_weights, dim=2)
+
+                if layer_index < self.max_layer_index:
+                    weighted_ch_ents = th.sum(weights * child_entropies.unsqueeze(3), dim=2)
+                    weighted_aux_resp = th.sum(weights * aux_responsibility, dim=2)
+                else:
+                    # We cannot simply reshape aux_responsibility to the shape of the weights and renormalize
+                    # because the responsibilities are only valid within the repetition where they are calculated.
+                    # So we need to reshape and normalize the root weights to imitate sum nodes for each
+                    # repetition separately, and then a sum node over the three repetitions.
+                    # The same calculations that are applied to the aux_responsibilities must also be applied to
+                    # the child entropies. Otherwise we mess up the gradients.
+                    weights = weights.view(w, 1, r, ic).permute(0, 1, 3, 2).unsqueeze(-2)
+
+                    weights_over_ic = weights.softmax(dim=2)
+                    weighted_ch_ents = th.sum(weights_over_ic * child_entropies.unsqueeze(3), dim=2)
+                    weighted_aux_resp = th.sum(weights_over_ic * aux_responsibility, dim=2)
+
+                    weights_over_rep = weights.sum(dim=2).softmax(dim=-1)
+                    weighted_ch_ents = th.sum(weights_over_rep * weighted_ch_ents, dim=-1, keepdim=True)
+                    weighted_aux_resp = th.sum(weights_over_rep * weighted_aux_resp, dim=-1, keepdim=True)
+
+                node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_resp
+
                 if verbose:
-                    # weight_entropy = -(layer.weights.exp() * layer.weights).sum(dim=2)
                     metrics = {
                         'weight_entropy': weight_entropy.detach(),
                         'weighted_child_ent': weighted_ch_ents.detach(),
-                        'weighted_aux_resp': weighted_aux_responsibility.detach(),
+                        'weighted_aux_resp': weighted_aux_resp.detach(),
                     }
                     logging[layer_index] = {}
                     for rep in range(weight_entropy.size(-1)):
@@ -667,7 +714,7 @@ class RatSpn(nn.Module):
                                 f"{rep_key}/{key}/std": metric.index_select(-1, rep).std(dim=0).mean().item(),
                             })
 
-        return child_entropies, child_samples, logging
+        return node_entropies, logging
 
     def vi_entropy_approx(self, sample_size=10, verbose=False):
         """
@@ -684,13 +731,184 @@ class RatSpn(nn.Module):
 
         child_entropies = None
         for layer_index in range(self.num_layers):
-            child_entropies, _, layer_log = self.layer_entropy_approx(
+            child_entropies, layer_log = self.layer_entropy_approx(
                 layer_index=layer_index, child_entropies=child_entropies,
                 sample_size=sample_size, verbose=verbose
             )
             logging.update(layer_log)
 
         return child_entropies.flatten(), logging
+
+    def old2_vi_entropy_approx(self, sample_size=10, verbose=False, aux_resp_ll_with_grad=False,
+                              aux_resp_sample_with_grad=False):
+        """
+        Approximate the entropy of the root sum node via variational inference,
+        as done in the Variational Inference by Policy Search paper.
+        Args:
+            sample_size: Number of samples to approximate the expected entropy of the responsibility with.
+            verbose: Return logging data
+            aux_resp_ll_with_grad: When approximating the auxiliary responsibility from log-likelihoods
+                of child samples, backpropagate the gradient through the LL calculation.
+                This argument will be ignored if this function is called in a th.no_grad() context.
+            aux_resp_sample_with_grad: May only be True if aux_resp_ll_with_grad is True too. Backpropagate through
+                the sampling of the child nodes as well.
+                This argument will be ignored if this function is called in a th.no_grad() context.
+        """
+        assert not self.config.gmm_leaves, "VI entropy not tested on GMM leaves yet."
+        assert self.config.C == 1, "For C > 1, we must calculate starting from self._sampling_root!"
+        assert not aux_resp_sample_with_grad or (aux_resp_sample_with_grad and aux_resp_ll_with_grad), \
+            "aux_resp_sample_with_grad may only be True if aux_resp_ll_with_grad is True as well."
+        root_weights_over_rep = th.empty(1)  # For PyCharm
+        log_weights = th.empty(1)
+        logging = {}
+
+        node_entropies = None
+        for layer_index in range(self.num_layers):
+
+            if layer_index == 0:
+                ctx = self.sample(
+                    mode='onehot', n=sample_size, layer_index=layer_index, is_mpe=False,
+                    do_sample_postprocessing=False
+                )
+
+                child_ll = self.forward(x=ctx.sample, layer_index=layer_index, x_needs_permutation=False)
+                node_entropies = -child_ll.mean(dim=0)
+            else:
+                layer = self.layer_index_to_obj(layer_index)
+                i = layer_index - 1
+
+                if isinstance(layer, CrossProduct):
+                    node_entropies = layer(node_entropies.unsqueeze(0)).squeeze(0)
+                else:
+                    with th.set_grad_enabled(aux_resp_ll_with_grad and th.is_grad_enabled()):
+                        ctx = SamplingContext(n=sample_size, is_mpe=True)
+                        if aux_resp_sample_with_grad and th.is_grad_enabled():
+                            # noinspection PyTypeChecker
+                            for child_layer in reversed(self._inner_layers[:i]):
+                                ctx = child_layer.sample_onehot_style(ctx)
+                            child_sample = self._leaf.sample_onehot_style(ctx)
+                        else:
+                            with th.no_grad():
+                                # noinspection PyTypeChecker
+                                for child_layer in reversed(self._inner_layers[:i]):
+                                    ctx = child_layer.sample_index_style(ctx)
+                                child_sample = self._leaf.sample_index_style(ctx)
+
+                        if child_sample.dim() == 4:
+                            # child_sample is missing repetition dim. This happens when R=1.
+                            child_sample = child_sample.unsqueeze(-1)
+                        # The nr_nodes is the number of input channels (ic) to the
+                        # current layer - we sampled all its input channels.
+                        ic, n, w, d, r = child_sample.shape
+
+                        # Combine first two dims of child_ll.
+                        # child_ll [0,0] -> [0], ..., [0, n-1] -> [n-1], [1, 0] -> [n], ...
+                        child_sample = child_sample.view(ic * n, w, d, r)
+                        child_ll = self._leaf(child_sample)
+                        _, w, d, leaf_oc, r = child_ll.shape
+                        child_ll = child_ll.view(ic, n, w, d, leaf_oc, r)
+
+                        # We can average over the sample_size dimension with size 'n' here already.
+                        child_ll = child_ll.mean(dim=1)
+
+                        # noinspection PyTypeChecker
+                        for child_layer in self._inner_layers[:i]:
+                            child_ll = child_layer(child_ll)
+
+                        if i == len(self._inner_layers):
+                            # Now we are dealing with a log-likelihood tensor with the shape [ic, w, 1, ic, r],
+                            # where child_ll[0,0,:,:,0] are the log-likelihoods of the ic nodes in the first repetition
+                            # given the samples from the first node of that repetition.
+                            # The problem is that the weights of the root sum node don't recognize different, separated
+                            # repetitions, so we reshape the weights to make the repetition dimension explicit again.
+                            # This is equivalent to splitting up the root sum node into one sum node per repetition,
+                            # with another sum node sitting on top.
+                            root_weights_over_rep = layer.weights.view(w, 1, r, ic).permute(0, 1, 3, 2).unsqueeze(-2)
+                            log_weights = th.log_softmax(root_weights_over_rep, dim=2)
+                            # child_ll and the weights are log-scaled, so we add them together.
+                            ll = child_ll.unsqueeze(-2) + log_weights.unsqueeze(0)
+                            # ll shape [ic, w, 1, ic, r]
+                            ll = th.logsumexp(ll, dim=3)
+
+                            # first reshape the tensor to get the nodes over which we sampled into
+                            # the first dimension.
+                            # ll = child_ll.permute(0, 4, 1, 2, 3).reshape(ic * r, w, 1, ic)
+                            # ll[0,0,:,:] are the log-likelihoods of the samples from the first node computed among the 'ic'
+                            # other nodes within that repetition. But the root sum nodes wants the log-likelihoods of the
+                            # other 'ic*(r-1)' nodes w.r.t. to that same sample as well! They are all zero.
+
+                        else:
+                            ll = layer(child_ll)
+
+                            # We have the log-likelihood of the current sum layer w.r.t. the samples from its children.
+                            # We permute the dims so this tensor is of shape [w, d, ic, oc, r]
+                        ll = ll.permute(1, 2, 0, 3, 4)
+
+                        # child_ll now contains the log-likelihood of the samples from all of its 'ic' nodes per feature and
+                        # repetition - ic * d * r in total.
+                        # child_ll contains the LL of the samples of each node evaluated among all other nodes - separated
+                        # by repetition and feature.
+                        # The tensor shape is [ic, w, d, ic, r]. Looking at one weight set, one feature and one repetition,
+                        # we are looking at the slice [:, 0, 0, :, 0].
+                        # The first dimension is the dimension of the samples - there are 'ic' of them.
+                        # The 4th dimension is the dimension of the LLs of the nodes for those samples.
+                        # So [4, 0, 0, :, 0] contains the LLs of all nodes given the sample from the fifth node.
+                        # Likewise, [:, 0, 0, 2, 0] contains the LLs of the samples of all nodes, evaluated at the third node.
+                        # We needed the full child_ll tensor to compute the LLs of the current layer, but now we only
+                        # require the LLs of each node's own samples.
+                        child_ll = child_ll[range(ic), :, :, range(ic), :]  # [ic, w, d, r]
+                        child_ll = child_ll.permute(1, 2, 0, 3)
+                        child_ll = child_ll.unsqueeze(3)  # [w, d, ic, 1, r]
+
+                    if not i == len(self._inner_layers):
+                        log_weights = layer.weights
+                    weights = log_weights.exp()
+
+                    aux_responsibility = log_weights.detach() + child_ll - ll
+                    weighted_aux_responsibility = th.sum(weights * aux_responsibility, dim=2)
+                    if i == len(self._inner_layers):
+                        weights = root_weights_over_rep.exp().sum(dim=2).softmax(dim=-1)
+                        weighted_aux_responsibility = th.sum(weights * weighted_aux_responsibility, dim=-1)
+
+
+                    # NEW
+                    layer_log_weights = layer.weights
+                    lay_weights = layer_log_weights.exp()
+
+                    weight_entropy = th.sum(-lay_weights * layer_log_weights, dim=2)
+
+                    if layer_index == self.max_layer_index:
+                        node_entropies = node_entropies.permute(0, 1, 3, 2).reshape(*node_entropies.shape[:2],
+                                                                                    np.prod(node_entropies.shape[2:]),
+                                                                                    1)
+                    weighted_ch_ents = th.sum(node_entropies.unsqueeze(3) * lay_weights, dim=2)
+
+                    if i == len(self._inner_layers):
+                        weight_entropy = weight_entropy.squeeze(-1)
+                        weighted_ch_ents = weighted_ch_ents.squeeze(-1)
+
+                    node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_responsibility
+                    if verbose:
+                        weight_entropy = -(layer.weights.exp() * layer.weights).sum(dim=2)
+                        metrics = {
+                            'weight_entropy': weight_entropy.detach(),
+                            'weighted_child_ent': weighted_ch_ents.detach(),
+                            'weighted_aux_resp': weighted_aux_responsibility.detach(),
+                        }
+                        logging[i] = {}
+                        for rep in range(weight_entropy.size(-1)):
+                            rep_key = f"rep{rep}"
+                            rep = th.as_tensor(rep, device=self._device)
+                            for key, metric in metrics.items():
+                                logging[i].update({
+                                    f"{rep_key}/{key}/min": metric.index_select(-1, rep).min().item(),
+                                    f"{rep_key}/{key}/max": metric.index_select(-1, rep).max().item(),
+                                    f"{rep_key}/{key}/mean": metric.index_select(-1, rep).mean().item(),
+                                    f"{rep_key}/{key}/std": metric.index_select(-1, rep).std(dim=0).mean().item(),
+                                })
+
+        return node_entropies.flatten(), logging
+
 
     def old_vi_entropy_approx(self, sample_size=10, verbose=False, aux_resp_ll_with_grad=False,
                           aux_resp_sample_with_grad=False):
