@@ -27,6 +27,27 @@ def build_ratspn(F, I):
     return model
 
 
+class Target:
+    """
+        Target distribution to fit. Is kind of like a prison.
+    """
+    def __init__(self, num_dims):
+        self.num_dims = num_dims
+        self.wall_thickness = 2
+        self.num_cells_per_dim = 8
+        self.target_support = np.asarray([[-50, 50], [-50, 50]])  # x and y support
+        self.l_bound = self.target_support[:, 0]
+        self.u_bound = self.target_support[:, 1]
+        self.cell_size = (self.u_bound - self.l_bound) / self.num_cells_per_dim
+
+    def evaluate(self, point):
+        dist_ahead = point % self.cell_size
+        dist_behind = self.cell_size - (point % self.cell_size)
+        min_dist = np.min([dist_behind, dist_ahead], axis=0)
+        is_in_wall = np.max(min_dist < self.wall_thickness / 2, axis = 1)
+        return is_in_wall
+
+
 class GMM:
     # Class Constructor
     def __init__(self, num_dimensions):
@@ -127,6 +148,8 @@ if __name__ == "__main__":
                         help='The base directory where the directory containing the results will be saved to.')
     parser.add_argument('--resp_with_grad', action='store_true',
                         help="If True, approximation of responsibilities is done with grad enabled.")
+    parser.add_argument('--fit_to_prison', action='store_true',
+                        help="If True, the SPN is trained to fit a wall-devided cell rectangle cell structure. ")
     args = parser.parse_args()
 
     for d in [args.results_dir]:
@@ -134,10 +157,13 @@ if __name__ == "__main__":
             os.makedirs(d)
 
     num_dimensions = 2
-    num_true_components = 10
-    target_gmm_prior_variance = 1e3
-    [target_lnpdf, _, _, target_mixture] = build_GMM_lnpdf(num_dimensions, num_true_components,
-                                                           target_gmm_prior_variance)
+    if args.fit_to_prison:
+        target_mixture = Target(num_dimensions)
+    else:
+        num_true_components = 10
+        target_gmm_prior_variance = 1e3
+        [target_lnpdf, _, _, target_mixture] = build_GMM_lnpdf(num_dimensions, num_true_components,
+                                                               target_gmm_prior_variance)
 
     grid_spacing = 501
     x = np.linspace(-50, 50, grid_spacing)
@@ -147,7 +173,7 @@ if __name__ == "__main__":
     target_probs = target_mixture.evaluate(grid).reshape(grid_spacing, grid_spacing)
     if True:
         plt.imshow(target_probs)
-        plt.title(f"Target distribution with {num_true_components} components")
+        plt.title(f"Target distribution {f'with {num_true_components} components' if not args.fit_to_prison else ''}")
         plt.show()
 
     model = build_ratspn(num_dimensions, int(num_true_components * 1.0)).to('cuda')
@@ -156,10 +182,16 @@ if __name__ == "__main__":
     grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
     fps = 10
-    gif_duration = 60 if args.resp_with_grad else 10 # seconds
+    if args.fit_to_prison:
+        gif_duration = 10  # seconds
+        n_steps = 1000
+    else:
+        gif_duration = 60 if args.resp_with_grad else 10 # seconds
+        n_steps = 48000 if args.resp_with_grad else 3000
     n_frames = fps * gif_duration
-    n_steps = 48000 if args.resp_with_grad else 3000
 
+    def bookmark():
+        pass
     frames = []
     losses = []
     t_start = time.time()
@@ -173,8 +205,13 @@ if __name__ == "__main__":
             losses = []
             t_start = time.time()
 
-        ent, _ = model.vi_entropy_approx(sample_size=25, grad_thru_resp=args.resp_with_grad)
-        loss = -ent.mean() * 10.0
+        if args.fit_to_prison:
+            sample = model.sample(mode='onehot', n=100)
+            log_prob = model(sample)
+            loss = -target_mixture.evaluate(sample) * log_prob
+        else:
+            ent, _ = model.vi_entropy_approx(sample_size=25, grad_thru_resp=args.resp_with_grad)
+            loss = -ent.mean() * 10.0
         losses.append(loss.item())
         optimizer.zero_grad()
         loss.backward()
