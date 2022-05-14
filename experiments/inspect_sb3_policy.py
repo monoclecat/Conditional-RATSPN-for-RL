@@ -32,6 +32,10 @@ if __name__ == "__main__":
 
     args.model_paths = [
         # Ant-v3 experiments
+        # '/home/i53/student/andrew_delay/log/aux_resp_grad_modes/basset/sample_grad_low_ent_coef_s10/models/model_1000000steps.zip',
+        # '/home/i53/student/andrew_delay/log/aux_resp_grad_modes/sample_grad_s10/models/model_1000000steps.zip',
+        # '/home/i53/student/andrew_delay/log/aux_resp_grad_modes/no_grad_s10/models/model.zip',
+        '/home/i53/student/andrew_delay/ant_grad_exp/no_grad_s50/models/model.zip',
         # '/home/fritz/PycharmProjects/cspn_rl_experiments/labrador_SAC_aux_resp__no_grad_Ant-v3_s10/sac_cspn_Ant-v3_aux_resp__no_grad_s10_1000000steps.zip',
         # '/home/fritz/PycharmProjects/cspn_rl_experiments/labrador_SAC_aux_resp__ll_grad_Ant-v3_s10/sac_cspn_Ant-v3_aux_resp__ll_grad_s10_1000000steps.zip',
         # '/home/fritz/PycharmProjects/cspn_rl_experiments/labrador_SAC_aux_resp__sample_grad_Ant-v3_s10/sac_cspn_Ant-v3_aux_resp__sample_grad_s10_1000000steps.zip',

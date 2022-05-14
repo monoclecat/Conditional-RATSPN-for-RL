@@ -298,7 +298,7 @@ class RatSpn(nn.Module):
             )
 
     @property
-    def _device(self):
+    def device(self):
         """Small hack to obtain the current device."""
         return self._sampling_root.weights.device
 
@@ -395,8 +395,8 @@ class RatSpn(nn.Module):
                 # Create new sampling context
                 # raise NotImplementedError("This case has not been touched yet. Please verify.")
                 # ctx = SamplingContext(n=n,
-                                      # parent_indices=class_index.repeat(n, 1).unsqueeze(-1).to(self._device),
-                                      # repetition_indices=th.zeros((n, class_index.shape[0]), dtype=int, device=self._device),
+                                      # parent_indices=class_index.repeat(n, 1).unsqueeze(-1).to(self.device),
+                                      # repetition_indices=th.zeros((n, class_index.shape[0]), dtype=int, device=self.device),
                                       # is_mpe=is_mpe)
             ctx = SamplingContext(
                 n=n, is_mpe=is_mpe, sampling_mode=mode, needs_squashing=self.config.tanh_squash,
@@ -548,7 +548,8 @@ class RatSpn(nn.Module):
     def sample_onehot_style(self, **kwargs):
         return self.sample(mode='onehot', **kwargs)
 
-    def approx_responsibilities(self, layer_index, sample_size: int = 5, return_samples: bool = False) \
+    def approx_responsibilities(self, layer_index, sample_size: int = 5,
+                                return_samples: bool = False, with_grad = False) \
             -> Tuple[th.Tensor, Optional[th.Tensor]]:
         """
         Approximate the responsibilities of a Sum layer in the Spn.
@@ -569,7 +570,7 @@ class RatSpn(nn.Module):
         layer = self.layer_index_to_obj(layer_index)
         assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
         ctx = self.sample(
-            mode='index', n=sample_size, layer_index=layer_index-1, is_mpe=True,
+            mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=True,
             do_sample_postprocessing=False
         )
         samples = ctx.sample
@@ -630,13 +631,14 @@ class RatSpn(nn.Module):
         return responsibilities, (samples if return_samples else None)
 
     def layer_entropy_approx(self, layer_index=0, child_entropies: th.Tensor = None,
-                             sample_size=5, verbose=False):
+                             sample_size=5, grad_thru_resp = False, verbose=False):
         """
 
         Args:
             layer_index:
             child_entropies: th.Tensor of shape [w, d, oc of child layer == ic of this layer, r]
             sample_size:
+            grad_thru_resp: If False, the approximation of the responsibility is done without grad.
             verbose:
             return_child_samples:
 
@@ -663,9 +665,9 @@ class RatSpn(nn.Module):
             if isinstance(layer, CrossProduct):
                 node_entropies = layer(child_entropies.unsqueeze(0)).squeeze(0)
             else:
-                with th.no_grad():
-                    aux_responsibility, _ = self.approx_responsibilities(layer_index=layer_index,
-                                                                         sample_size=sample_size)
+                with th.set_grad_enabled(grad_thru_resp):
+                    aux_responsibility, _ = self.approx_responsibilities(
+                        layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp)
                 w, d, ic, oc, r = aux_responsibility.shape
 
                 # layer.weights is a property that normalizes the weights every time in the RatSpn case.
@@ -705,7 +707,7 @@ class RatSpn(nn.Module):
                     logging[layer_index] = {}
                     for rep in range(weight_entropy.size(-1)):
                         rep_key = f"rep{rep}"
-                        rep = th.as_tensor(rep, device=self._device)
+                        rep = th.as_tensor(rep, device=self.device)
                         for key, metric in metrics.items():
                             logging[layer_index].update({
                                 f"{rep_key}/{key}/min": metric.index_select(-1, rep).min().item(),
@@ -716,13 +718,14 @@ class RatSpn(nn.Module):
 
         return node_entropies, logging
 
-    def vi_entropy_approx(self, sample_size=10, verbose=False):
+    def vi_entropy_approx(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) -> Tuple[th.Tensor, Optional[Dict]]:
         """
         Approximate the entropy of the root sum node via variational inference,
         as done in the Variational Inference by Policy Search paper.
 
         Args:
             sample_size: Number of samples to approximate the expected entropy of the responsibility with.
+            grad_thru_resp: If False, the approximation of the responsibility is done without grad.
             verbose: Return logging data
         """
         assert not self.config.gmm_leaves, "VI entropy not tested on GMM leaves yet."
@@ -733,7 +736,7 @@ class RatSpn(nn.Module):
         for layer_index in range(self.num_layers):
             child_entropies, layer_log = self.layer_entropy_approx(
                 layer_index=layer_index, child_entropies=child_entropies,
-                sample_size=sample_size, verbose=verbose
+                sample_size=sample_size, grad_thru_resp=grad_thru_resp, verbose=verbose,
             )
             logging.update(layer_log)
 
@@ -898,7 +901,7 @@ class RatSpn(nn.Module):
                         logging[i] = {}
                         for rep in range(weight_entropy.size(-1)):
                             rep_key = f"rep{rep}"
-                            rep = th.as_tensor(rep, device=self._device)
+                            rep = th.as_tensor(rep, device=self.device)
                             for key, metric in metrics.items():
                                 logging[i].update({
                                     f"{rep_key}/{key}/min": metric.index_select(-1, rep).min().item(),
@@ -1051,7 +1054,7 @@ class RatSpn(nn.Module):
                     logging[i] = {}
                     for rep in range(weight_entropy.size(-1)):
                         rep_key = f"rep{rep}"
-                        rep = th.as_tensor(rep, device=self._device)
+                        rep = th.as_tensor(rep, device=self.device)
                         for key, metric in metrics.items():
                             logging[i].update({
                                 f"{rep_key}/{key}/min": metric.index_select(-1, rep).min().item(),
