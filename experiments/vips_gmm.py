@@ -16,7 +16,7 @@ def build_ratspn(F, I):
     config = RatSpnConfig()
     config.C = 1
     config.F = F
-    config.R = 3
+    config.R = 2
     config.D = int(np.log2(F))
     config.I = I
     config.S = 3
@@ -25,6 +25,27 @@ def build_ratspn(F, I):
     model = RatSpn(config)
     count_params(model)
     return model
+
+
+class Target:
+    """
+        Target distribution to fit. Is kind of like a prison.
+    """
+    def __init__(self, num_dims):
+        self.num_dims = num_dims
+        self.wall_thickness = 2
+        self.num_cells_per_dim = 8
+        self.target_support = np.asarray([[-50, 50], [-50, 50]])  # x and y support
+        self.l_bound = self.target_support[:, 0]
+        self.u_bound = self.target_support[:, 1]
+        self.cell_size = (self.u_bound - self.l_bound) / self.num_cells_per_dim
+
+    def evaluate(self, point):
+        dist_ahead = point % self.cell_size
+        dist_behind = self.cell_size - (point % self.cell_size)
+        min_dist = np.min([dist_behind, dist_ahead], axis=0)
+        is_in_wall = np.max(min_dist < self.wall_thickness / 2, axis = 1)
+        return is_in_wall
 
 
 class GMM:
@@ -128,6 +149,8 @@ if __name__ == "__main__":
     parser.add_argument('--resp_with_grad', action='store_true',
                         help="If True, approximation of responsibilities is done with grad enabled.")
     parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--fit_to_prison', action='store_true',
+                        help="If True, the SPN is trained to fit a wall-devided cell rectangle cell structure. ")
     args = parser.parse_args()
 
     th.manual_seed(args.seed)
@@ -137,10 +160,13 @@ if __name__ == "__main__":
             os.makedirs(d)
 
     num_dimensions = 2
-    num_true_components = 10
-    target_gmm_prior_variance = 1e3
-    [target_lnpdf, _, _, target_mixture] = build_GMM_lnpdf(num_dimensions, num_true_components,
-                                                           target_gmm_prior_variance)
+    if args.fit_to_prison:
+        target_mixture = Target(num_dimensions)
+    else:
+        num_true_components = 10
+        target_gmm_prior_variance = 1e3
+        [target_lnpdf, _, _, target_mixture] = build_GMM_lnpdf(num_dimensions, num_true_components,
+                                                               target_gmm_prior_variance)
 
     grid_spacing = 501
     x = np.linspace(-50, 50, grid_spacing)
@@ -150,19 +176,28 @@ if __name__ == "__main__":
     target_probs = target_mixture.evaluate(grid).reshape(grid_spacing, grid_spacing)
     if True:
         plt.imshow(target_probs)
-        plt.title(f"Target distribution with {num_true_components} components")
+        plt.title(f"Target distribution {f'with {num_true_components} components' if not args.fit_to_prison else ''}")
         plt.show()
+    model = build_ratspn(
+        num_dimensions,
+        15 if args.fit_to_prison else int(num_true_components * 1.0)
+    ).to('cuda')
 
-    model = build_ratspn(num_dimensions, int(num_true_components * 1.0)).to('cuda')
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
-    fps = 30
-    gif_duration = 10 # seconds
+    fps = 10
+    if args.fit_to_prison:
+        gif_duration = 10  # seconds
+        n_steps = 1000
+    else:
+        gif_duration = 60 if args.resp_with_grad else 10 # seconds
+        n_steps = 48000 if args.resp_with_grad else 3000
     n_frames = fps * gif_duration
-    n_steps = 48000 if args.resp_with_grad else 3000
 
+    def bookmark():
+        pass
     frames = []
     losses = []
     t_start = time.time()
@@ -176,14 +211,22 @@ if __name__ == "__main__":
             losses = []
             t_start = time.time()
 
-        ent, _ = model.vi_entropy_approx(sample_size=25, grad_thru_resp=args.resp_with_grad)
-        loss = -ent.mean() * 10.0
+        if args.fit_to_prison:
+            sample = model.sample(mode='onehot', n=100)
+            log_prob = model(sample)
+            loss = -target_mixture.evaluate(sample) * log_prob
+        else:
+            ent, _ = model.vi_entropy_approx(sample_size=25, grad_thru_resp=args.resp_with_grad)
+            loss = -ent.mean() * 10.0
         losses.append(loss.item())
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-    save_path = os.path.join(args.results_dir, f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}.gif")
+    save_path = os.path.join(
+        args.results_dir,
+        f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}_seed{args.seed}.gif"
+    )
     gif.save(frames, save_path, duration=1/fps, unit='s')
 
     print(1)
