@@ -16,7 +16,7 @@ def build_ratspn(F, I):
     config = RatSpnConfig()
     config.C = 1
     config.F = F
-    config.R = 3
+    config.R = 2
     config.D = int(np.log2(F))
     config.I = I
     config.S = 3
@@ -175,8 +175,11 @@ if __name__ == "__main__":
         plt.imshow(target_probs)
         plt.title(f"Target distribution {f'with {num_true_components} components' if not args.fit_to_prison else ''}")
         plt.show()
+    model = build_ratspn(
+        num_dimensions,
+        15 if args.fit_to_prison else int(num_true_components * 1.0)
+    ).to('cuda')
 
-    model = build_ratspn(num_dimensions, int(num_true_components * 1.0)).to('cuda')
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
@@ -217,7 +220,10 @@ if __name__ == "__main__":
         loss.backward()
         optimizer.step()
 
-    save_path = os.path.join(args.results_dir, f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}.gif")
+    save_path = os.path.join(
+        args.results_dir,
+        f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}_seed{args.seed}.gif"
+    )
     gif.save(frames, save_path, duration=1/fps, unit='s')
 
     print(1)
