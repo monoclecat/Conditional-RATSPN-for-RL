@@ -127,7 +127,10 @@ if __name__ == "__main__":
                         help='The base directory where the directory containing the results will be saved to.')
     parser.add_argument('--resp_with_grad', action='store_true',
                         help="If True, approximation of responsibilities is done with grad enabled.")
+    parser.add_argument('--seed', '-s', type=int, default=0)
     args = parser.parse_args()
+
+    th.manual_seed(args.seed)
 
     for d in [args.results_dir]:
         if not os.path.exists(d):
@@ -155,8 +158,8 @@ if __name__ == "__main__":
 
     grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
-    fps = 10
-    gif_duration = 60 if args.resp_with_grad else 10 # seconds
+    fps = 30
+    gif_duration = 10 # seconds
     n_frames = fps * gif_duration
     n_steps = 48000 if args.resp_with_grad else 3000
 
