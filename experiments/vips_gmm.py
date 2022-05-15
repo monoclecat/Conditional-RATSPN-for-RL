@@ -144,16 +144,15 @@ def gif_frame(probs):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
+    parser.add_argument('--ent_approx_sample_size', '-samples', type=int, default=5)
     parser.add_argument('--results_dir', type=str, default='../../spn_experiments',
                         help='The base directory where the directory containing the results will be saved to.')
     parser.add_argument('--resp_with_grad', action='store_true',
                         help="If True, approximation of responsibilities is done with grad enabled.")
-    parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--fit_to_prison', action='store_true',
                         help="If True, the SPN is trained to fit a wall-devided cell rectangle cell structure. ")
     args = parser.parse_args()
-
-    th.manual_seed(args.seed)
 
     for d in [args.results_dir]:
         if not os.path.exists(d):
@@ -178,55 +177,64 @@ if __name__ == "__main__":
         plt.imshow(target_probs)
         plt.title(f"Target distribution {f'with {num_true_components} components' if not args.fit_to_prison else ''}")
         plt.show()
-    model = build_ratspn(
-        num_dimensions,
-        15 if args.fit_to_prison else int(num_true_components * 1.0)
-    ).to('cuda')
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    for seed in args.seed:
+        th.manual_seed(seed)
 
-    grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
+        model = build_ratspn(
+            num_dimensions,
+            15 if args.fit_to_prison else int(num_true_components * 1.0)
+        ).to('cuda')
 
-    fps = 10
-    gif_duration = 10  # seconds
-    if args.fit_to_prison:
-        n_steps = 1000
-    else:
-        n_steps = 48000 if args.resp_with_grad else 3000
-    n_frames = fps * gif_duration
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    def bookmark():
-        pass
-    frames = []
-    losses = []
-    t_start = time.time()
-    for step in range(int(n_steps)):
-        if step % int(n_steps / n_frames) == 0:
-            probs = model(grid_tensor)
-            frame = gif_frame(probs)
-            frames.append(frame)
-            t_delta = np.around(time.time() - t_start, 2)
-            print(f"Time delta: {time_delta(t_delta)} - Avg. loss at step {step}: {round(np.mean(losses), 2)}")
-            losses = []
-            t_start = time.time()
+        grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
+        fps = 10
+        gif_duration = 10  # seconds
         if args.fit_to_prison:
-            sample = model.sample(mode='onehot', n=100)
-            log_prob = model(sample)
-            loss = -target_mixture.evaluate(sample) * log_prob
+            n_steps = 1000
         else:
-            ent, _ = model.vi_entropy_approx(sample_size=25, grad_thru_resp=args.resp_with_grad)
-            loss = -ent.mean() * 10.0
-        losses.append(loss.item())
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            n_steps = 48000 if args.resp_with_grad else 3000
+        n_frames = fps * gif_duration
 
-    save_path = os.path.join(
-        args.results_dir,
-        f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}_seed{args.seed}.gif"
-    )
-    gif.save(frames, save_path, duration=1/fps, unit='s')
+        def bookmark():
+            pass
+        frames = []
+        losses = []
+        t_start = time.time()
+        for step in range(int(n_steps)):
+            if step % int(n_steps / n_frames) == 0:
+                probs = model(grid_tensor)
+                frame = gif_frame(probs)
+                frames.append(frame)
+                t_delta = np.around(time.time() - t_start, 2)
+                print(f"Time delta: {time_delta(t_delta)} - Avg. loss at step {step}: {round(np.mean(losses), 2)}")
+                losses = []
+                t_start = time.time()
 
-    print(1)
+            if args.fit_to_prison:
+                sample = model.sample(mode='onehot', n=100)
+                log_prob = model(sample)
+                loss = -target_mixture.evaluate(sample) * log_prob
+            else:
+                ent, _ = model.vi_entropy_approx(
+                    sample_size=args.ent_approx_sample_size,
+                    grad_thru_resp=args.resp_with_grad
+                )
+                loss = -ent.mean() * 10.0
+            losses.append(loss.item())
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        save_path = os.path.join(
+            args.results_dir,
+            f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}"
+            f"_samples{args.ent_approx_sample_size}"
+            f"_seed{seed}.gif"
+        )
+        gif.save(frames, save_path, duration=1/fps, unit='s')
+
+        print(f"Finished with seed {seed}")
 
