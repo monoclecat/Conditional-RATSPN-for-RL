@@ -569,11 +569,10 @@ class RatSpn(nn.Module):
         """
         layer = self.layer_index_to_obj(layer_index)
         assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
-        with th.no_grad():
-            ctx = self.sample(
-                mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=True,
-                do_sample_postprocessing=False
-            )
+        ctx = self.sample(
+            mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=True,
+            do_sample_postprocessing=False
+        )
         samples = ctx.sample
         # child_samples [nr_nodes (= oc of current layer), sample_size, w, self.config.F, r]
 
