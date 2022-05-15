@@ -185,11 +185,10 @@ if __name__ == "__main__":
     grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
     fps = 10
+    gif_duration = 10  # seconds
     if args.fit_to_prison:
-        gif_duration = 10  # seconds
         n_steps = 1000
     else:
-        gif_duration = 60 if args.resp_with_grad else 10 # seconds
         n_steps = 48000 if args.resp_with_grad else 3000
     n_frames = fps * gif_duration
 
