@@ -148,9 +148,12 @@ if __name__ == "__main__":
                         help='The base directory where the directory containing the results will be saved to.')
     parser.add_argument('--resp_with_grad', action='store_true',
                         help="If True, approximation of responsibilities is done with grad enabled.")
+    parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--fit_to_prison', action='store_true',
                         help="If True, the SPN is trained to fit a wall-devided cell rectangle cell structure. ")
     args = parser.parse_args()
+
+    th.manual_seed(args.seed)
 
     for d in [args.results_dir]:
         if not os.path.exists(d):
