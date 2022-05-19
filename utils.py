@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from typing import Dict, Type, List, Union, Optional, Tuple
 
 import torch as th
 from torch import nn
@@ -44,9 +45,9 @@ def provide_evidence(spn: nn.Module, evidence: th.Tensor, requires_grad=False):
 
 
 @dataclass
-class SamplingContext:
+class Sample:
     # Number of samples
-    n: int = None
+    n: Union[th.Size, Tuple[int]] = None
 
     # Number of scopes of the layer we are starting sampling at. This is only needed if the scopes of each
     # sampled nodes should be made explicit in the Spn's full scope.
@@ -62,6 +63,7 @@ class SamplingContext:
     is_mpe: bool = False
 
     sample: th.Tensor = None
+    has_rep_dim: bool = True
     sampled_with_evidence: bool = None
     sampling_mode: str = None
     evidence_filled_in: bool = False

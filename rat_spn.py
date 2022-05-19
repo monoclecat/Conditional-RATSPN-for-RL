@@ -12,7 +12,7 @@ from torch import distributions as dist
 from base_distributions import Leaf
 from layers import CrossProduct, Sum
 from type_checks import check_valid
-from utils import provide_evidence, SamplingContext
+from utils import provide_evidence, Sample
 from distributions import IndependentMultivariate, GaussianMixture, truncated_normal_
 
 logger = logging.getLogger(__name__)
@@ -328,7 +328,7 @@ class RatSpn(nn.Module):
             self, mode: str = None, n=1, class_index=None, evidence: th.Tensor = None, is_mpe: bool = False,
             layer_index: int = None, do_sample_postprocessing: bool = True,
             post_processing_kwargs: dict = None,
-    ) -> SamplingContext:
+    ) -> Sample:
         """
         Sample from the distribution represented by this SPN.
 
@@ -354,7 +354,7 @@ class RatSpn(nn.Module):
                 split_by_scope (bool), invert_permutation (bool)
 
         Returns:
-            SamplingContext with
+            Sample with
                 sample (th.Tensor): Samples generated according to the distribution specified by the SPN.
                     When sampling the root sum node of the SPN, the tensor will be of size [nr_nodes, n, w, f]:
                         nr_nodes: Dimension over the nodes being sampled. When sampling from the root sum node,
@@ -394,11 +394,11 @@ class RatSpn(nn.Module):
             # if class_index is not None:
                 # Create new sampling context
                 # raise NotImplementedError("This case has not been touched yet. Please verify.")
-                # ctx = SamplingContext(n=n,
+                # ctx = Sample(n=n,
                                       # parent_indices=class_index.repeat(n, 1).unsqueeze(-1).to(self.device),
                                       # repetition_indices=th.zeros((n, class_index.shape[0]), dtype=int, device=self.device),
                                       # is_mpe=is_mpe)
-            ctx = SamplingContext(
+            ctx = Sample(
                 n=n, is_mpe=is_mpe, sampling_mode=mode, needs_squashing=self.config.tanh_squash,
                 sampled_with_evidence=evidence is not None,
             )
@@ -443,6 +443,7 @@ class RatSpn(nn.Module):
                     nr_nodes, n, w, _, _, _ = ctx.parent_indices.shape
                     ctx.parent_indices = ctx.parent_indices.view(nr_nodes, n, w, 1, -1, self.config.R)
                     # ctx.parent_indices [nr_nodes, n, w, d, ic, r]
+                ctx.has_rep_dim = False  # The final sample will not have a repetition dimension
 
             # Continue at layers
             # Sample inner layers in reverse order (starting from topmost)
@@ -465,14 +466,14 @@ class RatSpn(nn.Module):
         return ctx
 
     def sample_postprocessing(
-            self, ctx: SamplingContext, evidence: th.Tensor = None, split_by_scope: bool = False,
+            self, ctx: Sample, evidence: th.Tensor = None, split_by_scope: bool = False,
             invert_permutation: bool = True,
-    ) -> SamplingContext:
+    ) -> Sample:
         """
         Apply postprocessing to samples.
 
         Args:
-            ctx: SamplingContext returned by sample().
+            ctx: Sample returned by sample().
             evidence: Evidence that can be provided to condition the samples. If evidence is given, `n` and
                 `class_index` must be `None`. Evidence must contain NaN values which will be imputed according to the
                 distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
@@ -484,22 +485,21 @@ class RatSpn(nn.Module):
             invert_permutation: Invert permutation of data features.
 
         Returns:
-            A modified SamplingContext.
+            A modified Sample. See doc string of sample() for shape information.
         """
-        has_rep_dim = ctx.sample.dim() == 5
         sample = ctx.sample
         if split_by_scope:
             assert self.config.F % ctx.scopes == 0, "Size of entire scope is not divisible by the number of" \
                                                     " scopes in the layer we are sampling from. What do?"
             features_per_scope = self.config.F // ctx.scopes
 
-            samples = sample.unsqueeze(1)
-            samples = sample.repeat(1, ctx.scopes, *([1] * (samples.dim()-2)))
+            sample = sample.unsqueeze(1)
+            sample = sample.repeat(1, ctx.scopes, *([1] * (sample.dim()-2)))
 
             for i in range(ctx.scopes):
                 mask = th.ones(self.config.F, dtype=th.bool)
                 mask[i * features_per_scope:(i + 1) * features_per_scope] = False
-                samples[:, i, :, :, mask, ...] = th.nan
+                sample[:, i, :, :, mask, ...] = th.nan
 
         # Each repetition has its own inverted permutation which we now apply to the samples.
         if invert_permutation:
@@ -509,7 +509,7 @@ class RatSpn(nn.Module):
                 else:
                     rep_sel_inv_perm = self.inv_permutation.unsqueeze(0).unsqueeze(0).unsqueeze(0)
                     # The squeeze(1) is only for the case that split_by_scope is True and ctx.scopes == 1
-                    # rep_sel_inv_perm = rep_sel_inv_perm.expand(*samples.shape[:-2], -1, -1).squeeze(1)
+                    # rep_sel_inv_perm = rep_sel_inv_perm.expand(*sample.shape[:-2], -1, -1).squeeze(1)
             else:
                 rep_sel_inv_perm = self.inv_permutation * ctx.parent_indices.detach().sum(-2).long()
                 if not has_rep_dim:
@@ -548,9 +548,9 @@ class RatSpn(nn.Module):
     def sample_onehot_style(self, **kwargs):
         return self.sample(mode='onehot', **kwargs)
 
-    def approx_responsibilities(self, layer_index, sample_size: int = 5,
-                                return_samples: bool = False, with_grad = False) \
-            -> Tuple[th.Tensor, Optional[th.Tensor]]:
+    def approx_responsibilities(self, layer_index, sample_size: int = 5, return_sample_ctx: bool = False,
+                                with_grad=False) \
+            -> Tuple[th.Tensor, Optional[Sample]]:
         """
         Approximate the responsibilities of a Sum layer in the Spn.
         For this it draws samples of the child nodes of the layer. These samples can be returned as well.
@@ -784,7 +784,7 @@ class RatSpn(nn.Module):
                     node_entropies = layer(node_entropies.unsqueeze(0)).squeeze(0)
                 else:
                     with th.set_grad_enabled(aux_resp_ll_with_grad and th.is_grad_enabled()):
-                        ctx = SamplingContext(n=sample_size, is_mpe=True)
+                        ctx = Sample(n=(sample_size,), is_mpe=True)
                         if aux_resp_sample_with_grad and th.is_grad_enabled():
                             # noinspection PyTypeChecker
                             for child_layer in reversed(self._inner_layers[:i]):
@@ -936,7 +936,7 @@ class RatSpn(nn.Module):
         log_weights = th.empty(1)
         logging = {}
 
-        child_ll = self._leaf.sample_onehot_style(SamplingContext(n=sample_size, is_mpe=False))
+        child_ll = self._leaf.sample_onehot_style(Sample(n=sample_size, is_mpe=False))
         child_ll = self._leaf(child_ll)
         child_entropies = -child_ll.mean(dim=0, keepdim=True)
 
@@ -950,7 +950,7 @@ class RatSpn(nn.Module):
                 child_entropies = layer(child_entropies)
             else:
                 with th.set_grad_enabled(aux_resp_ll_with_grad and th.is_grad_enabled()):
-                    ctx = SamplingContext(n=sample_size, is_mpe=False)
+                    ctx = Sample(n=sample_size, is_mpe=False)
                     if aux_resp_sample_with_grad and th.is_grad_enabled():
                         # noinspection PyTypeChecker
                         for child_layer in reversed(self._inner_layers[:i]):

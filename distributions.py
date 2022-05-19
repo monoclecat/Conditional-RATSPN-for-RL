@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from base_distributions import Leaf, dist_forward
 from layers import Product, Sum
 from type_checks import check_valid
-from utils import SamplingContext
+from utils import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ class RatNormal(Leaf):
 
         return x
 
-    def sample(self, mode: str = None, ctx: SamplingContext = None):
+    def sample(self, mode: str = None, ctx: Sample = None):
         """
         Perform sampling, given indices from the parent layer that indicate which of the multiple representations
         for each input shall be used.
@@ -176,10 +176,10 @@ class RatNormal(Leaf):
             samples = gauss.rsample()
         return samples
 
-    def sample_index_style(self, ctx: SamplingContext = None) -> th.Tensor:
+    def sample_index_style(self, ctx: Sample = None) -> th.Tensor:
         return self.sample(mode='index', ctx=ctx)
 
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> th.Tensor:
+    def sample_onehot_style(self, ctx: Sample = None) -> th.Tensor:
         return self.sample(mode='onehot', ctx=ctx)
 
     def _get_base_distribution(self) -> th.distributions.Distribution:
@@ -294,7 +294,7 @@ class IndependentMultivariate(Leaf):
     def _get_base_distribution(self):
         raise Exception("IndependentMultivariate does not have an explicit PyTorch base distribution.")
 
-    def sample(self, mode: str = None, ctx: SamplingContext = None):
+    def sample(self, mode: str = None, ctx: Sample = None):
         if not ctx.is_root:
             ctx = self.prod.sample(ctx=ctx)
 
@@ -305,10 +305,10 @@ class IndependentMultivariate(Leaf):
         samples = self.base_leaf.sample(ctx=ctx, mode=mode)
         return samples
 
-    def sample_index_style(self, ctx: SamplingContext = None) -> th.Tensor:
+    def sample_index_style(self, ctx: Sample = None) -> th.Tensor:
         return self.sample(ctx=ctx, mode='index')
 
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> th.Tensor:
+    def sample_onehot_style(self, ctx: Sample = None) -> th.Tensor:
         return self.sample(ctx=ctx, mode='onehot')
 
     def moments(self):
@@ -353,7 +353,7 @@ class GaussianMixture(IndependentMultivariate):
         else:
             return self.sum(x)
 
-    def sample(self, ctx: SamplingContext = None) -> th.Tensor:
+    def sample(self, ctx: Sample = None) -> th.Tensor:
         context_overhang = ctx.parent_indices.size(1) - self.sum.in_features
         assert context_overhang >= 0, f"context_overhang is negative! ({context_overhang})"
         if context_overhang:

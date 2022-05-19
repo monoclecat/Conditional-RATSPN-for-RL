@@ -11,7 +11,7 @@ from torch import distributions as dist
 from torch import nn
 from torch.nn import functional as F
 
-from utils import SamplingContext
+from utils import Sample
 from clipper import DistributionClipper
 from layers import AbstractLayer, Sum
 from type_checks import check_valid
@@ -43,7 +43,7 @@ def dist_forward(distribution, x):
     return x
 
 
-def _mode(distribution: dist.Distribution, context: SamplingContext = None) -> th.Tensor:
+def _mode(distribution: dist.Distribution, context: Sample = None) -> th.Tensor:
     """
     Get the mode of a given distribution.
 
@@ -66,7 +66,7 @@ def _mode(distribution: dist.Distribution, context: SamplingContext = None) -> t
         raise Exception(f"MPE not yet implemented for type {type(distribution)}")
 
 
-def dist_sample(distribution: dist.Distribution, context: SamplingContext = None) -> th.Tensor:
+def dist_sample(distribution: dist.Distribution, context: Sample = None) -> th.Tensor:
     """
     Sample n samples from a given distribution.
 
@@ -188,7 +188,7 @@ class Leaf(AbstractLayer):
         """Get the gradient of order 1, ..., order at the point x"""
         pass
 
-    def sample(self, context: SamplingContext = None) -> th.Tensor:
+    def sample(self, context: Sample = None) -> th.Tensor:
         """
         Perform sampling, given indices from the parent layer that indicate which of the multiple representations
         for each input shall be used.
@@ -316,7 +316,7 @@ class MultivariateNormal(Leaf):
 
         return x
 
-    def sample(self, n: int = None, context: SamplingContext = None) -> th.Tensor:
+    def sample(self, n: int = None, context: Sample = None) -> th.Tensor:
         """TODO: Multivariate need special treatment."""
         raise Exception("Not yet implemented")
 
@@ -424,7 +424,7 @@ class Mixture(Leaf):
         x = self.sumlayer(x)
         return x
 
-    def sample(self, n: int = None, context: SamplingContext = None) -> th.Tensor:
+    def sample(self, n: int = None, context: Sample = None) -> th.Tensor:
         # Sample from sum mixture layer
         context = self.sumlayer.sample(context=context)
 
@@ -509,7 +509,7 @@ class IsotropicMultivariateNormal(Leaf):
 
         return x
 
-    def sample(self, n=None, context: SamplingContext = None) -> th.Tensor:
+    def sample(self, n=None, context: Sample = None) -> th.Tensor:
         """TODO: Multivariate need special treatment."""
         raise Exception("Not yet implemented")
 

@@ -9,7 +9,7 @@ from torch.nn import functional as F
 import torch.distributions as dist
 
 from type_checks import check_valid
-from utils import SamplingContext
+from utils import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class AbstractLayer(nn.Module, ABC):
         self.num_repetitions = check_valid(num_repetitions, int, 1)
 
     @abstractmethod
-    def sample(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         """
         Sample from this layer.
         Args:
@@ -33,11 +33,11 @@ class AbstractLayer(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def sample_index_style(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample_index_style(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         pass
 
     @abstractmethod
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample_onehot_style(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         pass
 
 
@@ -150,7 +150,7 @@ class Sum(AbstractLayer):
 
         return x
 
-    def sample(self, mode: str = None, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample(self, mode: str = None, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         """Method to sample from this layer, based on the parents output.
 
         Output is always a vector of indices into the channels.
@@ -274,10 +274,10 @@ class Sum(AbstractLayer):
 
         return ctx
 
-    def sample_index_style(self, ctx: SamplingContext = None) -> SamplingContext:
+    def sample_index_style(self, ctx: Sample = None) -> Sample:
         return self.sample(mode='index', ctx=ctx)
 
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> SamplingContext:
+    def sample_onehot_style(self, ctx: Sample = None) -> Sample:
         return self.sample(mode='onehot', ctx=ctx)
 
     def depr_forward_grad(self, child_grads):
@@ -312,7 +312,7 @@ class Sum(AbstractLayer):
 
         return self._mean, self._var, self._skew
 
-    def _check_repetition_indices(self, ctx: SamplingContext):
+    def _check_repetition_indices(self, ctx: Sample):
         assert ctx.repetition_indices.shape[0] == ctx.parent_indices.shape[0]
         assert ctx.repetition_indices.shape[1] == ctx.parent_indices.shape[1]
         if self.num_repetitions > 1 and ctx.repetition_indices is None:
@@ -395,13 +395,13 @@ class Product(AbstractLayer):
         else:
             raise NotImplementedError("No reduction other than sum is implemented. ")
 
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample_onehot_style(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         return self.sample(ctx)
 
-    def sample_index_style(self, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample_index_style(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         return self.sample(ctx)
 
-    def sample(self, n: int = None, ctx: SamplingContext = None) -> SamplingContext:
+    def sample(self, n: int = None, ctx: Sample = None) -> Sample:
         """Method to sample from this layer, based on the parents output.
 
         Args:
@@ -549,11 +549,11 @@ class CrossProduct(AbstractLayer):
         assert result.size() == (n, w, d_out, c * c, r)
         return result
 
-    def sample(self, mode: str = None, ctx: SamplingContext = None) -> Union[SamplingContext, th.Tensor]:
+    def sample(self, mode: str = None, ctx: Sample = None) -> Union[Sample, th.Tensor]:
         """Method to sample from this layer, based on the parents output.
 
         Args:
-            ctx (SamplingContext):
+            ctx (Sample):
                 n: Number of samples.
                 parent_indices (th.Tensor): Nodes selected by parent layer
                 repetition_indices (th.Tensor): Repetitions selected by parent layer
@@ -618,10 +618,10 @@ class CrossProduct(AbstractLayer):
         ctx.parent_indices = indices
         return ctx
 
-    def sample_index_style(self, ctx: SamplingContext = None) -> SamplingContext:
+    def sample_index_style(self, ctx: Sample = None) -> Sample:
         return self.sample(mode='index', ctx=ctx)
 
-    def sample_onehot_style(self, ctx: SamplingContext = None) -> SamplingContext:
+    def sample_onehot_style(self, ctx: Sample = None) -> Sample:
         return self.sample(mode='onehot', ctx=ctx)
 
     def consolidate_weights(self, parent_weights):
