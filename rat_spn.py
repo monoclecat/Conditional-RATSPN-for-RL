@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 from torch import distributions as dist
+import scipy
 
 from base_distributions import Leaf
 from layers import CrossProduct, Sum
@@ -736,36 +737,31 @@ class RatSpn(nn.Module):
                 ## ctx.sample [self.config.I, s, n, w, self.config.F, self.config.R]
                 # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
             if target_dist_callback is not None:
-                target_prob = target_dist_callback(ctx.sample)
+                with th.no_grad():
+                    target_prob = target_dist_callback(ctx.sample)
                 ## target_prob [self.config.I, s, n, w, 1, self.config.F, self.config.R]  # TODO not sure about self.config.F
                 # target_prob [self.config.I, n, w, self.config.F, self.config.R]  # TODO not sure about self.config.F
 
                 # Put sample-size dimension last
                 x_samples = ctx.sample.permute(0, 2, 3, 4, 1)
                 target = target_prob.permute(0, 2, 3, 4, 1)
-                # A = th.stack([th.ones_like(x_samples), x_samples, x_samples**2], dim=-1)
                 A = th.stack([th.ones_like(x_samples), x_samples, -0.5*x_samples**2], dim=-1)
+                # M = np.stack([np.ones_like(x_samples), x_samples, -0.5*x_samples**2], axis=-1)
 
                 quad_fit_params, res, rnk, s = th.linalg.lstsq(A, target)
                 # quad_fit_params [self.config.I, w, self.config.F, self.config.R, params]
                 quad_fit_params = quad_fit_params.permute(1, 2, 0, 3, 4).detach()[0, 0, 0, 0]
                 # quad_fit_params [w, self.config.F, self.config.I, self.config.R, params]
 
-                Q = (1/self._leaf.base_leaf.std_param.detach().exp()**2)[0, 0, 0, 0]
-                q = Q * self._leaf.base_leaf.mean_param.detach()[0, 0, 0, 0]
+                mu = self._leaf.base_leaf.mean_param.detach().numpy()[0, 0, 0, 0]
+                var = (self._leaf.base_leaf.std_param.exp()**2).detach().numpy()[0, 0, 0, 0]
+                Q = 1/var
+                q = Q * mu
                 # Q, q [w, self.config.F, self.config.I, self.config.R]
 
-                eta_param = nn.Parameter(th.ones_like(Q))
-                epsilon = th.as_tensor(0.8)  # Maximum allowable KL divergence, always > 0
-                optimizer = th.optim.LBFGS([eta_param])
-
                 epsilon = np.asarray(0.8)
-                mu = self._leaf.base_leaf.mean_param[0, 0, 0, 0].detach().numpy()
-                var = (self._leaf.base_leaf.std_param.exp()**2)[0, 0, 0, 0].detach().numpy()
                 R = quad_fit_params[..., 2].numpy()
                 r = quad_fit_params[..., 1].numpy()
-                Q = Q.numpy()
-                q = q.numpy()
 
                 def log_part_fn(X, x):
                     return -0.5 * (x**2 * 1/X + np.log(np.abs(2 * np.pi * 1/X)))
@@ -787,14 +783,12 @@ class RatSpn(nn.Module):
                                 - 1)
                     return KL
 
-                from scipy.optimize import minimize
-                res = minimize(
+                res = scipy.optimize.minimize(
                     loss_fn, 10.0, method='L-BFGS-B', jac=lambda eta: epsilon - KL(eta), bounds=((0, None), )
                 )
 
                 if True:
                     # Is the dual convex? Is the minimum found?
-                    assert eta_param.data.dim() == 0
                     import matplotlib.pyplot as plt
                     x = np.arange(0.1, 50, 0.1)
                     plt.plot(x, [loss_fn(th.as_tensor(i)).item() for i in x], label='dual')
