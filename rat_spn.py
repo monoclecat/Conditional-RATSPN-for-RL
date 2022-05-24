@@ -729,6 +729,120 @@ class RatSpn(nn.Module):
             )
             # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
             node_entropies = -child_ll.mean(dim=0)
+
+            if return_child_samples or target_dist_callback is not None:
+                ctx = self.sample_postprocessing(ctx, split_by_scope=False)
+                # TODO When do we need the scope dim, when not?
+                ## ctx.sample [self.config.I, s, n, w, self.config.F, self.config.R]
+                # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
+            if target_dist_callback is not None:
+                target_prob = target_dist_callback(ctx.sample)
+                ## target_prob [self.config.I, s, n, w, 1, self.config.F, self.config.R]  # TODO not sure about self.config.F
+                # target_prob [self.config.I, n, w, self.config.F, self.config.R]  # TODO not sure about self.config.F
+
+                # Put sample-size dimension last
+                x_samples = ctx.sample.permute(0, 2, 3, 4, 1)
+                target = target_prob.permute(0, 2, 3, 4, 1)
+                # A = th.stack([th.ones_like(x_samples), x_samples, x_samples**2], dim=-1)
+                A = th.stack([th.ones_like(x_samples), x_samples, -0.5*x_samples**2], dim=-1)
+
+                quad_fit_params, res, rnk, s = th.linalg.lstsq(A, target)
+                # quad_fit_params [self.config.I, w, self.config.F, self.config.R, params]
+                quad_fit_params = quad_fit_params.permute(1, 2, 0, 3, 4).detach()[0, 0, 0, 0]
+                # quad_fit_params [w, self.config.F, self.config.I, self.config.R, params]
+
+                Q = (1/self._leaf.base_leaf.std_param.detach().exp()**2)[0, 0, 0, 0]
+                q = Q * self._leaf.base_leaf.mean_param.detach()[0, 0, 0, 0]
+                # Q, q [w, self.config.F, self.config.I, self.config.R]
+
+                eta_param = nn.Parameter(th.ones_like(Q))
+                epsilon = th.as_tensor(0.8)  # Maximum allowable KL divergence, always > 0
+                optimizer = th.optim.LBFGS([eta_param])
+
+                epsilon = np.asarray(0.8)
+                mu = self._leaf.base_leaf.mean_param[0, 0, 0, 0].detach().numpy()
+                var = (self._leaf.base_leaf.std_param.exp()**2)[0, 0, 0, 0].detach().numpy()
+                R = quad_fit_params[..., 2].numpy()
+                r = quad_fit_params[..., 1].numpy()
+                Q = Q.numpy()
+                q = q.numpy()
+
+                def log_part_fn(X, x):
+                    return -0.5 * (x**2 * 1/X + np.log(np.abs(2 * np.pi * 1/X)))
+
+                def loss_fn(eta):
+                    Q_step = eta/(eta + 1) * Q + 1/eta * R
+                    q_step = eta/(eta + 1) * q + 1/eta * r
+                    dual = eta * epsilon + eta * log_part_fn(Q, q) - (eta + 1) * log_part_fn(Q_step, q_step)
+                    return dual
+
+                def KL(eta):
+                    Q_step = eta/(eta + 1) * Q + 1/eta * R
+                    q_step = eta/(eta + 1) * q + 1/eta * r
+                    new_var = 1 / Q_step
+                    new_mean = (1 / Q_step * q_step)
+                    KL = 0.5 * (new_var / var +
+                                np.log(var / new_var) +
+                                (mu - new_mean) ** 2 / var
+                                - 1)
+                    return KL
+
+                from scipy.optimize import minimize
+                res = minimize(
+                    loss_fn, 10.0, method='L-BFGS-B', jac=lambda eta: epsilon - KL(eta), bounds=((0, None), )
+                )
+
+                if True:
+                    # Is the dual convex? Is the minimum found?
+                    assert eta_param.data.dim() == 0
+                    import matplotlib.pyplot as plt
+                    x = np.arange(0.1, 50, 0.1)
+                    plt.plot(x, [loss_fn(th.as_tensor(i)).item() for i in x], label='dual')
+                    plt.plot(x, KL(x), label='KL', color='r', linestyle=':')
+                    plt.axvline(res.x, label=f'SciPy L-BFGS-B found minumum. KL at min {round(KL(res.x).item(), 2)}', color='g')
+
+                    axes = plt.gca()
+                    axes.set_ylim([0, 50])
+
+                    plt.legend()
+                    plt.show()
+
+                Qnew = eta_param/(eta_param + 1) * Q + 1/eta_param * quad_fit_params[..., 2]
+                qnew = eta_param/(eta_param + 1) * q + 1/eta_param * quad_fit_params[..., 1]
+
+                old_mean = self._leaf.base_leaf.mean_param[0, 0, 0, 0].clone()
+                old_std = self._leaf.base_leaf.std_param.exp()[0, 0, 0, 0].clone()
+                new_var = 1/Qnew
+                new_mean = 1/Qnew * qnew
+                # self._leaf.base_leaf.std_param[0, 0, 0, 0] = nn.Parameter(1/Qnew)
+                # self._leaf.base_leaf.mean_param[0, 0, 0, 0] = nn.Parameter(1/Qnew * qnew)
+                print(1)
+
+                if True:
+                    def forplot(tensor: th.Tensor, scale=False):
+                        tensor = tensor.detach().cpu().numpy()
+                        if scale:
+                            tensor = (tensor - min_x) / (max_x - min_x) * grid_points
+                        return tensor
+
+                    from scipy.linalg import lstsq
+                    import matplotlib.pyplot as plt
+                    p = quad_fit_params[0, 0, 0, 0].detach().cpu().numpy()
+                    x = x_samples[0, 0, 0, 0].detach().cpu().numpy()
+                    y = target[0, 0, 0, 0].detach().cpu().numpy()
+                    plt.plot(x, y, 'o', label='data')
+                    xx = np.linspace(np.floor(x.min()), np.ceil(x.max()), 101)
+                    yy = p[0] + p[1] * xx + p[2] * (-0.5) * xx ** 2
+                    plt.plot(xx, yy, label='least squares fit, $y = a + bx - 0.5 * x^2$')
+                    plt.axvline(old_mean.item(), label=f'old mean, std: {round(old_std.item(), 2)}', color='r', linestyle=':')
+                    plt.axvline(forplot(1/Qnew * qnew), label=f'new mean, std: {round(1/Qnew.item(), 2)}', color='g')
+                    plt.xlabel('x')
+                    plt.ylabel('Reward')
+                    plt.legend(framealpha=1, shadow=True)
+                    plt.grid(alpha=0.25)
+                    plt.show()
+                    print(1)
+
         else:
             layer = self.layer_index_to_obj(layer_index)
 
@@ -749,11 +863,29 @@ class RatSpn(nn.Module):
                 )
                 node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_resp
 
+                if return_child_samples or target_dist_callback is not None:
+                    ctx = self.sample_postprocessing(ctx, split_by_scope=True)
+                    # ctx.sample [ic, s, n, w, self.config.F, self.config.R]
+                if target_dist_callback is not None:
+                    target_prob = target_dist_callback(ctx.sample).sum(-2)
+                    # target_prob [ic, s, n, w, self.config.R]
+                    target_prob = target_prob.mean(dim=2).permute(1, 2, 0, 3)
+                    # target_prob [s, w, ic, 1, self.config.R]  # TODO not sure about the 1
+                    reward = target_prob + aux_responsibility + child_entropies.unsqueeze(3)
+                    if layer_index == self.max_layer_index:
+                        reward = reward.permute(0, 1, 4, 2, 3)
+                        reward = reward.reshape(*reward.shape[:2], reward.shape[2]*reward.shape[3], reward.shape[4], 1)
+                    new_weights = F.log_softmax(reward, dim=2)
+                    layer.weight_param = nn.Parameter(new_weights)
+                else:
+                    target_prob = None
+
                 if verbose:
                     metrics = {
                         'weight_entropy': weight_entropy.detach(),
                         'weighted_child_ent': weighted_ch_ents.detach(),
                         'weighted_aux_resp': weighted_aux_resp.detach(),
+                        'target_prob': target_prob.detach() if target_prob is not None else None,
                     }
                     logging[layer_index] = {}
                     for rep in range(weight_entropy.size(-1)):
