@@ -325,7 +325,8 @@ if __name__ == "__main__":
                     plt.imshow(forplot(exp_view(probs)))
                     plt.show()
                 t_delta = np.around(time.time() - t_start, 2)
-                print(f"Time delta: {time_delta(t_delta)} - Avg. loss at step {step}: {round(np.mean(losses), 2)}")
+                if step > 0:
+                    print(f"Time delta: {time_delta(t_delta)} - Avg. loss at step {step}: {round(np.mean(losses), 2)}")
                 losses = []
                 t_start = time.time()
 
