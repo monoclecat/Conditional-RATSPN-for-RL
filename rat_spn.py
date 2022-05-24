@@ -163,14 +163,10 @@ class RatSpn(nn.Module):
         Returns:
             th.Tensor: Randomized input along feature axis. Each repetition has its own permutation.
         """
-        # Expand input to the number of repetitions
-        n, w = x.shape[:2]
-        if x.dim() == 3:
-            x = x.unsqueeze(3)  # Make space for repetition axis
-            x = x.repeat((1, 1, 1, self.config.R))  # Repeat R times
-
-        # Random permutation
-        perm_indices = self.permutation.unsqueeze(0).unsqueeze(0).expand(n, w, -1, -1)
+        assert x.size(-1) == 1 or x.size(-1) == self.config.R
+        if x.size(-1) == 1:
+            x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
+        perm_indices = self.permutation.expand_as(x)
         x = th.gather(x, dim=-2, index=perm_indices)
 
         return x
@@ -180,8 +176,10 @@ class RatSpn(nn.Module):
         Forward pass through RatSpn. Computes the conditional log-likelihood P(X | C).
 
         Args:
-            x: Input of shape [batch, weight_sets, in_features, channel].
-                batch: Number of samples per weight set (= per conditional in the CSPN sense).
+            x:
+                Input of shape [*batch_dims, weight_sets, in_features, self.config.F,
+                                repetition (== 1 if no rep is to be specified)].
+                batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
                 weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
             layer_index: Evaluate log-likelihood of x at layer
             x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
@@ -194,6 +192,10 @@ class RatSpn(nn.Module):
 
         if x.dim() == 2:
             x = x.unsqueeze(1)
+
+        if x.size(-1) == self.config.F:
+            # x has no repetition dimension
+            x = x.unsqueeze(-1)
 
         if x_needs_permutation:
             # Apply feature randomization for each repetition
@@ -208,18 +210,19 @@ class RatSpn(nn.Module):
 
         if layer_index == self.max_layer_index:
             # Merge results from the different repetitions into the channel dimension
-            n, w, d, c, r = x.size()
+            w, d, c, r = x.shape[-4:]
+            batch_dims = x.shape[:-4]
             assert d == 1  # number of features should be 1 at this point
-            x = x.view(n, w, d, c * r, 1)
+            x = x.view(*batch_dims, w, d, c * r, 1)
 
             # Apply C sum node outputs
             x = self.root(x)
 
             # Remove repetition dimension
-            x = x.squeeze(4)
+            x = x.squeeze(-1)
 
             # Remove in_features dimension
-            x = x.squeeze(2)
+            x = x.squeeze(-3)
 
         return x
 
@@ -325,8 +328,8 @@ class RatSpn(nn.Module):
         return self.sample(evidence=evidence, is_mpe=True)
 
     def sample(
-            self, mode: str = None, n=1, class_index=None, evidence: th.Tensor = None, is_mpe: bool = False,
-            layer_index: int = None, do_sample_postprocessing: bool = True,
+            self, mode: str = None, n: Union[int, Tuple] = 1, class_index=None, evidence: th.Tensor = None,
+            is_mpe: bool = False, layer_index: int = None, do_sample_postprocessing: bool = True,
             post_processing_kwargs: dict = None,
     ) -> Sample:
         """
@@ -341,10 +344,12 @@ class RatSpn(nn.Module):
             class_index: Class index. Can be either an int in combination with a value for `n` which will result in `n`
                 samples from P(X | C = class_index). Or can be a list of ints which will map each index `c_i` in the
                 list to a sample from P(X | C = c_i).
-            evidence: Evidence that can be provided to condition the samples. If evidence is given, `n` and
+            evidence: th.Tensor with shape [*batch_dims, w, F, r], where are is 1 if no repetition is specified.
+                Evidence that can be provided to condition the samples. If evidence is given, `n` and
                 `class_index` must be `None`. Evidence must contain NaN values which will be imputed according to the
                 distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
                 sampled values.
+                If evidence is given, n is the number of samples to generate per evidence.
             is_mpe: Flag to perform max sampling (MPE).
             layer_index: Layer to start sampling from. None or self.max_layer_index = Root layer,
                 self.num_layers-1 = Child layer of root layer, ...
@@ -377,17 +382,26 @@ class RatSpn(nn.Module):
             post_processing_kwargs = {}
         assert mode is not None, "A sampling mode must be provided!"
         assert class_index is None or evidence is None, "Cannot provide both, evidence and class indices."
-        assert n is None or evidence is None, "Cannot provide both, number of samples to generate (n) and evidence."
+        # assert n is None or evidence is None, "Cannot provide both, number of samples to generate (n) and evidence."
 
         if layer_index is None:
             layer_index = self.max_layer_index
 
+        if isinstance(n, int):
+            n = (n,)
+
         # Check if evidence contains nans
         if evidence is not None:
             assert (evidence != evidence).any(), "Evidence has no NaN values."
+            assert evidence.shape[-2] == self.config.F and \
+                   (evidence.shape[-1] == self.config.R or evidence.shape[-1] == 1), \
+                "The evidence doesn't seem to have a repetition dimension."
+            assert evidence.shape[-3] == self.root.weights.shape[0], \
+                "Evidence was created under a different number of conditionals than what the SPN is set to now. "
+            # evidence has shape [*batch_dims, w, self.config.F, 1 or self.config.R]
 
             # Set n to the number of samples in the evidence
-            n = evidence.shape[0]
+            n = (*n, *evidence.shape[:-3])
 
         with provide_evidence(self, evidence, requires_grad=(mode == 'onehot')):  # May be None but that's ok
             # If class is given, use it as base index
@@ -416,12 +430,14 @@ class RatSpn(nn.Module):
                 ctx = self.root.sample(ctx=ctx, mode=mode)
 
                 # mode == 'index'
-                # ctx.parent_indices [nr_nodes, n, w, d, r=1] contains indexes of output channels of the next layer
+                # ctx.parent_indices [nr_nodes, *batch_dims, w, d, r=1] contains indexes of
+                # output channels of the next layer.
                 # Sample from RatSpn root layer: Results are indices into the
                 # stacked output channels of all repetitions
 
                 # mode == 'onehot'
-                # ctx.parent_indices [nr_nodes, n, w, d, ic, r=1] contains indexes of output channels of the next layer
+                # ctx.parent_indices [nr_nodes, *batch_dims, w, d, ic, r=1] contains indexes of
+                # output channels of the next layer.
                 # Sample from RatSpn root layer: Results are one-hot vectors of the indices
                 # into the stacked output channels of all repetitions
 
@@ -434,16 +450,15 @@ class RatSpn(nn.Module):
                 # This weight vector was used as the logits in a IC*R-categorical distribution,
                 # yielding indexes [0,C*R-1].
                 if mode == 'index':
-                    ctx.parent_indices = ctx.parent_indices.squeeze(-1)
+                    # ctx.parent_indices = ctx.parent_indices.squeeze(-1)
                     # To match the index to the correct repetition and its input channel, we do the following
-                    ctx.repetition_indices = (ctx.parent_indices % self.config.R).squeeze(3)
+                    ctx.repetition_indices = (ctx.parent_indices % self.config.R).squeeze(-1).squeeze(-1)
                     # [nr_nodes, n, w, 1]
                     ctx.parent_indices = th.div(ctx.parent_indices, self.config.R, rounding_mode='trunc')
                 else:
-                    nr_nodes, n, w, _, _, _ = ctx.parent_indices.shape
-                    ctx.parent_indices = ctx.parent_indices.view(nr_nodes, n, w, 1, -1, self.config.R)
+                    ctx.parent_indices = ctx.parent_indices.view(*ctx.parent_indices.shape[:-2], -1, self.config.R)
                     # ctx.parent_indices [nr_nodes, n, w, d, ic, r]
-                ctx.has_rep_dim = False  # The final sample will not have a repetition dimension
+                ctx.has_rep_dim = False  # The final sample will be of one repetition only
 
             # Continue at layers
             # Sample inner layers in reverse order (starting from topmost)
@@ -457,7 +472,11 @@ class RatSpn(nn.Module):
                 ctx = layer.sample(ctx=ctx, mode=mode)
 
             # Sample leaf
+            if ctx.scopes is None:
+                ctx.scopes = self._leaf.in_features // self._leaf.cardinality
             samples = self._leaf.sample(ctx=ctx, mode=mode)
+            if layer_index == 0:
+                samples = samples.permute(3, 0, 1, 2, 4)
             ctx.sample = samples
 
         if do_sample_postprocessing:
@@ -511,29 +530,35 @@ class RatSpn(nn.Module):
                     # The squeeze(1) is only for the case that split_by_scope is True and ctx.scopes == 1
                     # rep_sel_inv_perm = rep_sel_inv_perm.expand(*sample.shape[:-2], -1, -1).squeeze(1)
             else:
-                rep_sel_inv_perm = self.inv_permutation * ctx.parent_indices.detach().sum(-2).long()
-                if not has_rep_dim:
-                    rep_sel_inv_perm = rep_sel_inv_perm.sum(-1)
+                if ctx.parent_indices is not None:
+                    rep_sel_inv_perm = self.inv_permutation * ctx.parent_indices.detach().sum(-2).long()
+                    if not ctx.has_rep_dim:
+                        rep_sel_inv_perm = rep_sel_inv_perm.sum(-1)
+                else:
+                    rep_sel_inv_perm = self.inv_permutation.unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
             if split_by_scope:
                 rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1)
             rep_sel_inv_perm = rep_sel_inv_perm.expand_as(sample)
-            sample = th.gather(sample, dim=-2 if has_rep_dim else -1, index=rep_sel_inv_perm)
+            sample = th.gather(sample, dim=-2 if ctx.has_rep_dim else -1, index=rep_sel_inv_perm)
             ctx.permutation_inverted = True
 
         if self.config.tanh_squash:
             sample = sample.clamp(-6.0, 6.0).tanh()
             ctx.needs_squashing = False
 
+        if not ctx.has_rep_dim:
+            sample = sample.unsqueeze(-1)
+
         if evidence is not None:
             if self.config.tanh_squash:
                 evidence = evidence.clamp(-6.0, 6.0).tanh()
             # Update NaN entries in evidence with the sampled values
-            nan_mask = th.isnan(evidence)
+            nan_mask = th.isnan(evidence).expand_as(sample)
+            evidence = evidence.expand_as(sample).clone()
 
             # First make a copy such that the original object is not changed
-            evidence = evidence.clone()
-            evidence[nan_mask] = sample.squeeze(0)[nan_mask]
+            evidence[nan_mask] = sample[nan_mask.expand_as(sample)]
             sample = evidence
             ctx.evidence_filled_in = True
 
@@ -559,7 +584,9 @@ class RatSpn(nn.Module):
             layer_index: The layer index to evaluate. The layer must be a Sum layer.
             sample_size: Number of samples to evaluate responsibilities on.
                 Responsibilities can't be computed in closed form.
-            return_samples: If True, the samples are returned which were used to calculate the responsibilities.
+            return_sample_ctx: If True, the sample context including the samples are returned. No post-processing is
+                applied to these.
+            with_grad: If True, sampling is done in a differentiable way.
 
         Returns: Tuple of
             responsibilities: th.Tensor of shape [w, d, oc of child layer, oc, r of child layer].
@@ -570,23 +597,16 @@ class RatSpn(nn.Module):
         layer = self.layer_index_to_obj(layer_index)
         assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
         ctx = self.sample(
-            mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=True,
-            do_sample_postprocessing=False
+            mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=False,
+            do_sample_postprocessing=False,
         )
         samples = ctx.sample
-        # child_samples [nr_nodes (= oc of current layer), sample_size, w, self.config.F, r]
+        # child_samples [oc of current layer, sample_size, w, self.config.F, r]
 
         # We sampled all ic nodes of each repetition in the child layer
         ic, n, w, f, r = samples.shape
 
-        # Combine first two dims of samples
-        # samples[ic, n] -> [ic * n]: [0,0] -> [0], ..., [0, n-1] -> [n-1], [1, 0] -> [n], ...
-        child_ll = self.forward(x=samples.view(ic * n, w, f, r), layer_index=layer_index-1,
-                                x_needs_permutation=False)
-        d = child_ll.shape[2]
-        # child_ll [ic * n, w, d, ic, r]
-
-        child_ll = child_ll.view(ic, n, w, d, ic, r)
+        child_ll = self.forward(x=samples, layer_index=layer_index-1, x_needs_permutation=False)
         child_ll = child_ll.mean(dim=1)
 
         if layer_index == self.max_layer_index:  # layer is root sum layer
@@ -628,10 +648,55 @@ class RatSpn(nn.Module):
         child_ll = child_ll.unsqueeze(3)  # [w, d, ic, 1, r]
 
         responsibilities: th.Tensor = log_weights.detach() + child_ll - ll
-        return responsibilities, (samples if return_samples else None)
+        return responsibilities, (ctx if return_sample_ctx else None)
 
-    def layer_entropy_approx(self, layer_index=0, child_entropies: th.Tensor = None,
-                             sample_size=5, grad_thru_resp = False, verbose=False):
+    def weigh_tensors(self, layer_index, tensors: List = None, return_weight_ent=False) \
+            -> Tuple[List[th.Tensor], Optional[th.Tensor]]:
+        """
+        Weigh each tensor in a list with the weights of a Sum layer.
+        This function takes care of the tricky case of the root sum node.
+
+        Args:
+            layer_index: Index of layer to take weights from. Must be a Sum layer.
+            tensors: A list of tensors to multiply the weights with.
+            return_weight_ent: If True, the weight entropy also computed.
+
+        Returns:
+            tensors: List of the weighted input tensors.
+            weight_entropy: Either the calculated weight entropy or None.
+        """
+        layer = self.layer_index_to_obj(layer_index)
+        assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
+
+        layer_log_weights = layer.weights
+        weights = layer_log_weights.exp()
+        weight_entropy = th.sum(-weights * layer_log_weights, dim=2) if return_weight_ent else None
+
+        if layer_index < self.max_layer_index:
+            tensors = [th.sum(weights * t, dim=2) for t in tensors]
+        else:
+            # We cannot simply reshape aux_responsibility to the shape of the weights and renormalize
+            # because the responsibilities are only valid within the repetition where they are calculated.
+            # So we need to reshape and normalize the root weights to imitate sum nodes for each
+            # repetition separately, and then a sum node over the three repetitions.
+            # The same calculations that are applied to the aux_responsibilities must also be applied to
+            # the child entropies. Otherwise, we mess up the gradients.
+            weights = weights.view(*weights.shape[:2], self.config.R, -1).permute(0, 1, 3, 2).unsqueeze(-2)
+            # weights [w, d, ic, oc=1, self.config.R]
+
+            weights_over_ic = weights.softmax(dim=2)
+            tensors = [th.sum(weights_over_ic * t, dim=2) for t in tensors]
+
+            weights_over_rep = weights.sum(dim=2).softmax(dim=-1)
+            tensors = [th.sum(weights_over_rep * t, dim=-1, keepdim=True) for t in tensors]
+
+        return tensors, weight_entropy
+
+    def layer_entropy_approx(
+            self, layer_index=0, child_entropies: th.Tensor = None,
+            sample_size=5, return_child_samples=False, grad_thru_resp=False, verbose=False,
+            target_dist_callback=None,
+    ) -> Tuple[th.Tensor, Optional[Dict], Optional[th.Tensor]]:
         """
 
         Args:
@@ -639,25 +704,30 @@ class RatSpn(nn.Module):
             child_entropies: th.Tensor of shape [w, d, oc of child layer == ic of this layer, r]
             sample_size:
             grad_thru_resp: If False, the approximation of the responsibility is done without grad.
-            verbose:
-            return_child_samples:
+            verbose: If True, return dict of entropy metrics
+            return_child_samples: If True, the samples of the children are returned.
 
         Returns: Tuple of
             node_entropies: th.Tensor of size [w, d, oc of child layer == ic of this layer, r]
-            child_samples: th.Tensor
-
+            logging: Dict or None, depending on verbose
+            child_samples: th.Tensor or None, depending on return_child_samples
         """
         assert child_entropies is not None or layer_index == 0, \
             "When sampling from a layer other than the leaf layer, child entropies must be provided!"
         logging = {}
+        ctx = None
 
         if layer_index == 0:
             ctx = self.sample(
                 mode='onehot', n=sample_size, layer_index=layer_index, is_mpe=False,
-                do_sample_postprocessing=False
+                do_sample_postprocessing=False,
             )
-
-            child_ll = self.forward(x=ctx.sample, layer_index=layer_index, x_needs_permutation=False)
+            # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
+            child_ll = self.forward(
+                x=ctx.sample.permute(1, 2, 3, 0, 4),
+                layer_index=layer_index, x_needs_permutation=False
+            )
+            # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
             node_entropies = -child_ll.mean(dim=0)
         else:
             layer = self.layer_index_to_obj(layer_index)
@@ -666,36 +736,17 @@ class RatSpn(nn.Module):
                 node_entropies = layer(child_entropies.unsqueeze(0)).squeeze(0)
             else:
                 with th.set_grad_enabled(grad_thru_resp):
-                    aux_responsibility, _ = self.approx_responsibilities(
-                        layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp)
-                w, d, ic, oc, r = aux_responsibility.shape
+                    aux_responsibility, ctx = self.approx_responsibilities(
+                        layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp,
+                        return_sample_ctx=return_child_samples,
+                    )
+                    # aux_responsibility [w, d, ic, oc, r]
 
-                # layer.weights is a property that normalizes the weights every time in the RatSpn case.
-                # By calling it only once we save computation.
-                layer_log_weights = layer.weights
-                weights = layer_log_weights.exp()
-                weight_entropy = th.sum(-weights * layer_log_weights, dim=2)
-
-                if layer_index < self.max_layer_index:
-                    weighted_ch_ents = th.sum(weights * child_entropies.unsqueeze(3), dim=2)
-                    weighted_aux_resp = th.sum(weights * aux_responsibility, dim=2)
-                else:
-                    # We cannot simply reshape aux_responsibility to the shape of the weights and renormalize
-                    # because the responsibilities are only valid within the repetition where they are calculated.
-                    # So we need to reshape and normalize the root weights to imitate sum nodes for each
-                    # repetition separately, and then a sum node over the three repetitions.
-                    # The same calculations that are applied to the aux_responsibilities must also be applied to
-                    # the child entropies. Otherwise we mess up the gradients.
-                    weights = weights.view(w, 1, r, ic).permute(0, 1, 3, 2).unsqueeze(-2)
-
-                    weights_over_ic = weights.softmax(dim=2)
-                    weighted_ch_ents = th.sum(weights_over_ic * child_entropies.unsqueeze(3), dim=2)
-                    weighted_aux_resp = th.sum(weights_over_ic * aux_responsibility, dim=2)
-
-                    weights_over_rep = weights.sum(dim=2).softmax(dim=-1)
-                    weighted_ch_ents = th.sum(weights_over_rep * weighted_ch_ents, dim=-1, keepdim=True)
-                    weighted_aux_resp = th.sum(weights_over_rep * weighted_aux_resp, dim=-1, keepdim=True)
-
+                [weighted_ch_ents, weighted_aux_resp], weight_entropy = self.weigh_tensors(
+                    layer_index=layer_index,
+                    tensors=[child_entropies.unsqueeze(3), aux_responsibility],
+                    return_weight_ent=True
+                )
                 node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_resp
 
                 if verbose:
@@ -709,6 +760,8 @@ class RatSpn(nn.Module):
                         rep_key = f"rep{rep}"
                         rep = th.as_tensor(rep, device=self.device)
                         for key, metric in metrics.items():
+                            if metric is None:
+                                continue
                             logging[layer_index].update({
                                 f"{rep_key}/{key}/min": metric.index_select(-1, rep).min().item(),
                                 f"{rep_key}/{key}/max": metric.index_select(-1, rep).max().item(),
@@ -716,7 +769,7 @@ class RatSpn(nn.Module):
                                 f"{rep_key}/{key}/std": metric.index_select(-1, rep).std(dim=0).mean().item(),
                             })
 
-        return node_entropies, logging
+        return node_entropies, logging, (ctx if return_child_samples else None)
 
     def vi_entropy_approx(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) -> Tuple[th.Tensor, Optional[Dict]]:
         """
@@ -734,7 +787,7 @@ class RatSpn(nn.Module):
 
         child_entropies = None
         for layer_index in range(self.num_layers):
-            child_entropies, layer_log = self.layer_entropy_approx(
+            child_entropies, layer_log, _ = self.layer_entropy_approx(
                 layer_index=layer_index, child_entropies=child_entropies,
                 sample_size=sample_size, grad_thru_resp=grad_thru_resp, verbose=verbose,
             )

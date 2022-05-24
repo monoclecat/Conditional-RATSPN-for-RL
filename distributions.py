@@ -99,9 +99,9 @@ class RatNormal(Leaf):
         self._no_tanh_log_prob_correction = False
 
     def forward(self, x):
-        if x.dim() == 4:
+        if x.shape[-4:] != self.means.shape:
             # Create extra output-channel dimension
-            x = x.unsqueeze(3)
+            x = x.unsqueeze(-2)
 
         correction = None
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
@@ -130,42 +130,44 @@ class RatNormal(Leaf):
         selected_means, selected_stds, rep_ind = None, None, None
 
         if ctx.is_root:
-            selected_means = means.unsqueeze(0).expand(ctx.n, -1, -1, -1, -1)
+            selected_means = means.expand(*ctx.n, -1, -1, -1, -1)
             if not ctx.is_mpe:
-                selected_stds = stds.unsqueeze(0).expand(ctx.n, -1, -1, -1, -1)
+                selected_stds = stds.expand(*ctx.n, -1, -1, -1, -1)
         elif mode == 'index':
-            nr_nodes, n, w = ctx.parent_indices.shape[:3]
-            _, d, i, r = means.shape
-            selected_means = means.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1, -1, -1)
+            w, d, i, r = means.shape
+            # ctx.parent_indices [nr_nodes, *batch_dims, w, self.config.F, r]
+            selected_means = means.expand(*ctx.parent_indices.shape[:-3], *means.shape)
 
             if ctx.repetition_indices is not None:
                 rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                rep_ind = rep_ind.expand(-1, -1, -1, d, i, -1)
-                selected_means = th.gather(selected_means, dim=-1, index=rep_ind).squeeze(-1)
+                rep_ind = rep_ind.expand(*([-1] * ctx.repetition_indices.dim()), d, i, -1)
+                selected_means = th.gather(selected_means, dim=-1, index=rep_ind)
 
             # Select means and std in the output_channel dimension
-            par_ind = ctx.parent_indices.unsqueeze(4)
-            selected_means = th.gather(selected_means, dim=4, index=par_ind).squeeze(4)
+            par_ind = ctx.parent_indices.unsqueeze(-2)
+            selected_means = th.gather(selected_means, dim=-2, index=par_ind).squeeze(-2)
+            selected_means = selected_means.squeeze(-1)
             if not ctx.is_mpe:
-                selected_stds = stds.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1, -1, -1)
+                selected_stds = stds.expand(*ctx.parent_indices.shape[:-3], *stds.shape)
                 if ctx.repetition_indices is not None:
-                    selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind).squeeze(-1)
-                selected_stds = th.gather(selected_stds, dim=4, index=par_ind).squeeze(4)
+                    selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind)
+                selected_stds = th.gather(selected_stds, dim=-2, index=par_ind).squeeze(-2)
+                selected_stds = selected_stds.squeeze(-1)
 
         else:  # mode == 'onehot'
-            # ctx.parent_indices shape [nr_nodes, n, w, f, oc, r]
+            # ctx.parent_indices shape [nr_nodes, *batch_dims, w, f, oc, r]
             # means shape [w, f, oc, r]
             selected_means = means * ctx.parent_indices
-            assert ctx.parent_indices.detach().sum(4).max().item() == 1.0
-            selected_means = selected_means.sum(4)
-            if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
+            assert ctx.parent_indices.detach().sum(-2).max().item() == 1.0
+            selected_means = selected_means.sum(-2)
+            if not ctx.has_rep_dim:
                 # Only one repetition is selected, remove repetition dim of parameters
                 selected_means = selected_means.sum(-1)
 
             if not ctx.is_mpe:
                 selected_stds = stds * ctx.parent_indices
-                selected_stds = selected_stds.sum(4)
-                if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
+                selected_stds = selected_stds.sum(-2)
+                if not ctx.has_rep_dim:
                     # Only one repetition is selected, remove repetition dim of parameters
                     selected_stds = selected_stds.sum(-1)
 

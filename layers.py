@@ -130,23 +130,22 @@ class Sum(AbstractLayer):
             x[dropout_indices] = np.NINF
 
         # Dimensions
-        n, w, d, ic, r = x.size()
-        x = x.unsqueeze(4)  # Shape: [n, w, d, ic, 1, r]
+        w, d, c, r = x.shape[-4:]
+        batch_dims = x.shape[:-4]
+        x = x.unsqueeze(-2)  # Shape: [n, w, d, ic, 1, r]
         weights: th.Tensor = self.weights
 
         # Weights is of shape [w, d, ic, oc, r]
         oc = weights.size(3)
-        # The weights must be expanded by the batch dimension so all samples of one conditional see the same weights.
-        log_weights = weights.unsqueeze(0)
 
         # Multiply (add in log-space) input features and weights
-        x = x + log_weights  # Shape: [n, w, d, ic, oc, r]
+        x = x + weights  # Shape: [n, w, d, ic, oc, r]
 
         # Compute sum via logsumexp along in_channels dimension
-        x = th.logsumexp(x, dim=3)  # Shape: [n, w, d, oc, r]
+        x = th.logsumexp(x, dim=-3)  # Shape: [n, w, d, oc, r]
 
         # Assert correct dimensions
-        assert x.size() == (n, w, d, oc, r)
+        assert x.size() == (*batch_dims, w, d, oc, r)
 
         return x
 
@@ -176,21 +175,22 @@ class Sum(AbstractLayer):
         weights: th.Tensor = self.weights
         # w is the number of weight sets
         w, d, ic, oc, r = weights.shape
-        sample_size = ctx.n
+        sample_shape = ctx.n
 
         # Create sampling context if this is a root layer
         if ctx.is_root:
-            weights = weights.unsqueeze(0).expand(sample_size, -1, -1, -1, -1, -1)
-            # weights from selected repetition with shape [n, w, d, ic, oc, r]
-            weights = weights.permute(4, 0, 1, 2, 3, 5)
-            # oc is our nr_nodes: [nr_nodes=oc, n, w, d, ic, r]
+            weights = weights.expand(*sample_shape, *([-1] * weights.dim()))
+            # weights from selected repetition with shape [*batch_dims, w, d, ic, oc, r]
+            weights = th.einsum('...ijk -> j...ik', weights)
+            # oc is our nr_nodes: [nr_nodes=oc, *batch_dims, w, d, ic, r]
         else:
             if mode == 'index':
                 # If this is not the root node, use the paths (out channels), specified by the parent layer
                 if ctx.repetition_indices is not None:
                     self._check_repetition_indices(ctx)
 
-                weights = weights.expand(ctx.parent_indices.shape[0], sample_size, -1, -1, -1, -1, -1)
+                # TODO parent_indices now always has a repetition dim. Does that break anything here?
+                weights = weights.expand(ctx.parent_indices.shape[0], sample_shape, -1, -1, -1, -1, -1)
                 parent_indices = ctx.parent_indices.unsqueeze(4).unsqueeze(4)
                 if ctx.repetition_indices is not None:
                     rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
@@ -214,12 +214,13 @@ class Sum(AbstractLayer):
         # If evidence is given, adjust the weights with the likelihoods of the observed paths
         if self._is_input_cache_enabled and self._input_cache is not None:
             if mode == 'index':
-                inp_cache = self._input_cache.unsqueeze(0)
+                # inp_cache = self._input_cache.unsqueeze(0)
+                inp_cache = self._input_cache
                 if ctx.repetition_indices is not None:
                     rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                     rep_ind = rep_ind.expand(-1, -1, -1, d, ic, -1)
-                    inp_cache = inp_cache.expand(rep_ind.size(0), sample_size, -1, -1, -1, -1)
-                    # Both are now [nr_nodes, sample_size=n, w, d, ic, r]
+                    inp_cache = inp_cache.expand(rep_ind.size(0), sample_shape, -1, -1, -1, -1)
+                    # Both are now [nr_nodes, sample_shape=n, w, d, ic, r]
                     weight_offsets = th.gather(inp_cache, dim=-1, index=rep_ind).squeeze(-1)
                 else:
                     weight_offsets = inp_cache
@@ -252,13 +253,15 @@ class Sum(AbstractLayer):
             # >> indices = dist.sample()
 
             if mode == 'index':
-                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=4)
+                # -2 == ic (input channel) dimension
+                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=-2)
                 cats = th.arange(ic, device=weights.device)
-                if weights.dim() == 6:
+                if ctx.repetition_indices is None:
+                    # weights have repetition dim, so cats needs it too
                     cats = cats.unsqueeze_(-1).expand(-1, r)
-                indices = (one_hot * cats).sum(4).long()
+                indices = (one_hot * cats).sum(-2).long()
             else:  # mode == 'onehot'
-                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=4)
+                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=-2)
 
         if mode == 'index':
             # Update parent indices
@@ -518,35 +521,34 @@ class CrossProduct(AbstractLayer):
         Product layer forward pass.
 
         Args:
-            x: Input of shape [batch, weight_sets, in_features, channel].
+            x: Input of shape [any number of batch dims, weight_sets, in_features, repetition].
                 weight_sets: In CSPNs, there are separate weights for each batch element.
 
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/2), channel * channel].
         """
         if self._pad:
-            # Pad marginalized node
+            # Pad with marginalized nodes
             x = F.pad(x, pad=[0, 0, 0, 0, 0, self._pad], mode="constant", value=0.0)
 
         # Dimensions
-        n, w, d, c, r = x.size()
+        w, d, c, r = x.shape[-4:]
+        batch_dims = x.shape[:-4]
         d_out = d // self.cardinality
 
         # Build outer sum, using broadcasting, this can be done with
         # modifying the tensor dimensions:
         # left: [n, d/2, c, r] -> [n, d/2, c, 1, r]
         # right: [n, d/2, c, r] -> [n, d/2, 1, c, r]
-        left = x[:, :, self._scopes[0, :], :, :].unsqueeze(4)
-        right = x[:, :, self._scopes[1, :], :, :].unsqueeze(3)
+        left = x[..., :, self._scopes[0, :], :, :].unsqueeze(-2)
+        right = x[..., :, self._scopes[1, :], :, :].unsqueeze(-3)
 
         # left + right with broadcasting: [n, d/2, c, 1, r] + [n, d/2, 1, c, r] -> [n, d/2, c, c, r]
         result = left + right
 
         # Put the two channel dimensions from the outer sum into one single dimension:
         # [n, d/2, c, c, r] -> [n, d/2, c * c, r]
-        result = result.view(n, w, d_out, c * c, r)
-
-        assert result.size() == (n, w, d_out, c * c, r)
+        result = result.view(*batch_dims, w, d_out, c * c, r)
         return result
 
     def sample(self, mode: str = None, ctx: Sample = None) -> Union[Sample, th.Tensor]:
@@ -574,42 +576,44 @@ class CrossProduct(AbstractLayer):
             # and by the number of conditionals the CSPN weights have been set to.
             # In the RatSpn case, the number of conditionals (abbreviated by w) is 1.
             if mode == 'index':
-                indices = self.unraveled_channel_indices.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
+                indices = self.unraveled_channel_indices.data.unsqueeze(1).unsqueeze(-1)
+                for _ in range(len(ctx.n)):
+                    indices = indices.unsqueeze(1)
                 # indices is [nr_nodes=oc, 1, 1, cardinality, 1]
                 indices = indices.repeat(
-                    1, ctx.n, self.num_conditionals, self.in_features//self.cardinality, self.num_repetitions
+                    1, *ctx.n, self.num_conditionals, self.in_features//self.cardinality, self.num_repetitions
                 )
                 # indices is [nr_nodes=oc, n, w, in_features, r]
             else:  # mode == 'onehot'
-                indices = self.one_hot_in_channel_mapping.data.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
+                indices = self.one_hot_in_channel_mapping.data.unsqueeze(1).unsqueeze(-1)
+                for _ in range(len(ctx.n)):
+                    indices = indices.unsqueeze(1)
                 # indices is [nr_nodes=oc, 1, 1, cardinality, in_channels, 1]
                 indices = indices.repeat(
-                    1, ctx.n, self.num_conditionals, self.in_features // self.cardinality, 1, self.num_repetitions
+                    1, *ctx.n, self.num_conditionals, self.in_features // self.cardinality, 1, self.num_repetitions
                 )
-                # indices is [nr_nodes=oc, n, w, in_features, r]
+                # indices is [nr_nodes=oc, n, w, in_features, in_channels, r]
 
             oc, _ = self.unraveled_channel_indices.shape
 
             # repetition indices are left empty because they are implicitly given in parent_indices
         else:
             if mode == 'index':
-                nr_nodes, n, w, d = ctx.parent_indices.shape[:4]
                 # Map flattened indexes back to coordinates to obtain the chosen input_channel for each feature
                 indices = self.unraveled_channel_indices[ctx.parent_indices]
-                if ctx.parent_indices.dim() == 5:
-                    r = ctx.parent_indices.size(4)
-                    indices = indices.permute(0, 1, 2, 3, 5, 4).reshape(nr_nodes, n, w, d * self.cardinality, r)
-                else:
-                    indices = indices.view(nr_nodes, n, w, -1)
+                indices = th.einsum('...ij -> ...ji', indices)
+                indices = indices.reshape(*indices.shape[:-3], indices.shape[-3] * self.cardinality, indices.shape[-1])
             else:  # mode == 'onehot'
-                nr_nodes, n, w, d, oc, r = ctx.parent_indices.shape
-                indices = ctx.parent_indices.permute(0, 1, 2, 3, 5, 4).unsqueeze(-1).unsqueeze(-1)
+                nr_nodes, n1, n2, w, d, oc, r = ctx.parent_indices.shape
+                indices = th.einsum('...ij -> ...ji', ctx.parent_indices).unsqueeze(-1).unsqueeze(-1)
                 indices = indices * self.one_hot_in_channel_mapping
-                # Shape [nr_nodes, n, w, d, r, oc, 2, ic]
-                indices = indices.sum(dim=5)
-                # Shape [nr_nodes, n, w, d, r, 2, ic]
-                indices = indices.permute(0, 1, 2, 3, 5, 6, 4)  # [nr_nodes, n, w, d, 2, ic, r]
-                indices = indices.reshape(nr_nodes, n, w, d * self.cardinality, self.in_channels, r)
+                # Shape [nr_nodes, *batch_dims, w, d, r, oc, 2, ic]
+                indices = indices.sum(dim=-3)
+                # Shape [nr_nodes, *batch_dims, w, d, r, 2, ic]
+                indices = th.einsum('...ijk -> ...jki', indices)
+                # [nr_nodes, *batch_dims, w, d, 2, ic, r]
+                indices = indices.reshape(*indices.shape[:-4], indices.shape[-4] * self.cardinality, *indices.shape[-2:])
+                # [nr_nodes, *batch_dims, w, d * 2, ic, r]
 
         # Remove padding
         if self._pad:
