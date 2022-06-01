@@ -81,7 +81,7 @@ class IndGmm:
         if has_rep_dim:
             x = th.einsum('...ij -> ...ji', x)
 
-        if True and probs is not None:
+        if False and probs is not None:
             for key, value in {'SPN': probs, 'target': target_probs}.items():
                 fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=100)
                 ax1.imshow(forplot(exp_view(value)))
@@ -208,11 +208,17 @@ if __name__ == "__main__":
     parser.add_argument('--ent_approx_sample_size', '-samples', type=int, default=5)
     parser.add_argument('--results_dir', type=str, default='../../spn_experiments',
                         help='The base directory where the directory containing the results will be saved to.')
-    parser.add_argument('--resp_with_grad', action='store_true',
-                        help="If True, approximation of responsibilities is done with grad enabled.")
+    parser.add_argument('--no_resp_grad', action='store_true',
+                        help="If True, approximation of responsibilities is done with grad disabled.")
+    parser.add_argument('--with_ent_loss', '-ent', action='store_true',
+                        help="If True, create a new SPN and train it to increase entropy only.")
+    parser.add_argument('--vips', action='store_true',
+                        help="If True, fit model to target dist using our flavor of VIPS.")
     parser.add_argument('--make_gif', '-gif', action='store_true',
                         help="Create gif of plots")
     args = parser.parse_args()
+
+    assert not (args.with_ent_loss and args.vips)
 
     for d in [args.results_dir]:
         if not os.path.exists(d):
@@ -227,16 +233,28 @@ if __name__ == "__main__":
                                                                target_gmm_prior_variance)
     else:
         target_mixture = IndGmm(num_dimensions)
-        dist_params = {
-            0: {
-                'mean': th.as_tensor([-40, -30, -20, -10, 10, 20, 30, 40]),
-                'std': th.as_tensor([1] * 8),
-            },
-            1: {
-                'mean': th.as_tensor([-35, -15, 15, 35]),
-                'std': th.as_tensor([3] * 4)
+        if True:
+            dist_params = {
+                0: {
+                    'mean': th.as_tensor([-40, -20, -10, 10, 30, 40]),
+                    'std': th.as_tensor([5] * 6),
+                },
+                1: {
+                    'mean': th.as_tensor([-35, -15, 15, 35]),
+                    'std': th.as_tensor([5] * 4)
+                }
             }
-        }
+        else:
+            dist_params = {
+                0: {
+                    'mean': th.as_tensor([-40, -30, -20, -10, 10, 20, 30, 40]),
+                    'std': th.as_tensor([1] * 8),
+                },
+                1: {
+                    'mean': th.as_tensor([-35, -15, 15, 35]),
+                    'std': th.as_tensor([3] * 4)
+                }
+            }
         for dim, params in dist_params.items():
             target_mixture.add_dim(params['mean'], params['std'])
 
@@ -261,33 +279,60 @@ if __name__ == "__main__":
 
     @gif.frame
     def gif_frame(probs):
-        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=100)
+        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
         ax1.imshow(forplot(exp_view(probs)))
         ax1.set_title(f"RatSpn distribution at step {step}")
 
+    @gif.frame
+    def gif_target_dist(probs):
+        plot_target_dist(probs, noshow=True)
 
-    target_probs = exp_view(target_mixture.evaluate(grid, dims=None, return_log=True))
-    if isinstance(target_mixture, IndGmm):
-        fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(10, 15), dpi=100)
-        ax1.imshow(target_probs)
-        ax1.set_title(
-            f"Target distribution with "
-            f"{', '.join([f'{target_mixture.num_components[i]} components over {dim}' for i, dim in enumerate(['x', 'y'])])}."
-        )
-        ax2.plot([i for i in range(grid_points)], forplot(target_probs.exp().sum(0), True))
-        ax2.set_title("Marginal target distribution over x")
-        ax3.plot([i for i in range(grid_points)], forplot(target_probs.exp().sum(1), True))
-        ax3.set_title("Marginal target distribution over y")
-        plt.show()
-    else:
-        plt.imshow(target_probs)
-        plt.title(f"Target distribution with {num_true_components} components.")
-        plt.show()
+    def plot_target_dist(model_probs = None, noshow=False):
+        target_probs = exp_view(target_mixture.evaluate(grid, dims=None, return_log=True))
+        if model_probs is not None:
+            model_probs = exp_view(model_probs)
+        if isinstance(target_mixture, IndGmm):
+            fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(10, 15), dpi=100)
+            if model_probs is None:
+                ax1.imshow(target_probs)
+            else:
+                ax1.imshow(target_probs, alpha=0.5, cmap='cividis')
+                ax1.imshow(model_probs, alpha=0.7)
+            ax1.set_title(
+                f"Target distribution with "
+                f"{', '.join([f'{target_mixture.num_components[i]} components over {dim}' for i, dim in enumerate(['x', 'y'])])}."
+            )
+            ax1.legend()
+            ax2.plot([i for i in range(grid_points)], forplot(target_probs.sum(0), True), color='b',
+                     label='Target dist')
+            ax3.plot([i for i in range(grid_points)], forplot(target_probs.sum(1), True), color='b',
+                     label='Target dist')
+            if model_probs is not None:
+                ax2.plot([i for i in range(grid_points)], forplot(model_probs.sum(0), True), color='r',
+                         label='Model dist')
+                ax3.plot([i for i in range(grid_points)], forplot(model_probs.sum(1), True), color='r',
+                         label='Model dist')
+
+            ax2.set_title("Marginal target distribution over x")
+            ax3.set_title("Marginal target distribution over y")
+            ax2.legend()
+            ax3.legend()
+        else:
+            plt.imshow(target_probs)
+            plt.title(f"Target distribution with {num_true_components} components.")
+        if not noshow:
+            plt.show()
+
+    if args.vips:
+        plot_target_dist()
 
     for seed in args.seed:
         th.manual_seed(seed)
 
-        load_path = os.path.join(args.results_dir, 'high_ent_ratspn.pt')
+        if args.vips:
+            load_path = os.path.join(args.results_dir, 'high_ent_ratspn.pt')
+        else:
+            load_path = None
         if load_path is None:
             model = build_ratspn(
                 num_dimensions,
@@ -295,17 +340,42 @@ if __name__ == "__main__":
             ).to(args.device)
         else:
             model = th.load(load_path, map_location=args.device)
-
-        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+            # Only for high_ent_ratspn.pt
+            w = model.layer_index_to_obj(model.max_layer_index).weight_param.data
+            w = w.unsqueeze(0)
+            model.layer_index_to_obj(model.max_layer_index).weight_param = th.nn.Parameter(w)
 
         grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
+        with th.no_grad():
+            model_probs = model(grid_tensor)
+            if args.vips:
+                plot_target_dist(model_probs)
+
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
         if args.make_gif:
-            fps = 10
-            gif_duration = 10  # seconds
-            n_steps = 48000 if args.resp_with_grad else 3000
-            n_frames = fps * gif_duration
-            make_frame_every = int(n_steps / n_frames)
+            if args.with_ent_loss:
+                fps = 5
+                gif_duration = 10  # seconds
+                n_steps = 3000 if args.no_resp_grad else 40000
+                n_frames = fps * gif_duration
+                make_frame_every = int(n_steps / n_frames)
+                save_path = os.path.join(
+                    args.results_dir,
+                    f"{'no_grad' if args.no_resp_grad else 'with_grad'}"
+                    f"_samples{args.ent_approx_sample_size}"
+                    f"_seed{seed}.gif"
+                )
+            else:
+                fps = 5
+                n_steps = 300
+                make_frame_every = 1
+
+                save_path = os.path.join(
+                    args.results_dir, "test.gif"
+                )
+
         else:
             n_steps = 50000
             make_frame_every = 1 # 5000
@@ -317,9 +387,13 @@ if __name__ == "__main__":
         t_start = time.time()
         for step in range(int(n_steps)):
             if step % make_frame_every == 0:
-                probs = model(grid_tensor)
-                if args.make_gif:
-                    frame = gif_frame(probs)
+                with th.no_grad():
+                    probs = model(grid_tensor)
+                if args.with_ent_loss or args.vips:
+                    if args.with_ent_loss:
+                        frame = gif_frame(probs)
+                    else:
+                        frame = gif_target_dist(probs)
                     frames.append(frame)
                 else:
                     plt.imshow(forplot(exp_view(probs)))
@@ -330,15 +404,15 @@ if __name__ == "__main__":
                 losses = []
                 t_start = time.time()
 
-            if True:
-                child_entropies = None
-                for layer_index in range(model.num_layers):
-                    child_entropies, layer_log, _ = model.layer_entropy_approx(
-                        layer_index=layer_index, child_entropies=child_entropies,
-                        sample_size=9, grad_thru_resp=False, verbose=False,
-                        target_dist_callback=target_callback,
-                        return_child_samples=True,
-                    )
+            if args.vips:
+                with th.no_grad():
+                    child_entropies = None
+                    for layer_index in range(model.num_layers):
+                        child_entropies, layer_log, _ = model.layer_entropy_approx(
+                            layer_index=layer_index, child_entropies=child_entropies,
+                            sample_size=100, grad_thru_resp=False, verbose=False,
+                            target_dist_callback=target_callback,
+                        )
 
             if False:
                 child_entropies = None
@@ -416,11 +490,10 @@ if __name__ == "__main__":
                     samples = samples.squeeze(-1).permute(0, 2, 3, 4, 5, 1)
                     logging.update(layer_log)
 
-            if False:
-                model.sample(mode='index', n=(3, 7))
+            if args.with_ent_loss:
                 ent, _ = model.vi_entropy_approx(
                     sample_size=args.ent_approx_sample_size,
-                    grad_thru_resp=args.resp_with_grad
+                    grad_thru_resp=not args.no_resp_grad,
                 )
                 loss = -ent.mean() * 10.0
                 losses.append(loss.item())
@@ -429,12 +502,6 @@ if __name__ == "__main__":
                 optimizer.step()
 
         if args.make_gif:
-            save_path = os.path.join(
-                args.results_dir,
-                f"{'grad_enabled' if args.resp_with_grad else 'no_grad'}"
-                f"_samples{args.ent_approx_sample_size}"
-                f"_seed{seed}.gif"
-            )
             gif.save(frames, save_path, duration=1/fps, unit='s')
 
         print(f"Finished with seed {seed}")
