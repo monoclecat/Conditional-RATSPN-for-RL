@@ -648,7 +648,7 @@ class RatSpn(nn.Module):
         child_ll = child_ll.permute(1, 2, 0, 3)
         child_ll = child_ll.unsqueeze(3)  # [w, d, ic, 1, r]
 
-        responsibilities: th.Tensor = log_weights.detach() + child_ll - ll
+        responsibilities: th.Tensor = log_weights + child_ll - ll
         return responsibilities, (ctx if return_sample_ctx else None)
 
     def weigh_tensors(self, layer_index, tensors: List = None, return_weight_ent=False) \
