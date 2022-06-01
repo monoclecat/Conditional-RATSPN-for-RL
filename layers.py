@@ -67,8 +67,8 @@ class Sum(AbstractLayer):
         self.dropout = nn.Parameter(th.tensor(check_valid(dropout, float, 0.0, 1.0)), requires_grad=False)
         self.ratspn = ratspn
 
-        # Weights, such that each sumnode has its own weights
-        ws = th.randn(self.in_features, self.in_channels, self.out_channels, self.num_repetitions)
+        # Weights, such that each sumnode has its own weights. weight_sets := w = 1 in the RatSpn case.
+        ws = th.randn(1, self.in_features, self.in_channels, self.out_channels, self.num_repetitions)
         self.weight_param = nn.Parameter(ws)
         self._bernoulli_dist = th.distributions.Bernoulli(probs=self.dropout)
 
@@ -102,10 +102,9 @@ class Sum(AbstractLayer):
 
     @property
     def weights(self):
-        # weights should be [w, d, ic, oc, r]. In the RatSpn case, w is always 1
+        # weights need to have shape [w, d, ic, oc, r]. In the RatSpn case, w is always 1
         if self.ratspn:
-            # weight_param [d, ic, oc, r]
-            return F.log_softmax(self.weight_param, dim=1).unsqueeze(0)
+            return F.log_softmax(self.weight_param, dim=2)
         else:
             return self.weight_param
 
@@ -132,7 +131,7 @@ class Sum(AbstractLayer):
         # Dimensions
         w, d, c, r = x.shape[-4:]
         batch_dims = x.shape[:-4]
-        x = x.unsqueeze(-2)  # Shape: [n, w, d, ic, 1, r]
+        x = x.unsqueeze(-2)  # Shape: [*batch_dims, w, d, ic, 1, r]
         weights: th.Tensor = self.weights
 
         # Weights is of shape [w, d, ic, oc, r]
