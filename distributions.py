@@ -140,7 +140,7 @@ class RatNormal(Leaf):
 
             if ctx.repetition_indices is not None:
                 rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                rep_ind = rep_ind.expand(*([-1] * ctx.repetition_indices.dim()), d, i, -1)
+                rep_ind = rep_ind.expand(*selected_means.shape[:-1], -1)
                 selected_means = th.gather(selected_means, dim=-1, index=rep_ind)
 
             # Select means and std in the output_channel dimension

@@ -113,6 +113,7 @@ class RatSpn(nn.Module):
         """
         super().__init__()
         config.assert_valid()
+        assert config.R != config.F, "The number of repetitions can't be the number of input features to the SPN, sorry."
         self.config = config
 
         # Construct the architecture
@@ -178,10 +179,10 @@ class RatSpn(nn.Module):
 
         Args:
             x:
-                Input of shape [*batch_dims, weight_sets, in_features, self.config.F,
-                                repetition (== 1 if no rep is to be specified)].
-                batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
-                weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
+                Input of shape [*batch_dims, weight_sets, self.config.F,
+                                self.config.R or 1 if no rep is to be specified].
+                    batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
+                    weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
             layer_index: Evaluate log-likelihood of x at layer
             x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
                 permuted in the forward pass.
@@ -454,8 +455,9 @@ class RatSpn(nn.Module):
                     # ctx.parent_indices = ctx.parent_indices.squeeze(-1)
                     # To match the index to the correct repetition and its input channel, we do the following
                     ctx.repetition_indices = (ctx.parent_indices % self.config.R).squeeze(-1).squeeze(-1)
-                    # [nr_nodes, n, w, 1]
+                    # repetition_indices [nr_nodes, *sample_shape, w]
                     ctx.parent_indices = th.div(ctx.parent_indices, self.config.R, rounding_mode='trunc')
+                    # parent_indices [nr_nodes, *sample_shape, w, d, r = 1]
                 else:
                     ctx.parent_indices = ctx.parent_indices.view(*ctx.parent_indices.shape[:-2], -1, self.config.R)
                     # ctx.parent_indices [nr_nodes, n, w, d, ic, r]

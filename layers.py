@@ -167,6 +167,7 @@ class Sum(AbstractLayer):
             th.Tensor: Index into tensor which paths should be followed.
         """
         assert mode is not None, "A sampling mode must be provided!"
+        clear_weights_mask = None
 
         # Sum weights are of shape: [N, D, IC, OC, R]
         # We now want to use `indices` to access one in_channel for each in_feature x out_channels block
@@ -178,7 +179,7 @@ class Sum(AbstractLayer):
 
         # Create sampling context if this is a root layer
         if ctx.is_root:
-            weights = weights.expand(*sample_shape, *([-1] * weights.dim()))
+            weights = weights.repeat(*sample_shape, *([1] * weights.dim()))
             # weights from selected repetition with shape [*batch_dims, w, d, ic, oc, r]
             weights = th.einsum('...ijk -> j...ik', weights)
             # oc is our nr_nodes: [nr_nodes=oc, *batch_dims, w, d, ic, r]
@@ -188,27 +189,26 @@ class Sum(AbstractLayer):
                 if ctx.repetition_indices is not None:
                     self._check_repetition_indices(ctx)
 
-                # TODO parent_indices now always has a repetition dim. Does that break anything here?
-                weights = weights.expand(ctx.parent_indices.shape[0], sample_shape, -1, -1, -1, -1, -1)
-                parent_indices = ctx.parent_indices.unsqueeze(4).unsqueeze(4)
+                # parent_indices [nr_nodes, *sample_shape, w, d, r]
+                # weights [w, d, ic, oc, r]
+                weights = weights.expand(*ctx.parent_indices.shape[:-1], -1, -1, -1)
                 if ctx.repetition_indices is not None:
                     rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                    rep_ind = rep_ind.expand(-1, -1, -1, d, ic, oc, -1)
-                    weights = th.gather(weights, dim=-1, index=rep_ind).squeeze(-1)
-                    # weights from selected repetition with shape [nr_nodes, n, w, d, ic, oc]
-                    parent_indices = parent_indices.expand(-1, -1, -1, -1, ic, -1)
-                else:
-                    parent_indices = parent_indices.expand(-1, -1, -1, -1, ic, -1, -1)
-                weights = th.gather(weights, dim=5, index=parent_indices).squeeze(5)
-                # weights from selected parent with shape [nr_nodes, n, w, d, ic]
+                    rep_ind = rep_ind.expand(*weights.shape[:-1], -1)
+                    weights = th.gather(weights, dim=-1, index=rep_ind)
+                    # weights from selected repetition with shape [nr_nodes, n, w, d, ic, oc, 1]
+
+                parent_indices = ctx.parent_indices.unsqueeze(-2).expand(*weights.shape[:-2], -1)
+                # parent_indices [nr_nodes, *sample_shape, w, d, ic, r]
+                weights = th.gather(weights, dim=-2, index=parent_indices.unsqueeze(-2)).squeeze(-2)
+                # weights from selected parent with shape [nr_nodes, *sample_shape, w, d, ic, r]
             else:  # mode == 'onehot'
-                assert ctx.parent_indices.detach().sum(4).max().item() == 1.0
-                weights = weights * ctx.parent_indices.unsqueeze(4)
-                # [nr_nodes, n, w, d, ic, oc, r]
-                weights = weights.sum(5)  # Sum out output_channel dimension
-                if ctx.parent_indices.detach()[0, 0, 0, 0, :, :].sum().item() == 1.0:
-                    # Only one repetition is selected, remove repetition dim of weights
-                    weights = weights.sum(-1)
+                assert ctx.parent_indices.detach().sum(-2).max().item() == 1.0
+                # parent_indices [nr_nodes, *sample_shape, w, d, oc, r]
+                weights = weights * ctx.parent_indices.unsqueeze(-3)
+                # [nr_nodes, *sample_shape, w, d, ic, oc, r]
+                weights = weights.sum(-2)
+                clear_weights_mask = weights == 0.0
 
         # If evidence is given, adjust the weights with the likelihoods of the observed paths
         if self._is_input_cache_enabled and self._input_cache is not None:
@@ -229,16 +229,14 @@ class Sum(AbstractLayer):
 
         # If sampling context is MPE, set max weight to 1 and rest to zero, such that the maximum index will be sampled
         if ctx.is_mpe:
-            if mode == 'index':
+            # Get index of largest weight along in-channel dimension
+            indices = weights.argmax(dim=-2)
+            # indices [nr_nodes, *sample_shape, w, d, r]
+            if mode == 'onehot':
                 # Get index of largest weight along in-channel dimension
-                indices = weights.argmax(dim=4)
-            else:  # mode == 'onehot'
-                # Get index of largest weight along in-channel dimension
-                indices = weights.argmax(dim=4)
                 one_hot = F.one_hot(indices, num_classes=ic)
-                if one_hot.dim() == 6:
-                    # F.one_hot() expands the last dim, which is the ic dim. It must come before the repetition dim.
-                    one_hot = one_hot.permute(0, 1, 2, 3, 5, 4)
+                # indices [nr_nodes, *sample_shape, w, d, r, ic]
+                indices = th.einsum('...ij -> ...ji', one_hot)
         else:
             # Create categorical distribution and use weights as logits.
             #
@@ -251,29 +249,16 @@ class Sum(AbstractLayer):
             # >> dist = th.distributions.Categorical(logits=weights)
             # >> indices = dist.sample()
 
+            indices = F.gumbel_softmax(logits=weights, hard=True, dim=-2)  # -2 == ic (input channel) dimension
             if mode == 'index':
-                # -2 == ic (input channel) dimension
-                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=-2)
                 cats = th.arange(ic, device=weights.device)
-                if ctx.repetition_indices is None:
-                    # weights have repetition dim, so cats needs it too
-                    cats = cats.unsqueeze_(-1).expand(-1, r)
-                indices = (one_hot * cats).sum(-2).long()
-            else:  # mode == 'onehot'
-                one_hot = F.gumbel_softmax(logits=weights, hard=True, dim=-2)
+                cats = cats.unsqueeze_(-1).expand(-1, indices.size(-1))
+                indices = (indices * cats).sum(-2).long()
 
-        if mode == 'index':
-            # Update parent indices
-            ctx.parent_indices = indices
-        else:  # mode == 'onehot'
-            if one_hot.dim() == 5:
-                # Weights didn't have repetition dim, so re-instantiate it again.
-                one_hot = ctx.parent_indices.detach().sum(4).unsqueeze(4) * one_hot.unsqueeze(-1)
-            assert one_hot.detach().sum(4).max().item() == 1.0
+        if mode == 'onehot' and clear_weights_mask is not None:
+            indices[clear_weights_mask] = 0.0
 
-            # Update one-hot vectors to select the input channels of this layer.
-            ctx.parent_indices = one_hot
-
+        ctx.parent_indices = indices
         return ctx
 
     def sample_index_style(self, ctx: Sample = None) -> Sample:
@@ -411,7 +396,6 @@ class Product(AbstractLayer):
             indices (th.Tensor): Parent sampling output.
         Returns:
             th.Tensor: Index into tensor which paths should be followed.
-                          Output should be of size: in_features, out_channels.
         """
 
         # If this is a root node
@@ -419,8 +403,8 @@ class Product(AbstractLayer):
 
             if self.num_repetitions == 1:
                 # If there is only a single repetition, create new sampling context
-                ctx.parent_indices = th.zeros(ctx.n, 1, dtype=int, device=self.__device)
-                ctx.repetition_indices = th.zeros(ctx.n, dtype=int, device=self.__device)
+                ctx.parent_indices = th.zeros(*ctx.n, 1, dtype=int, device=self.__device)
+                ctx.repetition_indices = th.zeros(*ctx.n, dtype=int, device=self.__device)
                 return ctx
             else:
                 raise Exception(
@@ -428,14 +412,26 @@ class Product(AbstractLayer):
                 )
         else:
             # Repeat the parent indices, e.g. [0, 2, 3] -> [0, 0, 2, 2, 3, 3] depending on the cardinality
-            indices = th.repeat_interleave(ctx.parent_indices, repeats=self.cardinality, dim=3)
-
-            # Remove padding
-            if self._pad:
-                indices = indices[:, :, :, : -self._pad]
-
-            ctx.parent_indices = indices
+            ctx.parent_indices = self.repeat_by_cardinality(
+                ctx.parent_indices, -2 if ctx.sampling_mode == 'index' else -3
+            )
             return ctx
+
+    def repeat_by_cardinality(self, x, feature_dim=-2):
+        """
+        Repeat the feature dimension of x by the leaf cardinality and remove padding.
+
+        Args:
+            x: th.Tensor of shape [batch_dims and others, d, r] in the case that feature_dim == -2
+            feature_dim: Feature dimension which will be repeated
+        """
+        x = th.repeat_interleave(x, repeats=self.cardinality, dim=feature_dim)
+
+        # Remove padding
+        if self._pad:
+            x = x[:, :, :, : -self._pad]
+
+        return x
 
     def __repr__(self):
         return "Product(in_features={}, cardinality={}, out_shape={})".format(
