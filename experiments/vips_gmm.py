@@ -12,6 +12,8 @@ import torch.distributions as dist
 import gif
 import os
 import time
+from utils import *
+
 
 def build_ratspn(F, I):
     config = RatSpnConfig()
@@ -268,13 +270,25 @@ if __name__ == "__main__":
     def target_callback(x):
         return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True)
 
+    def scale_to_grid(tensor):
+        return (tensor - min_x) / (max_x - min_x) * grid_points
+
+    def scale_to_x(tensor):
+        return (tensor / grid_points) * (max_x - min_x) + min_x
+
     def exp_view(tensor: th.Tensor):
         return tensor.exp().view(grid_points, grid_points).T.cpu()
+
+    def dist_imshow(handle, probs, apply_exp_view=True, **kwargs):
+        # handle is either an axis or plt
+        if apply_exp_view:
+            probs = exp_view(probs)
+        handle.imshow(forplot(probs), extent=[min_x, max_x, max_x, min_x], **kwargs)
 
     def forplot(tensor: th.Tensor, scale=False):
         tensor = tensor.detach().cpu().numpy()
         if scale:
-            tensor = (tensor - min_x)/(max_x - min_x) * grid_points
+            tensor = scale_to_grid(tensor)
         return tensor
 
     @gif.frame
@@ -294,30 +308,30 @@ if __name__ == "__main__":
         if isinstance(target_mixture, IndGmm):
             fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(10, 15), dpi=100)
             if model_probs is None:
-                ax1.imshow(target_probs)
+                dist_imshow(ax1, target_probs, apply_exp_view=False)
             else:
-                ax1.imshow(target_probs, alpha=0.5, cmap='cividis')
-                ax1.imshow(model_probs, alpha=0.7)
+                dist_imshow(ax1, target_probs, apply_exp_view=False, alpha=0.5, cmap='cividis')
+                dist_imshow(ax1, model_probs, apply_exp_view=False, alpha=0.7)
             if root_children_mpe is not None:
                 root_children_mpe = th.einsum('...ij -> ...ji', root_children_mpe).flatten(0, -2)
-                root_children_mpe = forplot(root_children_mpe, True)
+                root_children_mpe = forplot(root_children_mpe)
                 ax1.scatter(root_children_mpe[:, 0], root_children_mpe[:, 1], s=1, color='r', label='Modes')
             ax1.set_title(
                 f"Target distribution with "
                 f"{', '.join([f'{target_mixture.num_components[i]} components over {dim}' for i, dim in enumerate(['x', 'y'])])}."
             )
-            ax2.plot([i for i in range(grid_points)], forplot(target_probs.sum(0)), color='b',
+            ax2.plot(scale_to_x(np.arange(grid_points)), forplot(target_probs.sum(0)), color='b',
                      label='Target dist')
-            ax3.plot([i for i in range(grid_points)], forplot(target_probs.sum(1)), color='b',
+            ax3.plot(scale_to_x(np.arange(grid_points)), forplot(target_probs.sum(1)), color='b',
                      label='Target dist')
             if model_probs is not None:
-                ax2.plot([i for i in range(grid_points)], forplot(model_probs.sum(0)), color='r',
+                ax2.plot(scale_to_x(np.arange(grid_points)), forplot(model_probs.sum(0)), color='r',
                          label='Model dist')
-                ax3.plot([i for i in range(grid_points)], forplot(model_probs.sum(1)), color='r',
+                ax3.plot(scale_to_x(np.arange(grid_points)), forplot(model_probs.sum(1)), color='r',
                          label='Model dist')
             if leaf_mpe is not None:
                 leaf_mpe = th.einsum('...ij -> ...ji', leaf_mpe).flatten(0, -2)
-                leaf_mpe = forplot(leaf_mpe, True)
+                leaf_mpe = forplot(leaf_mpe)
                 ax2.vlines(leaf_mpe[:, 0], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
                 ax3.vlines(leaf_mpe[:, 1], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
 
@@ -380,7 +394,7 @@ if __name__ == "__main__":
                 )
             else:
                 fps = 5
-                n_steps = 150
+                n_steps = 151
                 make_frame_every = 1
 
                 save_path = os.path.join(
@@ -396,6 +410,7 @@ if __name__ == "__main__":
         losses = []
         t_start = time.time()
         self_prob_penalty = args.init_self_prob_penalty
+        plot_at = 150
         for step in range(int(n_steps)):
             if step % make_frame_every == 0:
                 with th.no_grad():
@@ -418,7 +433,7 @@ if __name__ == "__main__":
                             root_children_mpe=model.mpe(layer_index=model.max_layer_index - 1),
                         )
                     else:
-                        plt.imshow(forplot(exp_view(probs)))
+                        plt.imshow(forplot(exp_view(probs)), extent=[min_x, max_x, max_x, min_x])
                         plt.show()
                 t_delta = np.around(time.time() - t_start, 2)
                 if step > 0:
@@ -428,7 +443,9 @@ if __name__ == "__main__":
                 t_start = time.time()
 
             if args.vips:
-                model.vips(target_callback, sample_size=100, verbose=False, self_prob_penalty=self_prob_penalty)
+                _, log_dict = model.vips(target_callback, sample_size=100,
+                                         verbose= step == plot_at,
+                                         self_prob_penalty=self_prob_penalty)
                 self_prob_penalty = self_prob_penalty * args.gamma
 
             if False:
