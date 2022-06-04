@@ -77,9 +77,7 @@ class IndGmm:
         """
         if dims is None:
             dims = [i for i in range(self.num_dimensions)]
-
-        if has_rep_dim:
-            x = th.einsum('...ij -> ...ji', x)
+        x = x.cpu()
 
         if False and probs is not None:
             for key, value in {'SPN': probs, 'target': target_probs}.items():
@@ -107,7 +105,7 @@ class IndGmm:
             log_probs.append(mixture_prob)
 
         if has_rep_dim:
-            log_probs = th.stack(log_probs, dim=-2)
+            log_probs = th.stack(log_probs, dim=-1)
         else:
             log_probs = th.sum(th.stack(log_probs), dim=0)
         return log_probs if return_log else log_probs.exp()
@@ -203,6 +201,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
+    parser.add_argument('--gamma', '-g', type=float, default=0.99)
+    parser.add_argument('--init_self_prob_penalty', '-p', type=float, default=1.0)
     parser.add_argument('--device', '-d', type=str, default='cuda',
                         help='cuda or cpu')
     parser.add_argument('--ent_approx_sample_size', '-samples', type=int, default=5)
@@ -262,14 +262,14 @@ if __name__ == "__main__":
     min_x = -50
     max_x = -min_x
     x = th.linspace(min_x, max_x, grid_points)
-    grid = th.stack(th.meshgrid(x, x), dim=-1)
+    grid = th.stack(th.meshgrid((x, x), indexing='ij'), dim=-1)
     grid = grid.reshape(-1, 2)
 
     def target_callback(x):
         return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True)
 
     def exp_view(tensor: th.Tensor):
-        return tensor.exp().view(grid_points, grid_points).T
+        return tensor.exp().view(grid_points, grid_points).T.cpu()
 
     def forplot(tensor: th.Tensor, scale=False):
         tensor = tensor.detach().cpu().numpy()
@@ -284,10 +284,10 @@ if __name__ == "__main__":
         ax1.set_title(f"RatSpn distribution at step {step}")
 
     @gif.frame
-    def gif_target_dist(probs):
-        plot_target_dist(probs, noshow=True)
+    def gif_target_dist(model_probs, step, leaf_mpe, root_children_mpe):
+        plot_target_dist(model_probs, True, step, leaf_mpe, root_children_mpe)
 
-    def plot_target_dist(model_probs = None, noshow=False):
+    def plot_target_dist(model_probs=None, noshow=False, step=None, leaf_mpe=None, root_children_mpe=None):
         target_probs = exp_view(target_mixture.evaluate(grid, dims=None, return_log=True))
         if model_probs is not None:
             model_probs = exp_view(model_probs)
@@ -298,25 +298,35 @@ if __name__ == "__main__":
             else:
                 ax1.imshow(target_probs, alpha=0.5, cmap='cividis')
                 ax1.imshow(model_probs, alpha=0.7)
+            if root_children_mpe is not None:
+                root_children_mpe = th.einsum('...ij -> ...ji', root_children_mpe).flatten(0, -2)
+                root_children_mpe = forplot(root_children_mpe, True)
+                ax1.scatter(root_children_mpe[:, 0], root_children_mpe[:, 1], s=1, color='r', label='Modes')
             ax1.set_title(
                 f"Target distribution with "
                 f"{', '.join([f'{target_mixture.num_components[i]} components over {dim}' for i, dim in enumerate(['x', 'y'])])}."
             )
-            ax1.legend()
-            ax2.plot([i for i in range(grid_points)], forplot(target_probs.sum(0), True), color='b',
+            ax2.plot([i for i in range(grid_points)], forplot(target_probs.sum(0)), color='b',
                      label='Target dist')
-            ax3.plot([i for i in range(grid_points)], forplot(target_probs.sum(1), True), color='b',
+            ax3.plot([i for i in range(grid_points)], forplot(target_probs.sum(1)), color='b',
                      label='Target dist')
             if model_probs is not None:
-                ax2.plot([i for i in range(grid_points)], forplot(model_probs.sum(0), True), color='r',
+                ax2.plot([i for i in range(grid_points)], forplot(model_probs.sum(0)), color='r',
                          label='Model dist')
-                ax3.plot([i for i in range(grid_points)], forplot(model_probs.sum(1), True), color='r',
+                ax3.plot([i for i in range(grid_points)], forplot(model_probs.sum(1)), color='r',
                          label='Model dist')
+            if leaf_mpe is not None:
+                leaf_mpe = th.einsum('...ij -> ...ji', leaf_mpe).flatten(0, -2)
+                leaf_mpe = forplot(leaf_mpe, True)
+                ax2.vlines(leaf_mpe[:, 0], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
+                ax3.vlines(leaf_mpe[:, 1], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
 
             ax2.set_title("Marginal target distribution over x")
             ax3.set_title("Marginal target distribution over y")
             ax2.legend()
             ax3.legend()
+            if step is not None:
+                fig.suptitle(f"VIPS at step {step}")
         else:
             plt.imshow(target_probs)
             plt.title(f"Target distribution with {num_true_components} components.")
@@ -329,13 +339,13 @@ if __name__ == "__main__":
     for seed in args.seed:
         th.manual_seed(seed)
 
-        if args.vips:
+        if False and args.vips:
             load_path = os.path.join(args.results_dir, 'high_ent_ratspn.pt')
         else:
             load_path = None
         if load_path is None:
             model = build_ratspn(
-                num_dimensions,
+                2,
                 int(num_true_components * 1.0)
             ).to(args.device)
         else:
@@ -347,10 +357,11 @@ if __name__ == "__main__":
 
         grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
-        with th.no_grad():
-            model_probs = model(grid_tensor)
-            if args.vips:
-                plot_target_dist(model_probs)
+        if False:
+            with th.no_grad():
+                model_probs = model(grid_tensor)
+                if args.vips:
+                    plot_target_dist(model_probs)
 
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
@@ -369,13 +380,12 @@ if __name__ == "__main__":
                 )
             else:
                 fps = 5
-                n_steps = 300
+                n_steps = 150
                 make_frame_every = 1
 
                 save_path = os.path.join(
                     args.results_dir, "test.gif"
                 )
-
         else:
             n_steps = 50000
             make_frame_every = 1 # 5000
@@ -385,34 +395,41 @@ if __name__ == "__main__":
         frames = []
         losses = []
         t_start = time.time()
+        self_prob_penalty = args.init_self_prob_penalty
         for step in range(int(n_steps)):
             if step % make_frame_every == 0:
                 with th.no_grad():
                     probs = model(grid_tensor)
-                if args.with_ent_loss or args.vips:
-                    if args.with_ent_loss:
-                        frame = gif_frame(probs)
+                if args.make_gif:
+                    if args.vips:
+                        frame = gif_target_dist(
+                            model_probs=probs, step=step,
+                            leaf_mpe=model.mpe(layer_index=0),
+                            root_children_mpe=model.mpe(layer_index=model.max_layer_index-1),
+                        )
                     else:
-                        frame = gif_target_dist(probs)
+                        frame = gif_frame(probs)
                     frames.append(frame)
                 else:
-                    plt.imshow(forplot(exp_view(probs)))
-                    plt.show()
+                    if args.vips:
+                        plot_target_dist(
+                            model_probs=probs, noshow=False, step=step,
+                            leaf_mpe=model.mpe(layer_index=0),
+                            root_children_mpe=model.mpe(layer_index=model.max_layer_index - 1),
+                        )
+                    else:
+                        plt.imshow(forplot(exp_view(probs)))
+                        plt.show()
                 t_delta = np.around(time.time() - t_start, 2)
                 if step > 0:
-                    print(f"Time delta: {time_delta(t_delta)} - Avg. loss at step {step}: {round(np.mean(losses), 2)}")
+                    print(f"Time delta: {time_delta(t_delta)} - Step {step}"
+                          f"{f' - Avg. loss: {round(np.mean(losses), 2)}' if len(losses) > 0 else ''}")
                 losses = []
                 t_start = time.time()
 
             if args.vips:
-                with th.no_grad():
-                    child_entropies = None
-                    for layer_index in range(model.num_layers):
-                        child_entropies, layer_log, _ = model.layer_entropy_approx(
-                            layer_index=layer_index, child_entropies=child_entropies,
-                            sample_size=100, grad_thru_resp=False, verbose=False,
-                            target_dist_callback=target_callback,
-                        )
+                model.vips(target_callback, sample_size=100, verbose=False, self_prob_penalty=self_prob_penalty)
+                self_prob_penalty = self_prob_penalty * args.gamma
 
             if False:
                 child_entropies = None
@@ -504,5 +521,11 @@ if __name__ == "__main__":
         if args.make_gif:
             gif.save(frames, save_path, duration=1/fps, unit='s')
 
-        print(f"Finished with seed {seed}")
+        if args.vips:
+            plot_target_dist(
+                model_probs=probs, noshow=False, step=step,
+                leaf_mpe=model.mpe(layer_index=0),
+                root_children_mpe=model.mpe(layer_index=model.max_layer_index - 1),
+            )
+        print(f"Finished with seed {seed}. Final self-prob penalty: {self_prob_penalty}.")
 
