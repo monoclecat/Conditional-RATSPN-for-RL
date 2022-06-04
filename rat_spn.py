@@ -318,7 +318,7 @@ class RatSpn(nn.Module):
                 truncated_normal_(module.weights, std=0.5)
                 continue
 
-    def mpe(self, evidence: th.Tensor) -> th.Tensor:
+    def mpe(self, evidence: th.Tensor = None, layer_index=None) -> th.Tensor:
         """
         Perform MPE given some evidence.
 
@@ -327,7 +327,7 @@ class RatSpn(nn.Module):
         Returns:
             th.Tensor: Clone of input tensor with NaNs replaced by MPE estimates.
         """
-        return self.sample(evidence=evidence, is_mpe=True)
+        return self.sample(mode='index', evidence=evidence, layer_index=layer_index, is_mpe=True).sample
 
     def sample(
             self, mode: str = None, n: Union[int, Tuple] = 1, class_index=None, evidence: th.Tensor = None,
@@ -460,7 +460,7 @@ class RatSpn(nn.Module):
                     # parent_indices [nr_nodes, *sample_shape, w, d, r = 1]
                 else:
                     ctx.parent_indices = ctx.parent_indices.view(*ctx.parent_indices.shape[:-2], -1, self.config.R)
-                    # ctx.parent_indices [nr_nodes, n, w, d, ic, r]
+                    # ctx.parent_indices [nr_nodes, *sample_shape, w, d, ic, r]
                 ctx.has_rep_dim = False  # The final sample will be of one repetition only
 
             # Continue at layers
