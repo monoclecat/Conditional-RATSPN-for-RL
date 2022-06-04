@@ -3,8 +3,33 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Dict, Type, List, Union, Optional, Tuple
 
+import numpy as np
 import torch as th
 from torch import nn
+
+
+def flat_index_to_tensor_index(index: int, tensor_shape: th.Size):
+    if isinstance(index, th.Tensor):
+        index = index.item()
+    s = tensor_shape
+    t_ind = []
+    for i in range(len(s) - 1):
+        elem_per_slice = np.prod(s[i+1:])
+        dim_ind = np.floor_divide(index, elem_per_slice)
+        t_ind.append(dim_ind)
+        index -= dim_ind * elem_per_slice
+    t_ind.append(index)
+    return t_ind
+
+
+def tensor_index_to_flat_index(index: List, tensor_shape: th.Size):
+    s = tensor_shape
+    flat_ind = 0
+    for i in range(len(s) - 1):
+        elem_per_slice = np.prod(s[i+1:])
+        flat_ind += index[i] * elem_per_slice
+    flat_ind += index[-1]
+    return flat_ind
 
 
 @contextmanager
