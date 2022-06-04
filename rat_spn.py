@@ -1426,14 +1426,43 @@ class RatSpn(nn.Module):
     def is_ratspn(self):
         return self.config.is_ratspn
 
+    @property
+    def means(self):
+        return self._leaf.base_leaf.means
+
+    @property
+    def stds(self):
+        return self._leaf.base_leaf.stds
+
+    def debug__set_root_weights_dirac(self):
+        self.debug__set_weights_dirac(self.max_layer_index)
+
+    def debug__set_weights_dirac(self, layer_index):
+        layer = self.layer_index_to_obj(layer_index)
+        assert isinstance(layer, Sum), "Given layer index is not a Sum layer!"
+        weights = layer.weights
+        weights[:] = -100.0
+        weights[0, 0, 0, 0, 0] = -1e-3
+        weights = weights.log_softmax(dim=2)
+        if isinstance(layer.weight_param, nn.Parameter):
+            weights = nn.Parameter(weights)
+            del layer.weight_param
+        layer.weight_param = weights
+
     def debug__set_dist_params(self):
         """
-            Set the dist parameters for debugging purposes. Works only for I=3.
-            Mean of channels 1, 2, 3 of each RV are set to -100, 0, and 100, respectively.
+            Set the dist parameters for debugging purposes.
             Std is set to a very low value.
         """
-        assert self.config.I == 3, "Number of distributions per RV at the leaf layer must be 3."
-        means = th.as_tensor([-100.0, 0.0, 100.0]).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+        min_mean = -100.0
+        max_mean = 100.0
+        means = th.arange(min_mean, max_mean, (max_mean - min_mean) / self.config.I, device=self.device).unsqueeze(-1)
         means = means.expand_as(self._leaf.base_leaf.means)
-        self._leaf.base_leaf.means = means
-        self._leaf.base_leaf.stds = self._leaf.base_leaf.stds.mul(0).add(3e-5)
+        log_stds = self._leaf.base_leaf.stds.data.mul(0).add(3e-5).log()
+        if isinstance(self._leaf.base_leaf.means, nn.Parameter):
+            means = nn.Parameter(means)
+            log_stds = nn.Parameter(log_stds)
+            del self._leaf.base_leaf.mean_param
+            del self._leaf.base_leaf.std_param
+        self._leaf.base_leaf.mean_param = means
+        self._leaf.base_leaf.std_param = log_stds
