@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Type, List, Union, Optional, Tuple
+from typing import Dict, Type, List, Union, Optional, Tuple, Callable
 import math
 
 import numpy as np
@@ -9,11 +9,12 @@ from torch import nn
 from torch.nn import functional as F
 from torch import distributions as dist
 import scipy
+import matplotlib.pyplot as plt
 
 from base_distributions import Leaf
 from layers import CrossProduct, Sum
 from type_checks import check_valid
-from utils import provide_evidence, Sample
+from utils import *
 from distributions import IndependentMultivariate, GaussianMixture, truncated_normal_
 
 logger = logging.getLogger(__name__)
@@ -695,7 +696,7 @@ class RatSpn(nn.Module):
 
         return tensors, weight_entropy
 
-    def natural_param_leaf_update(self, samples: th.Tensor, **kwargs):
+    def natural_param_leaf_update(self, samples: th.Tensor, eta_guess: np.ndarray, verbose=False, **kwargs):
         """
         Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
         As specified in the VIPS paper.
@@ -705,12 +706,16 @@ class RatSpn(nn.Module):
             targets: Tensors of shape [w, self.config.F, self.config.I, self.config.R, n]
         """
         assert samples.shape[1:-1] == (self.config.F, self.config.I, self.config.R)
-        samples = samples.cpu()
-        for k in kwargs.keys():
+        samples = samples.clone().cpu()
+        keys = list(kwargs.keys())
+        for k in keys:
+            if kwargs[k] is None or not isinstance(kwargs[k], th.Tensor):
+                kwargs.pop(k)
+                continue
             assert kwargs[k].shape == (samples.shape[0], self.config.F, self.config.I, self.config.R, samples.shape[-1])
             kwargs[k] = kwargs[k].cpu()
 
-        targets = th.stack(list(kwargs.values()), dim=0).sum(dim=0)
+        targets = th.stack([val for val in kwargs.values() if val is not None], dim=0).sum(dim=0)
 
         with th.no_grad():
             # The PyTorch LS method can deal with high-dim tensors. We want to keep the dimensions intact for
@@ -731,9 +736,8 @@ class RatSpn(nn.Module):
             return -0.5 * (x ** 2 * 1 / X + np.log(np.abs(2 * np.pi * 1 / X)))
 
         def Q_q_step(eta, Q, q, R, r):
-            Q_step = eta / (eta + 1) * Q + 1 / eta * R
-            Q_step = np.clip(Q_step, 1e-5, None)
-            q_step = eta / (eta + 1) * q + 1 / eta * r
+            Q_step = Q * (eta / (eta + 1)) + R * (1 / (eta + 1))
+            q_step = q * (eta / (eta + 1)) + r * (1 / (eta + 1))
             return Q_step, q_step
 
         def loss_fn(eta, Q, q, R, r, eps):
@@ -754,31 +758,19 @@ class RatSpn(nn.Module):
             eps = args[-1]
             return eps - KL(*args[:-1])
 
-        eta_guess = np.ones_like(Q) * 100.0
+        # Calculate bounds for the etas, so that the Q_step are always greater min_Q
+        min_Q = 1e-5
+        eta_lower_bound = (min_Q - R) / (Q - min_Q)
+        eta_lower_bound = np.max((eta_lower_bound, np.zeros_like(eta_lower_bound)), axis=0)
+        if eta_guess is None:
+            eta_guess = eta_lower_bound * 10
+        print(f"Eta mean: {eta_guess.mean()}")
+
         res = scipy.optimize.minimize(
             loss_fn, eta_guess, args=(Q, q, R, r, epsilon),
             # loss_fn, eta_guess[0], args=(Q[0], q[0], R[0], r[0], epsilon[0]),
-            method='L-BFGS-B',
-            jac=grad,
-            bounds=tuple((1e-3, None) for _ in range(len(eta_guess))),
-            # bounds = tuple((1e-3, None) for _ in range(len(eta_guess[[0]]))),
+            method='L-BFGS-B', jac=grad, bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
         )
-
-        if False:
-            # Is the dual convex? Is the minimum found?
-            import matplotlib.pyplot as plt
-            fn_args = (Q[0], q[0], R[0], r[0], epsilon[0])
-            eta_seq = np.arange(0.1, 50, 0.1)
-            plt.plot(eta_seq, [loss_fn(th.as_tensor(i), *fn_args) for i in eta_seq], label='dual')
-            plt.plot(eta_seq, KL(eta_seq, *fn_args[:-1]), label='KL', color='r', linestyle=':')
-            plt.axvline(
-                res.x[0],
-                label=f'SciPy L-BFGS-B found minumum. KL at min {round(KL(res.x[0], *fn_args[:-1]).item(), 2)}',
-                color='g')
-            # axes = plt.gca()
-            # axes.set_ylim([0, 50])
-            plt.legend()
-            plt.show()
 
         kls = KL(res.x, Q, q, R, r)
         print(f"Max KL div. is {round(kls.max(), 2)}")
@@ -787,35 +779,78 @@ class RatSpn(nn.Module):
         q_step = q_step.reshape(self._leaf.base_leaf.mean_param.shape)
         new_log_std = np.log(np.sqrt(1 / Q_step))
         new_mean = 1 / Q_step * q_step
+
+        def debug_plot(flat_ind, means, samples, eta_lower_bound):
+            t = means
+            i = flat_ind
+            t_ind = flat_index_to_tensor_index(i, t.shape)
+            def get(tensor):
+                if not isinstance(tensor, th.Tensor):
+                    tensor = th.as_tensor(tensor)
+                tensor = tensor.detach().clone().cpu()
+                if tensor.dim() == 1:
+                    tensor = tensor[i]
+                else:
+                    for ind in t_ind:
+                        tensor = th.select(tensor, 0, ind)
+                if tensor.dim() == 0:
+                    tensor = tensor.item()
+                return tensor
+            # Is the dual convex? Is the minimum found?
+            fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(7, 10), dpi=100)
+            fn_args = (Q[i], q[i], R[i], r[i], epsilon[i])
+            eta_seq = np.arange(eta_lower_bound[i], 15, 0.1)
+
+            dual = [loss_fn(th.as_tensor(i), *fn_args) for i in eta_seq]
+            ax1.plot(eta_seq, dual, label='dual')
+            ax1.axvline(res.x[i], color='g',
+                        label=f'Min found by L-BFGS-B. KL at min {round(KL(res.x[i], *fn_args[:-1]).item(), 5)}')
+            ax1.set_xlabel('eta')
+            ax1.legend()
+
+            kls = KL(eta_seq, *fn_args[:-1])
+            ax2.plot(eta_seq, kls, label='KL', color='r', linestyle=':')
+            ax2.axvline(res.x[i], color='g', label=f'Min found by L-BFGS-B at eta = {round(res.x[i], 2)}.')
+            ax2.set_xlabel('eta')
+            ax2.legend()
+
+            p = get(quad_fit_params).numpy()
+            x = get(samples).numpy()
+            for k in kwargs.keys():
+                y = get(kwargs[k]).numpy()
+                ax3.plot(x, y, 'o', label=k)
+            if len(kwargs) > 1:
+                y = get(targets).numpy()
+                ax3.plot(x, y, 'o', label='Total target')
+            xx = np.linspace(np.floor(x.min()), np.ceil(x.max() + 2), 101)
+            yy = p[0] + p[1] * xx + p[2] * (-0.5) * xx ** 2
+            ax3.plot(xx, yy, label='least squares fit, $y = a + bx - 0.5 * x^2$')
+            old_mean = get(mu)
+            old_std = np.sqrt(get(var))
+            ax3.axvline(old_mean, label=f'old mean, std: {round(old_std, 2)}', color='r',
+                        linestyle=':')
+            ax3.axvline(get(new_mean), label=f'new mean, std: {round(np.exp(get(new_log_std)), 2)}', color='g')
+            ax3.set_xlabel('x')
+            ax3.set_ylabel('Reward')
+            ax3.legend(framealpha=1, shadow=True, loc=1, fontsize='x-small')
+            ax3.grid(alpha=0.25)
+            fig.suptitle(f"Optimization metrics of dist param at [{', '.join(np.asarray(t_ind, dtype=str))}]")
+            plt.show()
+            print(1)
+
+        if verbose:
+            t = self.means.data
+            flat_ind = 0
+            # debug_plot(flat_ind, means=t, samples=samples)
+            for i in range(t.numel()):
+                debug_plot(i, means=t, samples=samples, eta_lower_bound=eta_lower_bound)
+            print(1)
+
         self._leaf.base_leaf.std_param = nn.Parameter(th.as_tensor(new_log_std, dtype=th.float,
                                                                    device=self.device))
         self._leaf.base_leaf.mean_param = nn.Parameter(th.as_tensor(new_mean, dtype=th.float,
                                                                     device=self.device))
-
-        if False:
-            from scipy.linalg import lstsq
-            import matplotlib.pyplot as plt
-            p = quad_fit_params[0, 0, 0, 0].detach().cpu().numpy()
-            samples = samples.permute(1, 2, 0, 3, 4)
-            x = samples[0, 0, 0, 0].detach().cpu().numpy()
-            for k in kwargs.keys():
-                y = kwargs[k][0, 0, 0, 0].detach().cpu().numpy()
-                plt.plot(x, y, 'o', label=k)
-            y = targets[0, 0, 0, 0].detach().cpu().numpy()
-            plt.plot(x, y, 'o', label='Total target')
-            xx = np.linspace(np.floor(x.min()), np.ceil(x.max()+2), 101)
-            yy = p[0] + p[1] * xx + p[2] * (-0.5) * xx ** 2
-            plt.plot(xx, yy, label='least squares fit, $y = a + bx - 0.5 * x^2$')
-            old_mean = mu[0]
-            old_std = np.sqrt(var[0])
-            plt.axvline(old_mean.item(), label=f'old mean, std: {round(old_std.item(), 2)}', color='r', linestyle=':')
-            plt.axvline(new_mean[0, 0, 0, 0], label=f'new mean, std: {round(np.exp(new_log_std[0, 0, 0, 0]), 2)}', color='g')
-            plt.xlabel('x')
-            plt.ylabel('Reward')
-            plt.legend(framealpha=1, shadow=True, loc=1, fontsize='x-small')
-            plt.grid(alpha=0.25)
-            plt.show()
-            print(1)
+        return res.x
 
     def layer_entropy_approx(
             self, layer_index=0, child_entropies: th.Tensor = None,
@@ -837,6 +872,7 @@ class RatSpn(nn.Module):
             logging: Dict or None, depending on verbose
             child_samples: th.Tensor or None, depending on return_child_samples
         """
+        assert self.config.C == 1, "Only works for C = 1"
         assert child_entropies is not None or layer_index == 0, \
             "When sampling from a layer other than the leaf layer, child entropies must be provided!"
         logging = {}
@@ -909,99 +945,124 @@ class RatSpn(nn.Module):
                 })
         return log_dict
 
-    def vips(self, target_dist_callback, sample_size=10, grad_thru_resp: bool = False, verbose=False,
-             self_prob_penalty=1.0) \
-            -> Tuple[th.Tensor, Optional[Dict]]:
-        assert not self.config.gmm_leaves, "VI entropy not tested on GMM leaves yet."
-        assert self.config.C == 1, "Only works for C = 1"
+    def vips(self, target_dist_callback, steps, step_callback: Callable = None,
+             sample_size=10, verbose: Union[bool, Callable] = False, self_prob_penalty=1.0) \
+            -> Dict:
+        """
+
+        Args:
+            target_dist_callback: Callback to return a th.Tensor of log probabilities of the samples
+                on the target distribution.
+            steps:
+            step_callback: Function that is called at the end of each step with the current step as the arg.
+            sample_size:
+            verbose: Either a bool or a callable that returns bool and takes the current step as its only argument.
+                Is evaluated at the beginning of each step to determine if the functions make plots or return logs.
+            self_prob_penalty:
+
+        Returns:
+
+        """
         logging = {}
-        leaves_need_updating = False  # target_dist_callback is not None
-        samples = None
+        modes = ['spn_prob_penalty']
+        leaf_update_mode = 'spn_prob_penalty'
+        assert leaf_update_mode in modes
 
-        child_entropies = None
-        node_entropies = None
-        for layer_index in range(self.num_layers):
-            child_entropies = node_entropies
-            node_entropies, layer_log, ctx, aux_responsibility = self.layer_entropy_approx(
-                layer_index=layer_index, child_entropies=child_entropies,
-                sample_size=sample_size, grad_thru_resp=grad_thru_resp, return_resp=True,
-                verbose=verbose,
-                return_child_samples=target_dist_callback is not None,
-            )
+        for step in range(int(steps)):
+            verbose_on = verbose(step) if callable(verbose) else verbose
+            leaves_need_updating = target_dist_callback is not None
+            samples = None
+            etas = None
 
-            with th.no_grad():
-                if target_dist_callback is not None:
-                    if ctx is not None:
-                        samples = ctx.sample
-                        samples = th.einsum('...ij -> ...ji', samples)
-                        # samples [self.config.I := I, s, n, w, self.config.R := R, self.config.F := F]
+            node_entropies = None
+            for layer_index in range(self.num_layers):
+                child_entropies = node_entropies
+                node_entropies, layer_log, ctx, aux_responsibility = self.layer_entropy_approx(
+                    layer_index=layer_index, child_entropies=child_entropies,
+                    sample_size=sample_size, return_resp=True,
+                    verbose=verbose_on,
+                    return_child_samples=target_dist_callback is not None,
+                )
 
-                        target_prob = target_dist_callback(samples)
-                        # target_prob [I, s, n, w, R, F]
-                        # In the toy example we are using right now, the target_dist_callback returns a prob for each
-                        # feature of F. In a black-box setting, we would first have to fill up the scope with
-                        # different evidence-samples of the SPN.
-                        # The target_dist_callback would then give us probs for each scope-completed sample.
-                        # The last dimension would then be gone instead of size F, wouldn't it?
-                        target_prob = target_prob.nan_to_num().sum(-1)
-                        target_prob = target_prob.permute(3, 1, 0, 4, 2)
-                        # target_prob [w, s, I, R, n] first dims as leaf params, with sample shape last
+                with th.no_grad():
+                    if target_dist_callback is not None:
+                        if ctx is not None:
+                            samples = ctx.sample
+                            samples = th.einsum('...ij -> ...ji', samples)
+                            # samples [self.config.I := I, s, n, w, self.config.R := R, self.config.F := F]
 
-                    if layer_index == 0:
-                        # The repetition dim is flipped with the feature dimension to make it a batch dimension.
-                        # This is because in self.forward(samples) we want to evaluate
-                        # the probability of the sample on the entire SPN.
-                        # If we leave the repetition dimension last, the SPN will evaluate the probabilities
-                        # only in the samples' own repetitions.
-                        samples = th.einsum('...ijk -> ...jik', samples)
-                        # samples [I, s, n, R, w, F]
+                            target_prob = target_dist_callback(samples)
+                            # target_prob [I, s, n, w, R, F]
+                            # In the toy example we are using right now, the target_dist_callback returns a prob for each
+                            # feature of F. In a black-box setting, we would first have to fill up the scope with
+                            # different evidence-samples of the SPN.
+                            # The target_dist_callback would then give us probs for each scope-completed sample.
+                            # The last dimension would then be gone instead of size F, wouldn't it?
+                            target_prob = target_prob.nan_to_num().sum(-1)
+                            target_prob = target_prob.permute(3, 1, 0, 4, 2)
+                            # target_prob [w, s, I, R, n] first dims as leaf params, with sample shape last
 
-                        self_probs = self.forward(samples).squeeze(-1)
-                        # self_probs [I, s, n, R, w]
+                        if layer_index == 0:
+                            # The repetition dim is flipped with the feature dimension to make it a batch dimension.
+                            # This is because in self.forward(samples) we want to evaluate
+                            # the probability of the sample on the entire SPN.
+                            # If we leave the repetition dimension last, the SPN will evaluate the probabilities
+                            # only in the samples' own repetitions.
+                            samples = th.einsum('...ijk -> ...jik', samples)
+                            # samples [I, s, n, R, w, F]
 
-                        samples = samples.nan_to_num().sum(-1)
-                        # samples is now the non-split-by-scope sample of the leaf layer
-                        # TODO we can't do this anymore when we have to fill up the samples
-                        samples = samples.permute(4, 1, 0, 3, 2)
-                        # samples [w, s, I, R, n]
+                            self_probs = self.forward(samples).squeeze(-1)
+                            # self_probs [I, s, n, R, w]
 
-                        # target_prob = target_prob - 1.0 * self_probs.cpu()
+                            samples = samples.nan_to_num().sum(-1)
+                            # samples is now the non-split-by-scope sample of the leaf layer
+                            # TODO we can't do this anymore when we have to fill up the samples
+                            samples = samples.permute(4, 1, 0, 3, 2)
+                            # samples [w, s, I, R, n]
 
-                        # For the leaves, s is F // leaf-cardinality, so we can use the repeat function of the leaves
-                        # TODO Not sure if repeat_by_cardinality does what we intend
-                        # TODO Do we need to apply the SPN input permutation here?
-                        # target_prob = self._leaf.prod.repeat_by_cardinality(target_prob, feature_dim=-4)
+                            # target_prob = target_prob - 1.0 * self_probs.cpu()
 
-                        self_probs = self_probs.permute(4, 1, 0, 3, 2)
-                        # TODO Do we need to run it thru repeat_by_card too?
-                        # self_probs [w, s, I, R, n]
+                            # For the leaves, s is F // leaf-cardinality, so we can use the repeat function of the leaves
+                            # TODO Not sure if repeat_by_cardinality does what we intend
+                            # TODO Do we need to apply the SPN input permutation here?
+                            # target_prob = self._leaf.prod.repeat_by_cardinality(target_prob, feature_dim=-4)
 
-                        self.natural_param_leaf_update(
-                            samples=samples,
-                            target_prob=target_prob,
-                            self_prob=- self_prob_penalty * self_probs,
-                        )
-                    else:
-                        layer = self.layer_index_to_obj(layer_index)
-                        if isinstance(layer, Sum):
-                            # target_prob [w, s, ic, R, n] first dims as leaf params, with sample shape last
-                            target_prob = target_prob.mean(dim=-1).to(self.device)
-                            reward = target_prob.unsqueeze(3) + aux_responsibility + child_entropies.unsqueeze(3)
-                            if layer_index == self.max_layer_index:
-                                w, d, ic, oc, r = reward.shape
-                                reward = th.einsum('...ijk -> ...kji', reward)
-                                reward = reward.reshape(w, d, ic * r, oc, 1)
-                            new_weights = F.log_softmax(reward, dim=2)
-                            # new_weights [w, 1, ic * r, 1, 1]
-                            layer.weight_param = nn.Parameter(new_weights)
+                            if leaf_update_mode == 'spn_prob_penalty':
+                                self_probs = self_probs.permute(4, 1, 0, 3, 2)
+                                # TODO Do we need to run it thru repeat_by_card too?
+                                # self_probs [w, s, I, R, n]
+                                sum_onto_target_prob = {'spn_prob_penalty': - self_prob_penalty * self_probs }
 
-                    layer_log.update(self.log_dict_from_metric({'target_prob': target_prob.detach()}, rep_dim=-2, batch_dim=-1))
+                            etas = self.natural_param_leaf_update(
+                                samples=samples,
+                                eta_guess=etas,
+                                verbose=verbose_on,
+                                target_prob=target_prob,
+                                **sum_onto_target_prob,
+                            )
+                        else:
+                            layer = self.layer_index_to_obj(layer_index)
+                            if isinstance(layer, Sum):
+                                # target_prob [w, s, ic, R, n] first dims as leaf params, with sample shape last
+                                target_prob = target_prob.mean(dim=-1).to(self.device)
+                                reward = target_prob.unsqueeze(3) + aux_responsibility + child_entropies.unsqueeze(3)
+                                if layer_index == self.max_layer_index:
+                                    w, d, ic, oc, r = reward.shape
+                                    reward = th.einsum('...ijk -> ...kji', reward)
+                                    reward = reward.reshape(w, d, ic * r, oc, 1)
+                                new_weights = F.log_softmax(reward, dim=2)
+                                # new_weights [w, 1, ic * r, 1, 1]
+                                layer.weight_param = nn.Parameter(new_weights)
 
-            logging.update({layer_index: layer_log})
+                        layer_log.update(self.log_dict_from_metric({'target_prob': target_prob.detach()}, rep_dim=-2, batch_dim=-1))
 
-        return child_entropies.flatten(), logging
+                logging.update({layer_index: layer_log})
+            if step_callback is not None:
+                step_callback(step)
+        return logging
 
-    def vi_entropy_approx(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) -> Tuple[th.Tensor, Optional[Dict]]:
+    def vi_entropy_approx(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) \
+            -> Tuple[th.Tensor, Optional[Dict]]:
         """
         Approximate the entropy of the root sum node via variational inference,
         as done in the Variational Inference by Policy Search paper.
@@ -1011,7 +1072,16 @@ class RatSpn(nn.Module):
             grad_thru_resp: If False, the approximation of the responsibility is done without grad.
             verbose: Return logging data
         """
-        return self.vips(None, sample_size=sample_size, grad_thru_resp=grad_thru_resp, verbose=verbose)
+        logging = {}
+        child_entropies = None
+        for layer_index in range(self.num_layers):
+            child_entropies, layer_log, ctx, _ = self.layer_entropy_approx(
+                layer_index=layer_index, child_entropies=child_entropies,
+                sample_size=sample_size, grad_thru_resp=grad_thru_resp,
+                verbose=verbose,
+            )
+            logging.update({layer_index: layer_log})
+        return child_entropies.flatten(), logging
 
     def old2_vi_entropy_approx(self, sample_size=10, verbose=False, aux_resp_ll_with_grad=False,
                               aux_resp_sample_with_grad=False):

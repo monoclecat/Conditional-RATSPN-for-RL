@@ -411,7 +411,13 @@ if __name__ == "__main__":
         t_start = time.time()
         self_prob_penalty = args.init_self_prob_penalty
         plot_at = 150
-        for step in range(int(n_steps)):
+
+        def verbose_callback(step):
+            return step == plot_at
+            # return True
+
+        def step_callback(step):
+            global t_start, losses
             if step % make_frame_every == 0:
                 with th.no_grad():
                     probs = model(grid_tensor)
@@ -442,89 +448,17 @@ if __name__ == "__main__":
                 losses = []
                 t_start = time.time()
 
-            if args.vips:
-                _, log_dict = model.vips(target_callback, sample_size=100,
-                                         verbose= step == plot_at,
-                                         self_prob_penalty=self_prob_penalty)
-                self_prob_penalty = self_prob_penalty * args.gamma
-
-            if False:
-                child_entropies = None
-                logging = {}
-                for layer_index in range(1):
-                    if False:
-                        temp = model._leaf.base_leaf.means.detach()
-                        temp[:, 0, :, :] = -25
-                        del model._leaf.base_leaf.mean_param
-                        model._leaf.base_leaf.mean_param = temp
-                        temp = model._leaf.base_leaf.stds.detach()
-                        temp[:, 0, :, :] = 1e-3
-                        del model._leaf.base_leaf.std_param
-                        model._leaf.base_leaf.std_param = temp
-                        probs = model(grid_tensor)
-
-                    child_entropies, layer_log, samples = model.layer_entropy_approx(
-                        layer_index=layer_index, child_entropies=child_entropies,
-                        sample_size=1,
-                        grad_thru_resp=False, verbose=True,
-                        return_child_samples=True,
-                        sample_post_processing_kwargs={'split_by_scope': True},
-                    )
-                    samples = samples.permute(0, 5, 1, 2, 3, 4)
-                    # samples [ic, r, s, n, w, f]
-                    samples = samples[0, 0]
-                    # samples = th.as_tensor([[5.7994, th.nan], [th.nan, -5.8928]], device=args.device).\
-                        # unsqueeze(1).unsqueeze(1).expand_as(samples)
-
-                    flat_samples = samples.flatten(0, -2)
-                    nan_samples = flat_samples.isnan()
-                    x_samples = flat_samples[:, 0][~nan_samples[:, 0]]
-                    y_samples = flat_samples[:, 1][~nan_samples[:, 1]]
-
-                    filled_samples = model.sample(mode='index', n=5000, evidence=samples.unsqueeze(-1)).sample
-                    filled_samples = filled_samples.squeeze(-1).squeeze(0)
-                    flat_filled = filled_samples.flatten(1, -2)
-                    x_filled_in = flat_filled[:, nan_samples[:, 0]]
-                    y_filled_in = flat_filled[:, nan_samples[:, 1]]
-
-                    if True:
-                        # All samples where x is given and y must be filled in
-                        fig, (ax1) = plt.subplots(1, figsize=(15, 15), dpi=300)
-                        ax1.imshow(forplot(exp_view(probs)))
-                        ax1.vlines(forplot(x_samples, True), ymin=0, ymax=grid_points-1, color='r', alpha=0.3)
-                        plt.plot(forplot(y_filled_in[..., 0].flatten(), True),
-                                 forplot(y_filled_in[..., 1].flatten(), True),
-                                 marker='.', color='r', linestyle='', label='(x, y) ~ p(y | x)')
-                        plt.show()
-
-                    if True:
-                        # One sample where x is given and y must be filled in
-                        sample_id = 0
-                        fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(15, 15), dpi=300)
-                        ax1.imshow(forplot(exp_view(probs)))
-                        ax1.vlines(forplot(x_samples[sample_id], True), ymin=0, ymax=grid_points-1, color='r', alpha=0.3)
-                        ax1.plot(forplot(y_filled_in[:, sample_id, 0].flatten(), True),
-                                 forplot(y_filled_in[:, sample_id, 1].flatten(), True),
-                                 marker='.', color='r', linestyle='', label='(x, y) ~ p(y | x)')
-
-                        x_coord = np.round(forplot(y_filled_in[0, sample_id, 0].flatten(), True)).astype(int).item()
-                        ax2.plot([i for i in range(grid_points)], forplot(exp_view(probs)[:, x_coord].squeeze()))
-                        sampled_y = forplot(y_filled_in[:, sample_id, 1], True)
-                        ax3.hist(sampled_y, bins=int(grid_points/2))
-                        plt.show()
-
-                    if True:
-                        fig, (ax1) = plt.subplots(1, figsize=(15, 15), dpi=300)
-                        ax1.imshow(forplot(exp_view(probs)))
-                        ax1.hlines(forplot(y_samples, True), xmin=0, xmax=grid_points-1, linestyles=':', alpha=0.7)
-                        plt.legend()
-                        plt.show()
-
-                    filled_samples = filled_samples.permute(0, 2, 3, 4, 5, 1)
-                    samples = samples.squeeze(-1).permute(0, 2, 3, 4, 5, 1)
-                    logging.update(layer_log)
-
-            if args.with_ent_loss:
+        if args.vips:
+            log_dict = model.vips(
+                target_callback,
+                steps=n_steps,
+                step_callback=step_callback,
+                sample_size=100,
+                verbose=verbose_callback,
+                self_prob_penalty=self_prob_penalty
+            )
+        elif args.with_ent_loss:
+            for step in range(int(n_steps)):
                 ent, _ = model.vi_entropy_approx(
                     sample_size=args.ent_approx_sample_size,
                     grad_thru_resp=not args.no_resp_grad,
@@ -534,6 +468,10 @@ if __name__ == "__main__":
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                step_callback(step)
+        else:
+            print("No experiment specified")
+            exit()
 
         if args.make_gif:
             gif.save(frames, save_path, duration=1/fps, unit='s')
