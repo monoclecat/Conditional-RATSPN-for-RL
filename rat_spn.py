@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 from torch import distributions as dist
-import scipy
+import scipy.optimize
 import matplotlib.pyplot as plt
 
 from base_distributions import Leaf
@@ -132,6 +132,10 @@ class RatSpn(nn.Module):
     @property
     def max_layer_index(self):
         return self.__max_layer_index
+
+    @property
+    def sum_layer_indices(self):
+        return [i for i in range(2, self.max_layer_index+1, 2)]
 
     def layer_index_to_obj(self, layer_index):
         if layer_index == 0:
@@ -318,6 +322,12 @@ class RatSpn(nn.Module):
             if isinstance(module, Sum):
                 truncated_normal_(module.weights, std=0.5)
                 continue
+
+    @property
+    def root_weights_split_by_rep(self):
+        weights = self.root.weights
+        w, d, _, oc, _ = weights.shape
+        return weights.view(w, d, self.config.R, self.root.in_channels // self.config.R, oc).permute(0, 1, 3, 4, 2)
 
     def mpe(self, evidence: th.Tensor = None, layer_index=None) -> th.Tensor:
         """
@@ -523,6 +533,7 @@ class RatSpn(nn.Module):
                 mask = th.ones(self.config.F, dtype=th.bool)
                 mask[i * features_per_scope:(i + 1) * features_per_scope] = False
                 sample[:, i, :, :, mask, ...] = th.nan
+            ctx.is_split_by_scope = True
 
         # Each repetition has its own inverted permutation which we now apply to the samples.
         if invert_permutation:
@@ -881,12 +892,13 @@ class RatSpn(nn.Module):
 
         if layer_index == 0:
             ctx = self.sample(
-                mode='onehot', n=sample_size, layer_index=layer_index, is_mpe=False,
+                mode='onehot' if th.is_grad_enabled() else 'index',
+                n=sample_size, layer_index=layer_index, is_mpe=False,
                 do_sample_postprocessing=False,
             )
             # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
             child_ll = self.forward(
-                x=ctx.sample.permute(1, 2, 3, 0, 4),
+                x=th.einsum('InwFR -> nwFIR', ctx.sample),
                 layer_index=layer_index, x_needs_permutation=False
             )
             # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
@@ -901,7 +913,7 @@ class RatSpn(nn.Module):
             if isinstance(layer, CrossProduct):
                 node_entropies = layer(child_entropies.unsqueeze(0)).squeeze(0)
             else:
-                with th.set_grad_enabled(grad_thru_resp):
+                with th.set_grad_enabled(grad_thru_resp and th.is_grad_enabled()):
                     aux_responsibility, ctx = self.approx_responsibilities(
                         layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp,
                         return_sample_ctx=return_child_samples,
@@ -946,7 +958,7 @@ class RatSpn(nn.Module):
         return log_dict
 
     def vips(self, target_dist_callback, steps, step_callback: Callable = None,
-             sample_size=10, verbose: Union[bool, Callable] = False, self_prob_penalty=1.0) \
+             sample_size=10, verbose: Union[bool, Callable] = False) \
             -> Dict:
         """
 
@@ -958,15 +970,11 @@ class RatSpn(nn.Module):
             sample_size:
             verbose: Either a bool or a callable that returns bool and takes the current step as its only argument.
                 Is evaluated at the beginning of each step to determine if the functions make plots or return logs.
-            self_prob_penalty:
 
         Returns:
 
         """
         logging = {}
-        modes = ['spn_prob_penalty']
-        leaf_update_mode = 'spn_prob_penalty'
-        assert leaf_update_mode in modes
 
         for step in range(int(steps)):
             verbose_on = verbose(step) if callable(verbose) else verbose
