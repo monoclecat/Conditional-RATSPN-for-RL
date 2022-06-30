@@ -80,8 +80,8 @@ class Sum(AbstractLayer):
 
         # Weights of this sum node that were propagated down through the following product layer.
         # These weights weigh the child sum node in the layer after the product layer that follows this one.
-        # The consolidated weights are needed for moment calculation.
         self.consolidated_weights = None
+
         self.mean = None
         self.var = None
         self.skew = None
@@ -350,7 +350,7 @@ class Product(AbstractLayer):
         Product layer forward pass.
 
         Args:
-            x: Input of shape [batch, weight_sets, in_features, channel, repetitions].
+            x: Input of shape [*batch_dims, weight_sets, in_features, channel, repetitions].
 
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/cardinality), channel].
@@ -371,14 +371,15 @@ class Product(AbstractLayer):
             x = F.pad(x, pad=(0, 0, 0, 0, 0, self._pad), value=0)
 
         # Dimensions
-        n, w, d, c, r = x.size()
+        w, d, c, r = x.shape[-4:]
+        n = x.shape[:-4]  # Any number of batch dimensions
         d_out = d // self.cardinality
-        x = x.view(n, w, d_out, self.cardinality, c, r)
+        x = x.view(*n, w, d_out, self.cardinality, c, r)
 
         if reduction is None:
             return x
         elif reduction == 'sum':
-            return x.sum(dim=3)
+            return x.sum(dim=-3)
         else:
             raise NotImplementedError("No reduction other than sum is implemented. ")
 
@@ -516,11 +517,11 @@ class CrossProduct(AbstractLayer):
         Product layer forward pass.
 
         Args:
-            x: Input of shape [any number of batch dims, weight_sets, in_features, repetition].
+            x: Input of shape [any number of batch dims, weight_sets, in_features, in_channels, repetition].
                 weight_sets: In CSPNs, there are separate weights for each batch element.
 
         Returns:
-            th.Tensor: Output of shape [batch, ceil(in_features/2), channel * channel].
+            th.Tensor: Output of shape [batch, ceil(in_features/2), in_channels^2].
         """
         if self._pad:
             # Pad with marginalized nodes
@@ -528,22 +529,22 @@ class CrossProduct(AbstractLayer):
 
         # Dimensions
         w, d, c, r = x.shape[-4:]
-        batch_dims = x.shape[:-4]
+        n = x.shape[:-4]  # Any number of batch dimensions
         d_out = d // self.cardinality
 
         # Build outer sum, using broadcasting, this can be done with
         # modifying the tensor dimensions:
-        # left: [n, d/2, c, r] -> [n, d/2, c, 1, r]
-        # right: [n, d/2, c, r] -> [n, d/2, 1, c, r]
+        # left: [*n, w, d/2, c, r] -> [*n, w, d/2, c, 1, r]
+        # right: [*n, w, d/2, c, r] -> [*n, w, d/2, 1, c, r]
         left = x[..., :, self._scopes[0, :], :, :].unsqueeze(-2)
         right = x[..., :, self._scopes[1, :], :, :].unsqueeze(-3)
 
-        # left + right with broadcasting: [n, d/2, c, 1, r] + [n, d/2, 1, c, r] -> [n, d/2, c, c, r]
+        # left + right with broadcasting: [*n, w, d/2, c, 1, r] + [*n, w, d/2, 1, c, r] -> [*n, w, d/2, c, c, r]
         result = left + right
 
         # Put the two channel dimensions from the outer sum into one single dimension:
-        # [n, d/2, c, c, r] -> [n, d/2, c * c, r]
-        result = result.view(*batch_dims, w, d_out, c * c, r)
+        # [*n, w, d/2, c, c, r] -> [*n, w, d/2, c * c, r]
+        result = result.view(*n, w, d_out, c * c, r)
         return result
 
     def sample(self, mode: str = None, ctx: Sample = None) -> Union[Sample, th.Tensor]:
