@@ -203,8 +203,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
-    parser.add_argument('--gamma', '-g', type=float, default=0.99)
-    parser.add_argument('--init_self_prob_penalty', '-p', type=float, default=1.0)
     parser.add_argument('--device', '-d', type=str, default='cuda',
                         help='cuda or cpu')
     parser.add_argument('--ent_approx_sample_size', '-samples', type=int, default=5)
@@ -371,7 +369,7 @@ if __name__ == "__main__":
 
         grid_tensor = th.as_tensor(grid, device=model.device, dtype=th.float)
 
-        if False:
+        if True:
             with th.no_grad():
                 model_probs = model(grid_tensor)
                 if args.vips:
@@ -409,7 +407,6 @@ if __name__ == "__main__":
         frames = []
         losses = []
         t_start = time.time()
-        self_prob_penalty = args.init_self_prob_penalty
         plot_at = 150
 
         def verbose_callback(step):
@@ -431,7 +428,7 @@ if __name__ == "__main__":
                     else:
                         frame = gif_frame(probs)
                     frames.append(frame)
-                else:
+                elif True:
                     if args.vips:
                         plot_target_dist(
                             model_probs=probs, noshow=False, step=step,
@@ -453,9 +450,8 @@ if __name__ == "__main__":
                 target_callback,
                 steps=n_steps,
                 step_callback=step_callback,
-                sample_size=100,
+                sample_size=5,
                 verbose=verbose_callback,
-                self_prob_penalty=self_prob_penalty
             )
         elif args.with_ent_loss:
             for step in range(int(n_steps)):
@@ -478,9 +474,9 @@ if __name__ == "__main__":
 
         if args.vips:
             plot_target_dist(
-                model_probs=probs, noshow=False, step=step,
+                model_probs=probs, noshow=False, step=n_steps-1,
                 leaf_mpe=model.mpe(layer_index=0),
                 root_children_mpe=model.mpe(layer_index=model.max_layer_index - 1),
             )
-        print(f"Finished with seed {seed}. Final self-prob penalty: {self_prob_penalty}.")
+        print(f"Finished with seed {seed}.")
 
