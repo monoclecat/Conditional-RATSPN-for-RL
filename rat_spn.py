@@ -649,7 +649,7 @@ class RatSpn(nn.Module):
         responsibilities: th.Tensor = log_weights + child_ll - ll
         return responsibilities
 
-    def approx_responsibilities(self, layer_index, sample_size: int = 5, child_ll: th.Tensor = None,
+    def layer_responsibilities(self, layer_index, sample_size: int = 5, child_ll: th.Tensor = None,
                                 return_sample_ctx: bool = False, with_grad=False) \
             -> Tuple[th.Tensor, Optional[Sample]]:
         """
@@ -984,7 +984,7 @@ class RatSpn(nn.Module):
                 node_entropies = layer(child_entropies.unsqueeze(0)).squeeze(0)
             else:
                 with th.set_grad_enabled(grad_thru_resp and th.is_grad_enabled()):
-                    aux_responsibility, ctx = self.approx_responsibilities(
+                    aux_responsibility, ctx = self.layer_responsibilities(
                         layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp,
                         return_sample_ctx=return_child_samples,
                     )
@@ -1027,8 +1027,85 @@ class RatSpn(nn.Module):
                 })
         return log_dict
 
+    def spn_responsibilities(self, sample_from_layer, sample_size=5):
+        ctx = self.sample(
+            mode='index', n=sample_size, layer_index=sample_from_layer, is_mpe=False,
+            do_sample_postprocessing=False,
+            # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
+        )
+        if sample_from_layer == 0:
+            # We can get the self_ll simply by permuting the samples to line up with the dist parameters
+            self_ll = self.forward(th.einsum('InwFR -> nwFIR', ctx.sample),
+                                   layer_index=sample_from_layer, x_needs_permutation=False)
+        else:
+            # Here we have to select the self_lls afterwards.
+            self_ll = self.forward(ctx.sample, layer_index=sample_from_layer, x_needs_permutation=False)
+            curr_layer_ic = ctx.sample.size(0)
+            self_ll = self_ll[range(curr_layer_ic), :, :, :, range(curr_layer_ic), :]
+            self_ll = th.einsum('inwdR -> nwdiR', self_ll)
+
+        # self_ll [n, w, d, I, R]
+        ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
+        samples = th.einsum('idnwFR -> idRnwF', ctx.sample)
+        root_ll = self.forward(samples, layer_index=self.max_layer_index, x_needs_permutation=False)
+        root_ll = root_ll.squeeze(-1)  # Squeeze self.config.C dim out for now
+        root_ll = th.einsum('idRnw -> nwdiR', root_ll)
+        target_ll = th.zeros_like(root_ll)
+        log_probs = target_ll - root_ll + self_ll
+        log_probs = log_probs.unsqueeze(0)  # Prepare the scope dim
+        if sample_from_layer == 0:
+            log_probs = log_probs.unsqueeze(0)  # Prepare the dim over sampled nodes
+            log_probs_are_leaf_probs = True
+        else:
+            log_probs = log_probs.mean(1, keepdim=True)  # mean over sample dim
+            log_probs = log_probs.unsqueeze(-2) + self.layer_index_to_obj(sample_from_layer+1).weights.unsqueeze(0)
+            log_probs = th.einsum('snwdioR -> isnwdoR', log_probs)
+            log_probs_are_leaf_probs = False
+
+        for i in self.sum_layer_indices[(sample_from_layer + 1) // 2:]:
+            if i == self.max_layer_index:
+                log_weights = self.root_weights_split_by_rep
+            else:
+                log_weights = self.layer_index_to_obj(i).weights
+            # d = current_weights.size(1)
+            # current_weights = current_weights.repeat_interleave(ctx.scopes // d, dim=1)
+            resh_log_weights = self.shape_weights_like_crossprod_input_mapping(log_weights)
+            resh_log_weights = resh_log_weights.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+            # Previous layer's oc is current layer's ic
+            I, s, n, w, d, prev_layer_oc, R = log_probs.shape
+            left_scope_right_scope = log_probs.view(I, s, n, w, d // 2, 2, prev_layer_oc, R)
+
+            left_scope = left_scope_right_scope[..., 0, :, :].unsqueeze(-2)
+            right_scope = left_scope_right_scope[..., 1, :, :].unsqueeze(-2)
+
+            # Unsqueeze to create dim to sum scope-split weights over
+            left_scope = left_scope.unsqueeze(-3)
+            left_scope = left_scope + resh_log_weights
+            left_scope = th.sum(left_scope * resh_log_weights.exp(), dim=-3)
+
+            # Unsqueeze to create dim to sum scope-split weights over
+            right_scope = right_scope.unsqueeze(-4)
+            right_scope = right_scope + resh_log_weights
+            right_scope = th.sum(right_scope * resh_log_weights.exp(), dim=-4)
+
+            log_probs = th.stack((left_scope, right_scope), dim=1)
+            curr_layer_oc = resh_log_weights.size(-2)
+            log_probs = log_probs.view(I, s * 2, n, w, d // 2, prev_layer_oc, curr_layer_oc, R)
+
+            if log_probs_are_leaf_probs:
+                # Replace dim of sampled nodes
+                log_probs = log_probs.squeeze(0)
+                log_probs = th.einsum('snwdIoR -> IsnwdoR', log_probs)
+                log_probs_are_leaf_probs = False
+            else:
+                # Sum over ic dim
+                log_probs = log_probs.sum(dim=-3)
+
+        log_probs = log_probs.squeeze(-2).squeeze(-2)  # Squeeze out oc=1 and d=1 dims
+
     def vips_no_intermediate_lls(self, target_dist_callback, steps, step_callback: Callable = None,
-                 sample_size=7, verbose: Union[bool, Callable] = False) \
+                                 sample_size=7, verbose: Union[bool, Callable] = False) \
             -> Dict:
         """
 
@@ -1067,6 +1144,8 @@ class RatSpn(nn.Module):
                     sample_from = layer_index
                 else:
                     sample_from = layer_index - 1
+                self.spn_responsibilities(sample_from_layer=sample_from)
+                continue
 
                 ctx = self.sample(
                     mode='index', n=sample_size, layer_index=sample_from, is_mpe=False,

@@ -131,7 +131,7 @@ def run_torch(n_epochs=100, batch_size=256):
 
     model = make_spn(S=10, I=10, D=3, R=5, device=dev, dropout=0.0)
     with torch.no_grad():
-        model.vips(None, steps=10)
+        model.vips_no_intermediate_lls(None, steps=10)
 
     model.train()
     print(model)
