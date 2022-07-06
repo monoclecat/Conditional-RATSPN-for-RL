@@ -94,7 +94,7 @@ def make_spn(S, I, R, D, dropout, device) -> RatSpn:
     config.D = 4
     config.I = 4  #I
     config.S = 3  #S
-    config.C = 1  #10
+    config.C = 9  #10
     config.dropout = dropout
     config.leaf_base_class = RatNormal
     config.leaf_base_kwargs = {}
@@ -131,7 +131,7 @@ def run_torch(n_epochs=100, batch_size=256):
 
     model = make_spn(S=10, I=10, D=3, R=5, device=dev, dropout=0.0)
     with torch.no_grad():
-        model.vips_no_intermediate_lls(None, steps=10)
+        model.vips(None, steps=10)
 
     model.train()
     print(model)
