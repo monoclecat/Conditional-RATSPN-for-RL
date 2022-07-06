@@ -662,7 +662,7 @@ class RatSpn(nn.Module):
                 Responsibilities can't be computed in closed form.
             child_ll: th.Tensor of child log-likelihoods. If child_ll is None, the children of the layer are sampled
                 and the log-likelihoods are computed from these samples. If child_ll is given, return_sample_ctx and
-                with_grad must be False.
+                with_grad must be False. Shape [ic, w, d, ic, r] (mean already taken over sample dim).
             return_sample_ctx: If True, the sample context including the samples are returned. No post-processing is
                 applied to these.
             with_grad: If True, sampling is done in a differentiable way.
@@ -677,6 +677,7 @@ class RatSpn(nn.Module):
             "If child_ll is provided, return_sample_ctx and with_grad must both be False."
         layer = self.layer_index_to_obj(layer_index)
         assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
+        ctx = None
         if child_ll is None:
             ctx = self.sample(
                 mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=False,
@@ -684,16 +685,11 @@ class RatSpn(nn.Module):
             )
             samples = ctx.sample
             # We sampled all ic nodes of each repetition in the child layer
-            ic, n, w, f, r = samples.shape
 
             child_ll = self.forward(x=samples, layer_index=layer_index-1, x_needs_permutation=False)
             child_ll = child_ll.mean(dim=1)
-        else:
-            r = self.config.R
-            ic = layer.in_channels // r
-            w, d = layer.weight_param.shape[:2]
-            assert child_ll.shape == (ic, w, d, ic, r)
 
+        ic, w, d, _, r = child_ll.shape
         if layer_index == self.max_layer_index:  # layer is root sum layer
             # Now we are dealing with a log-likelihood tensor with the shape [ic, w, 1, ic, r],
             # where child_ll[0,0,:,:,0] are the log-likelihoods of the ic nodes in the first repetition
@@ -713,8 +709,7 @@ class RatSpn(nn.Module):
             log_weights = layer.weights
 
             # We have the log-likelihood of the current sum layer w.r.t. the samples from its children.
-            # We permute the dims so this tensor is of shape [w, d, ic, oc, r]
-        ll = ll.permute(1, 2, 0, 3, 4)
+        ll = th.einsum('iwdoR -> wdioR', ll)
 
         # child_ll now contains the log-likelihood of the samples from all of its 'ic' nodes per feature and
         # repetition - ic * d * r in total.
@@ -728,9 +723,8 @@ class RatSpn(nn.Module):
         # Likewise, [:, 0, 0, 2, 0] contains the LLs of the samples of all nodes, evaluated at the third node.
         # We needed the full child_ll tensor to compute the LLs of the current layer, but now we only
         # require the LLs of each node's own samples.
-        child_ll = child_ll[range(ic), :, :, range(ic), :]  # [ic, w, d, r]
-        child_ll = child_ll.permute(1, 2, 0, 3)
-        child_ll = child_ll.unsqueeze(3)  # [w, d, ic, 1, r]
+        child_ll = child_ll.unsqueeze(-2)
+        child_ll = th.einsum('iwdioR -> wdioR', child_ll)
 
         responsibilities: th.Tensor = log_weights + child_ll - ll
         return responsibilities, (ctx if return_sample_ctx else None)
@@ -934,26 +928,23 @@ class RatSpn(nn.Module):
         return res.x
 
     def layer_entropy_approx(
-            self, layer_index=0, child_entropies: th.Tensor = None,
-            sample_size=5, return_child_samples=False, grad_thru_resp=False, return_resp=False, verbose=False,
-    ) -> Tuple[th.Tensor, Optional[Dict], Optional[Sample], Optional[th.Tensor]]:
+            self, layer_index=0, child_entropies: th.Tensor = None, child_ll: th.Tensor = None,
+            sample_size=5, grad_thru_resp=False, verbose=False,
+    ) -> Tuple[th.Tensor, Optional[Dict]]:
         """
 
         Args:
             layer_index:
             child_entropies: th.Tensor of shape [w, d, oc of child layer == ic of this layer, r]
+            child_ll: If provided, children don't need to be sampled. Shape [n, w, d, i, r]
             sample_size:
-            return_child_samples: If True, the samples of the children are returned.
             grad_thru_resp: If False, the approximation of the responsibility is done without grad.
-            return_resp: If True, the unweighted approximated responsibilities are returned as well.
             verbose: If True, return dict of entropy metrics
 
         Returns: Tuple of
             node_entropies: th.Tensor of size [w, d, oc of child layer == ic of this layer, r]
             logging: Dict or None, depending on verbose
-            child_samples: th.Tensor or None, depending on return_child_samples
         """
-        assert self.config.C == 1, "Only works for C = 1"
         assert child_entropies is not None or layer_index == 0, \
             "When sampling from a layer other than the leaf layer, child entropies must be provided!"
         logging = {}
@@ -961,22 +952,19 @@ class RatSpn(nn.Module):
         aux_responsibility = None
 
         if layer_index == 0:
-            ctx = self.sample(
-                mode='onehot' if th.is_grad_enabled() else 'index',
-                n=sample_size, layer_index=layer_index, is_mpe=False,
-                do_sample_postprocessing=False,
-            )
-            # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
-            child_ll = self.forward(
-                x=th.einsum('InwFR -> nwFIR', ctx.sample),
-                layer_index=layer_index, x_needs_permutation=False
-            )
+            if child_ll is None:
+                ctx = self.sample(
+                    mode='onehot' if th.is_grad_enabled() else 'index',
+                    n=sample_size, layer_index=layer_index, is_mpe=False,
+                    do_sample_postprocessing=False,
+                )
+                # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
+                child_ll = self.forward(
+                    x=th.einsum('InwFR -> nwFIR', ctx.sample),
+                    layer_index=layer_index, x_needs_permutation=False
+                )
             # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
             node_entropies = -child_ll.mean(dim=0)
-
-            if return_child_samples:
-                ctx = self.sample_postprocessing(ctx, split_by_scope=True)
-                # ctx.sample [self.config.I, s, n, w, self.config.F, self.config.R]
         else:
             layer = self.layer_index_to_obj(layer_index)
 
@@ -986,7 +974,7 @@ class RatSpn(nn.Module):
                 with th.set_grad_enabled(grad_thru_resp and th.is_grad_enabled()):
                     aux_responsibility, ctx = self.layer_responsibilities(
                         layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp,
-                        return_sample_ctx=return_child_samples,
+                        child_ll=child_ll
                     )
                     # aux_responsibility [w, d, ic, oc, r]
 
@@ -997,9 +985,6 @@ class RatSpn(nn.Module):
                 )
                 node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_resp
 
-                if return_child_samples:
-                    ctx = self.sample_postprocessing(ctx, split_by_scope=True)
-
                 if verbose:
                     metrics = {
                         'weight_entropy': weight_entropy.detach(),
@@ -1008,7 +993,7 @@ class RatSpn(nn.Module):
                     }
                     logging[layer_index] = self.log_dict_from_metric(metrics)
 
-        return node_entropies, logging, (ctx if return_child_samples else None), (aux_responsibility if return_resp else None)
+        return node_entropies, logging
 
     def log_dict_from_metric(self, metrics: Dict, rep_dim=-1, batch_dim=0):
         log_dict = {}
@@ -1104,6 +1089,203 @@ class RatSpn(nn.Module):
 
         log_probs = log_probs.squeeze(-2).squeeze(-2)  # Squeeze out oc=1 and d=1 dims
 
+    def vips(self, target_dist_callback, steps, step_callback: Callable = None,
+                                 sample_size=7, verbose: Union[bool, Callable] = False) \
+            -> Dict:
+        """
+
+        Args:
+            target_dist_callback: Callback to return a th.Tensor of log probabilities of the samples
+                on the target distribution.
+            steps:
+            step_callback: Function that is called at the end of each step with the current step as the arg.
+            sample_size:
+            verbose: Either a bool or a callable that returns bool and takes the current step as its only argument.
+                Is evaluated at the beginning of each step to determine if the functions make plots or return logs.
+
+        Returns:
+
+        """
+        def split_left_scope_right_scope(t: th.Tensor, scope_dim: int):
+            shape_before_scope = t.shape[:scope_dim]
+            shape_after_scope = t.shape[scope_dim+1:]
+            num_scopes = t.size(scope_dim)
+            left_scope_right_scope = t.view(*shape_before_scope, num_scopes // 2, 2, *shape_after_scope)
+            left_scope = left_scope_right_scope.index_select(scope_dim+1, th.as_tensor(0)).squeeze(scope_dim+1)
+            right_scope = left_scope_right_scope.index_select(scope_dim+1, th.as_tensor(1)).squeeze(scope_dim+1)
+            return left_scope, right_scope
+
+        # self.debug__set_dist_params()
+        vips_logging = {}
+        grad_thru_resp = False
+
+        for step in range(int(steps)):
+            verbose_on = verbose(step) if callable(verbose) else verbose
+            samples = None
+            etas = None
+            child_ll = None
+
+            node_entropies = None
+            for layer_index in range(self.num_layers): # [0, *self.sum_layer_indices]:
+                layer_log = {}
+                layer = self.layer_index_to_obj(layer_index)
+                child_entropies = node_entropies
+                if isinstance(layer, CrossProduct):
+                    node_entropies = layer(child_entropies)
+                    log_probs = th.einsum('idnwR -> nwdiR', log_probs)
+                    log_probs = layer(log_probs)
+                    log_probs = th.einsum('nwdiR -> idnwR', log_probs)  # i and d of next layer
+                    continue
+                elif layer_index == 0:
+                    sample_from = layer_index
+                else:
+                    sample_from = layer_index - 1
+
+                ctx = self.sample(
+                    mode='index', n=sample_size, layer_index=sample_from, is_mpe=False,
+                    do_sample_postprocessing=False,
+                    # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
+                )
+                if layer_index == 0:
+                    # We can get the self_ll simply by permuting the samples to line up with the dist parameters
+                    child_ll = self.forward(th.einsum('InwFR -> nwFIR', ctx.sample),
+                                            layer_index=sample_from, x_needs_permutation=False)
+                    node_entropies, ent_log = self.layer_entropy_approx(
+                        layer_index=layer_index, child_ll=child_ll, verbose=True,
+                    )
+                else:
+                    child_ll = self.forward(ctx.sample, layer_index=sample_from, x_needs_permutation=False)
+                    child_ll = child_ll.mean(dim=1)
+                    node_entropies, ent_log = self.layer_entropy_approx(
+                        layer_index=layer_index, child_ll=child_ll,
+                        child_entropies=child_entropies, verbose=True,
+                    )
+                    child_ll = child_ll.unsqueeze(1)
+                    child_ll = th.einsum('inwdiR -> nwdiR', child_ll)
+                layer_log.update(ent_log)
+
+                log_probs = child_ll  # target_ll - root_ll + child_ll
+                log_probs = log_probs.unsqueeze(0)  # Prepare the scope dim
+                if layer_index == 0:
+                    log_probs = log_probs.unsqueeze(0)  # Prepare the dim over sampled nodes
+                    log_probs_are_leaf_probs = True
+                else:
+                    log_probs = log_probs.unsqueeze(-2) + layer.weights
+                    log_probs = th.einsum('snwdioR -> isnwdoR', log_probs)
+                    accum_resh_weights = th.einsum('')
+                    log_probs_are_leaf_probs = False
+
+                R = self.config.R
+                prev_layer_oc = None
+                accum_resh_weights = accum_ls = accum_rs = None
+                for i in self.sum_layer_indices[layer_index//2:]:
+                    if i == self.max_layer_index:
+                        log_weights = self.root_weights_split_by_rep
+                    else:
+                        log_weights = self.layer_index_to_obj(i).weights
+                    w, d = log_weights.shape[:2]
+                    # current_weights = current_weights.repeat_interleave(ctx.scopes // d, dim=1)
+                    resh_log_weights = self.shape_weights_like_crossprod_input_mapping(log_weights)
+                    resh_weights = resh_log_weights.exp()
+
+                    # Previous layer's oc is current layer's ic
+                    left_scope, right_scope = split_left_scope_right_scope(log_probs.unsqueeze(-2), 4)
+
+                    # Unsqueeze to create dim to sum scope-split weights over
+                    left_scope = left_scope.unsqueeze(-3)
+                    right_scope = right_scope.unsqueeze(-4)
+
+                    if accum_resh_weights is not None:
+                        accum_ls, accum_rs = split_left_scope_right_scope(accum_resh_weights.unsqueeze(-2), 3)
+
+                        accum_ls = accum_ls.unsqueeze(-3)
+                        weighted_ls_log_w = accum_ls * resh_log_weights
+
+                        accum_rs = accum_rs.unsqueeze(-4)
+                        weighted_rs_log_w = accum_rs * resh_log_weights
+
+                        # Unsqueeze for n dim
+                        left_scope = weighted_ls_log_w.unsqueeze(2) + left_scope
+                        right_scope = weighted_rs_log_w.unsqueeze(2) + right_scope
+                    else:
+                        left_scope = left_scope + resh_log_weights
+                        right_scope = right_scope + resh_log_weights
+
+                    left_scope = left_scope * resh_weights
+                    left_scope = th.einsum('IsnwdlroR -> IsnwdloR', left_scope)
+                    right_scope = right_scope * resh_weights
+                    right_scope = th.einsum('IsnwdlroR -> IsnwdroR', right_scope)
+
+                    log_probs = th.stack((left_scope, right_scope), dim=1)
+                    curr_layer_oc = resh_log_weights.size(-2)
+                    I, _, s, n, w, d, prev_layer_oc, curr_layer_oc, R = log_probs.shape
+                    log_probs = log_probs.view(I, s * 2, n, w, d, prev_layer_oc, curr_layer_oc, R)
+
+                    if accum_resh_weights is None:
+                        resh_weights_ls = th.einsum('wdlroR -> wdloR', resh_weights)
+                        resh_weights_rs = th.einsum('wdlroR -> wdroR', resh_weights)
+                        accum_resh_weights = th.stack((resh_weights_ls, resh_weights_rs), dim=0)
+
+                        accum_resh_weights = th.einsum('swdIoR -> IswdoR', accum_resh_weights)
+                    else:
+                        accum_ls = accum_ls * resh_weights
+                        accum_ls = th.einsum('IswdlroR -> IswdloR', accum_ls)
+                        accum_rs = accum_rs * resh_weights
+                        accum_rs = th.einsum('IswdlroR -> IswdroR', accum_rs)
+                        accum_resh_weights = th.stack((accum_ls, accum_rs), dim=1)
+                        accum_resh_weights = accum_resh_weights.view(I, s * 2, w, d, prev_layer_oc, curr_layer_oc, R)
+                        accum_resh_weights = th.einsum('IswdioR -> IswdoR', accum_resh_weights)
+
+                    if log_probs_are_leaf_probs:
+                        log_probs = log_probs.squeeze(0)
+                        log_probs = th.einsum('snwdIoR -> IsnwdoR', log_probs)
+                        log_probs_are_leaf_probs = False
+                    else:
+                        # Sum over ic dim
+                        log_probs = th.einsum('IsnwdioR -> IsnwdoR', log_probs)
+
+                log_probs = th.einsum('IsnwdCR -> IsnwCR', log_probs)
+
+                ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
+                samples = th.einsum('idnwFR -> idRnwF', ctx.sample)
+                root_ll = self.forward(samples, layer_index=self.max_layer_index, x_needs_permutation=False)
+                target_ll = th.zeros_like(root_ll)
+                root_ll = th.einsum('IsRnwC -> IsnwCR', root_ll)
+                target_ll = th.einsum('IsRnwC -> IsnwCR', target_ll)
+
+                accum_resh_weights = th.einsum('IsnwdCR -> IsnwCR', accum_resh_weights.unsqueeze(2))
+                log_probs = (target_ll - root_ll) * accum_resh_weights + log_probs
+                log_probs = th.einsum('IsnwCR -> IsnwR', log_probs)
+                log_probs_for_update = th.einsum('IsnwR -> wsIRn', log_probs)
+
+                if layer_index == 0:
+                    samples = ctx.sample.nan_to_num()
+                    samples = th.einsum('IsnwFR -> wFIRn', samples)
+
+                    log_probs_for_update = log_probs_for_update.repeat_interleave(self._leaf.cardinality, dim=1)
+                    etas = self.natural_param_leaf_update(
+                        samples=samples,
+                        eta_guess=etas,
+                        verbose=verbose_on,
+                        target_prob=log_probs_for_update,
+                    )
+                elif isinstance(layer, Sum):
+                    continue
+                    log_probs = log_probs.squeeze(2)  # Squeeze out sample dim we took mean over in the beginning
+                    log_probs = th.einsum('idwR -> wFIRn', log_probs)
+                    if layer_index == self.max_layer_index:
+                        w, d, ic, oc, r = reward.shape
+                        reward = th.einsum('...ijk -> ...kji', reward)
+                        reward = reward.reshape(w, d, ic * r, oc, 1)
+                    new_weights = F.log_softmax(reward, dim=2)
+                    # new_weights [w, 1, ic * r, 1, 1]
+                    layer.weight_param = nn.Parameter(new_weights)
+
+                vips_logging.update({layer_index: layer_log})
+            if step_callback is not None:
+                step_callback(step)
+        return vips_logging
+
     def vips_no_intermediate_lls(self, target_dist_callback, steps, step_callback: Callable = None,
                                  sample_size=7, verbose: Union[bool, Callable] = False) \
             -> Dict:
@@ -1124,7 +1306,6 @@ class RatSpn(nn.Module):
         assert self.config.C == 1
         # self.debug__set_dist_params()
         vips_logging = {}
-        return_child_samples = False
         grad_thru_resp = False
 
         for step in range(int(steps)):
@@ -1248,237 +1429,10 @@ class RatSpn(nn.Module):
                     # new_weights [w, 1, ic * r, 1, 1]
                     layer.weight_param = nn.Parameter(new_weights)
 
-                continue
-
-                child_entropies = node_entropies
-                layer_log = {}
-
-                if layer_index == 0:
-                    # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
-                    leaf_self_ll = self.forward(
-                        x=ctx.sample.permute(1, 2, 3, 0, 4),
-                        layer_index=layer_index, x_needs_permutation=False
-                    )
-                    node_entropies = -leaf_self_ll.mean(dim=0)
-
-                    # TODO it would be more memory efficient if we first calc the ll, take the mean, an then split
-                    # by scope, right?
-                    ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
-                    child_ll = self.forward(
-                        x=ctx.sample,
-                        layer_index=layer_index, x_needs_permutation=False
-                    )
-                    child_ll = child_ll.mean(dim=2 if ctx.is_split_by_scope else 1)
-                    # child_ll [self.config.I, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
-                else:
-
-                    if isinstance(layer, CrossProduct):
-                        node_entropies = layer(child_entropies.unsqueeze(0)).squeeze(0)
-                        child_ll = layer(child_ll)
-                        prev_layer_ic = layer.in_channels
-                    else:
-                        with th.set_grad_enabled(grad_thru_resp):
-                            layer_ic = child_ll.size(-2)
-
-                            aux_responsibility = self.resp_playground(layer_index=layer_index, child_ll=child_ll)
-
-                        [weighted_ch_ents, weighted_aux_resp], weight_entropy = self.weigh_tensors(
-                            layer_index=layer_index,
-                            tensors=[child_entropies.unsqueeze(3), aux_responsibility],
-                            return_weight_ent=True
-                        )
-                        node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_resp
-
-                        if verbose:
-                            metrics = {
-                                'weight_entropy': weight_entropy.detach(),
-                                'weighted_child_ent': weighted_ch_ents.detach(),
-                                'weighted_aux_resp': weighted_aux_resp.detach(),
-                            }
-                            layer_log[layer_index] = self.log_dict_from_metric(metrics)
-
-                with th.no_grad():
-                    if target_dist_callback is not None and False:
-                        if ctx is not None:
-                            samples = ctx.sample
-                            samples = th.einsum('...ij -> ...ji', samples)
-                            # samples [self.config.I := I, s, n, w, self.config.R := R, self.config.F := F]
-
-                            target_prob = target_dist_callback(samples)
-                            # target_prob [I, s, n, w, R, F]
-                            # In the toy example we are using right now, the target_dist_callback returns a prob for each
-                            # feature of F. In a black-box setting, we would first have to fill up the scope with
-                            # different evidence-samples of the SPN.
-                            # The target_dist_callback would then give us probs for each scope-completed sample.
-                            # The last dimension would then be gone instead of size F, wouldn't it?
-                            target_prob = target_prob.nan_to_num().sum(-1)
-                            target_prob = target_prob.permute(3, 1, 0, 4, 2)
-                            # target_prob [w, s, I, R, n] first dims as leaf params, with sample shape last
-
-                        if layer_index == 0:
-                            # The repetition dim is flipped with the feature dimension to make it a batch dimension.
-                            # This is because in self.forward(samples) we want to evaluate
-                            # the probability of the sample on the entire SPN.
-                            # If we leave the repetition dimension last, the SPN will evaluate the probabilities
-                            # only in the samples' own repetitions.
-                            samples = th.einsum('...ijk -> ...jik', samples)
-                            # samples [I, s, n, R, w, F]
-
-                            self_probs = self.forward(samples).squeeze(-1)
-                            # self_probs [I, s, n, R, w]
-
-                            samples = samples.nan_to_num().sum(-1)
-                            # samples is now the non-split-by-scope sample of the leaf layer
-                            # TODO we can't do this anymore when we have to fill up the samples
-                            samples = samples.permute(4, 1, 0, 3, 2)
-                            # samples [w, s, I, R, n]
-
-                            # target_prob = target_prob - 1.0 * self_probs.cpu()
-
-                            # For the leaves, s is F // leaf-cardinality, so we can use the repeat function of the leaves
-                            # TODO Not sure if repeat_by_cardinality does what we intend
-                            # TODO Do we need to apply the SPN input permutation here?
-                            # target_prob = self._leaf.prod.repeat_by_cardinality(target_prob, feature_dim=-4)
-
-                            sum_onto_target_prob = {}
-
-                            etas = self.natural_param_leaf_update(
-                                samples=samples,
-                                eta_guess=etas,
-                                verbose=verbose_on,
-                                target_prob=target_prob,
-                                **sum_onto_target_prob,
-                            )
-                        else:
-                            layer = self.layer_index_to_obj(layer_index)
-                            if isinstance(layer, Sum):
-                                # target_prob [w, s, ic, R, n] first dims as leaf params, with sample shape last
-                                target_prob = target_prob.mean(dim=-1).to(self.device)
-                                reward = target_prob.unsqueeze(3) + aux_responsibility + child_entropies.unsqueeze(3)
-                                if layer_index == self.max_layer_index:
-                                    w, d, ic, oc, r = reward.shape
-                                    reward = th.einsum('...ijk -> ...kji', reward)
-                                    reward = reward.reshape(w, d, ic * r, oc, 1)
-                                new_weights = F.log_softmax(reward, dim=2)
-                                # new_weights [w, 1, ic * r, 1, 1]
-                                layer.weight_param = nn.Parameter(new_weights)
-
-                        layer_log.update(self.log_dict_from_metric({'target_prob': target_prob.detach()}, rep_dim=-2, batch_dim=-1))
-
                 vips_logging.update({layer_index: layer_log})
             if step_callback is not None:
                 step_callback(step)
         return vips_logging
-
-    def vips(self, target_dist_callback, steps, step_callback: Callable = None,
-             sample_size=10, verbose: Union[bool, Callable] = False) \
-            -> Dict:
-        """
-
-        Args:
-            target_dist_callback: Callback to return a th.Tensor of log probabilities of the samples
-                on the target distribution.
-            steps:
-            step_callback: Function that is called at the end of each step with the current step as the arg.
-            sample_size:
-            verbose: Either a bool or a callable that returns bool and takes the current step as its only argument.
-                Is evaluated at the beginning of each step to determine if the functions make plots or return logs.
-
-        Returns:
-
-        """
-        logging = {}
-
-        for step in range(int(steps)):
-            verbose_on = verbose(step) if callable(verbose) else verbose
-            leaves_need_updating = target_dist_callback is not None
-            samples = None
-            etas = None
-
-            node_entropies = None
-            for layer_index in range(self.num_layers):
-                child_entropies = node_entropies
-                node_entropies, layer_log, ctx, aux_responsibility = self.layer_entropy_approx(
-                    layer_index=layer_index, child_entropies=child_entropies,
-                    sample_size=sample_size, return_resp=True,
-                    verbose=verbose_on,
-                    return_child_samples=target_dist_callback is not None,
-                )
-
-                continue
-
-                with th.no_grad():
-                    if target_dist_callback is not None:
-                        if ctx is not None:
-                            samples = ctx.sample
-                            samples = th.einsum('...ij -> ...ji', samples)
-                            # samples [self.config.I := I, s, n, w, self.config.R := R, self.config.F := F]
-
-                            target_prob = target_dist_callback(samples)
-                            # target_prob [I, s, n, w, R, F]
-                            # In the toy example we are using right now, the target_dist_callback returns a prob for each
-                            # feature of F. In a black-box setting, we would first have to fill up the scope with
-                            # different evidence-samples of the SPN.
-                            # The target_dist_callback would then give us probs for each scope-completed sample.
-                            # The last dimension would then be gone instead of size F, wouldn't it?
-                            target_prob = target_prob.nan_to_num().sum(-1)
-                            target_prob = target_prob.permute(3, 1, 0, 4, 2)
-                            # target_prob [w, s, I, R, n] first dims as leaf params, with sample shape last
-
-                        if layer_index == 0:
-                            # The repetition dim is flipped with the feature dimension to make it a batch dimension.
-                            # This is because in self.forward(samples) we want to evaluate
-                            # the probability of the sample on the entire SPN.
-                            # If we leave the repetition dimension last, the SPN will evaluate the probabilities
-                            # only in the samples' own repetitions.
-                            samples = th.einsum('...ijk -> ...jik', samples)
-                            # samples [I, s, n, R, w, F]
-
-                            self_probs = self.forward(samples).squeeze(-1)
-                            # self_probs [I, s, n, R, w]
-
-                            samples = samples.nan_to_num().sum(-1)
-                            # samples is now the non-split-by-scope sample of the leaf layer
-                            # TODO we can't do this anymore when we have to fill up the samples
-                            samples = samples.permute(4, 1, 0, 3, 2)
-                            # samples [w, s, I, R, n]
-
-                            # target_prob = target_prob - 1.0 * self_probs.cpu()
-
-                            # For the leaves, s is F // leaf-cardinality, so we can use the repeat function of the leaves
-                            # TODO Not sure if repeat_by_cardinality does what we intend
-                            # TODO Do we need to apply the SPN input permutation here?
-                            # target_prob = self._leaf.prod.repeat_by_cardinality(target_prob, feature_dim=-4)
-
-                            sum_onto_target_prob = {}
-
-                            etas = self.natural_param_leaf_update(
-                                samples=samples,
-                                eta_guess=etas,
-                                verbose=verbose_on,
-                                target_prob=target_prob,
-                                **sum_onto_target_prob,
-                            )
-                        else:
-                            layer = self.layer_index_to_obj(layer_index)
-                            if isinstance(layer, Sum):
-                                # target_prob [w, s, ic, R, n] first dims as leaf params, with sample shape last
-                                target_prob = target_prob.mean(dim=-1).to(self.device)
-                                reward = target_prob.unsqueeze(3) + aux_responsibility + child_entropies.unsqueeze(3)
-                                if layer_index == self.max_layer_index:
-                                    w, d, ic, oc, r = reward.shape
-                                    reward = th.einsum('...ijk -> ...kji', reward)
-                                    reward = reward.reshape(w, d, ic * r, oc, 1)
-                                new_weights = F.log_softmax(reward, dim=2)
-                                # new_weights [w, 1, ic * r, 1, 1]
-                                layer.weight_param = nn.Parameter(new_weights)
-
-                        layer_log.update(self.log_dict_from_metric({'target_prob': target_prob.detach()}, rep_dim=-2, batch_dim=-1))
-
-                logging.update({layer_index: layer_log})
-            if step_callback is not None:
-                step_callback(step)
-        return logging
 
     def vi_entropy_approx(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) \
             -> Tuple[th.Tensor, Optional[Dict]]:
