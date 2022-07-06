@@ -479,14 +479,13 @@ class CrossProduct(AbstractLayer):
         # For two consecutive scopes
         for i in range(0, self.in_features, self.cardinality):
             for j in range(cardinality):
-                self._scopes[j].append(scopes[i + j])
-                # if i + j < in_features:
-                    # self._scopes[j].append(scopes[i + j])
-                # else:
+                if i + j < in_features:
+                    self._scopes[j].append(scopes[i + j])
+                else:
                     # Case: d mod cardinality != 0 => Create marginalized nodes with prob 1.0
                     # Pad x in forward pass on the right: [n, d, c] -> [n, d+1, c] where index
                     # d+1 is the marginalized node (index "in_features")
-                    # self._scopes[j].append(self.in_features)
+                    self._scopes[j].append(self.in_features)
 
         # Transform into numpy array for easier indexing
         self._scopes = np.array(self._scopes)
