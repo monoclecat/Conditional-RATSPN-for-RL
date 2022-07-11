@@ -1115,7 +1115,9 @@ class RatSpn(nn.Module):
             right_scope = left_scope_right_scope.index_select(scope_dim+1, th.as_tensor(1)).squeeze(scope_dim+1)
             return left_scope, right_scope
 
-        # self.debug__set_dist_params()
+        debug = False
+        if debug:
+            self.debug__set_dist_params()
         vips_logging = {}
         grad_thru_resp = False
 
@@ -1125,65 +1127,70 @@ class RatSpn(nn.Module):
             etas = None
             child_ll = None
 
-            node_entropies = None
+            log_probs = node_entropies = self_ll = None
             for layer_index in range(self.num_layers): # [0, *self.sum_layer_indices]:
                 layer_log = {}
                 layer = self.layer_index_to_obj(layer_index)
                 child_entropies = node_entropies
                 if isinstance(layer, CrossProduct):
                     node_entropies = layer(child_entropies)
-                    log_probs = th.einsum('idnwR -> nwdiR', log_probs)
-                    log_probs = layer(log_probs)
-                    log_probs = th.einsum('nwdiR -> idnwR', log_probs)  # i and d of next layer
+
+                    # self_ll of the previous layer contains the logprobs of the samples from the 'oc' nodes (dim 0),
+                    # evaluated among all 'oc' nodes (dim -2) of that scope and repetition.
+                    # The product layer has ic = oc**2 nodes per scope and repetition, where the scope in this
+                    # layer combines the left scopes and right scopes of the previous layer.
+                    # We combine the self_ll of the previous layer as an outer sum across dim 0 and dim -2 to
+                    # get the logprobs of the product nodes' samples evaluated among all other product nodes.
+                    # The child_ll is needed for the approximation of the entropy in the next layer.
+                    ic, w, d_old, ic, R = self_ll.shape
+                    child_ll_ls, child_ll_rs = split_left_scope_right_scope(self_ll, 2)
+                    child_ll_ls = child_ll_ls.unsqueeze(4).unsqueeze(1)
+                    child_ll_rs = child_ll_rs.unsqueeze(3).unsqueeze(0)
+                    child_ll = child_ll_ls + child_ll_rs
+                    child_ll = child_ll.view(ic**2, w, d_old//2, ic**2, R)
+
+                    # We pass the biased target probs through the product layer to get the
+                    # biased target probs that would've been achieved by the product nodes.
+                    prev_layer_log_p = log_probs.mean(dim=2, keepdim=True)
+                    prev_layer_log_p = th.einsum('idnwR -> nwdiR', prev_layer_log_p)
+                    prev_layer_log_p = layer(prev_layer_log_p)
+                    prev_layer_log_p = th.einsum('nwdiR -> idnwR', prev_layer_log_p)  # i and d of next layer
                     continue
-                elif layer_index == 0:
-                    sample_from = layer_index
-                else:
-                    sample_from = layer_index - 1
 
                 ctx = self.sample(
-                    mode='index', n=sample_size, layer_index=sample_from, is_mpe=False,
+                    mode='index', n=sample_size, layer_index=layer_index, is_mpe=debug,
                     do_sample_postprocessing=False,
                     # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
                 )
                 if layer_index == 0:
                     # We can get the self_ll simply by permuting the samples to line up with the dist parameters
-                    child_ll = self.forward(th.einsum('InwFR -> nwFIR', ctx.sample),
-                                            layer_index=sample_from, x_needs_permutation=False)
+                    self_ll = self.forward(ctx.sample, layer_index=layer_index, x_needs_permutation=False)
+                    child_ll = th.einsum('inwdiR -> nwdiR', self_ll)
+                    self_ll = self_ll.mean(dim=1)
                     node_entropies, ent_log = self.layer_entropy_approx(
                         layer_index=layer_index, child_ll=child_ll, verbose=True,
                     )
                 else:
-                    child_ll = self.forward(ctx.sample, layer_index=sample_from, x_needs_permutation=False)
-                    child_ll = child_ll.mean(dim=1)
                     node_entropies, ent_log = self.layer_entropy_approx(
                         layer_index=layer_index, child_ll=child_ll,
                         child_entropies=child_entropies, verbose=True,
                     )
-                    child_ll = child_ll.unsqueeze(1)
-                    child_ll = th.einsum('inwdiR -> nwdiR', child_ll)
+                    self_ll = self.forward(ctx.sample, layer_index=layer_index, x_needs_permutation=False)
+                    self_ll = self_ll.mean(dim=1)
+                    child_ll = th.einsum('iwdiR -> wdiR', self_ll)
+                    child_ll = child_ll.unsqueeze(0)  # Add sample dim to match size
                 layer_log.update(ent_log)
 
                 log_probs = child_ll  # target_ll - root_ll + child_ll
                 log_probs = log_probs.unsqueeze(0)  # Prepare the scope dim
-                if layer_index == 0:
-                    log_probs = log_probs.unsqueeze(0)  # Prepare the dim over sampled nodes
-                    log_probs_are_leaf_probs = True
-                else:
-                    log_probs = log_probs.unsqueeze(-2) + layer.weights
-                    log_probs = th.einsum('snwdioR -> isnwdoR', log_probs)
-                    accum_resh_weights = th.einsum('')
-                    log_probs_are_leaf_probs = False
+                log_probs = log_probs.unsqueeze(0)  # Prepare the dim over sampled nodes
 
-                R = self.config.R
-                prev_layer_oc = None
                 accum_resh_weights = accum_ls = accum_rs = None
                 for i in self.sum_layer_indices[layer_index//2:]:
                     if i == self.max_layer_index:
                         log_weights = self.root_weights_split_by_rep
                     else:
                         log_weights = self.layer_index_to_obj(i).weights
-                    w, d = log_weights.shape[:2]
                     # current_weights = current_weights.repeat_interleave(ctx.scopes // d, dim=1)
                     resh_log_weights = self.shape_weights_like_crossprod_input_mapping(log_weights)
                     resh_weights = resh_log_weights.exp()
@@ -1217,7 +1224,6 @@ class RatSpn(nn.Module):
                     right_scope = th.einsum('IsnwdlroR -> IsnwdroR', right_scope)
 
                     log_probs = th.stack((left_scope, right_scope), dim=1)
-                    curr_layer_oc = resh_log_weights.size(-2)
                     I, _, s, n, w, d, prev_layer_oc, curr_layer_oc, R = log_probs.shape
                     log_probs = log_probs.view(I, s * 2, n, w, d, prev_layer_oc, curr_layer_oc, R)
 
@@ -1225,8 +1231,10 @@ class RatSpn(nn.Module):
                         resh_weights_ls = th.einsum('wdlroR -> wdloR', resh_weights)
                         resh_weights_rs = th.einsum('wdlroR -> wdroR', resh_weights)
                         accum_resh_weights = th.stack((resh_weights_ls, resh_weights_rs), dim=0)
-
                         accum_resh_weights = th.einsum('swdIoR -> IswdoR', accum_resh_weights)
+
+                        log_probs = log_probs.squeeze(0)
+                        log_probs = th.einsum('snwdIoR -> IsnwdoR', log_probs)
                     else:
                         accum_ls = accum_ls * resh_weights
                         accum_ls = th.einsum('IswdlroR -> IswdloR', accum_ls)
@@ -1234,15 +1242,10 @@ class RatSpn(nn.Module):
                         accum_rs = th.einsum('IswdlroR -> IswdroR', accum_rs)
                         accum_resh_weights = th.stack((accum_ls, accum_rs), dim=1)
                         accum_resh_weights = accum_resh_weights.view(I, s * 2, w, d, prev_layer_oc, curr_layer_oc, R)
-                        accum_resh_weights = th.einsum('IswdioR -> IswdoR', accum_resh_weights)
 
-                    if log_probs_are_leaf_probs:
-                        log_probs = log_probs.squeeze(0)
-                        log_probs = th.einsum('snwdIoR -> IsnwdoR', log_probs)
-                        log_probs_are_leaf_probs = False
-                    else:
                         # Sum over ic dim
                         log_probs = th.einsum('IsnwdioR -> IsnwdoR', log_probs)
+                        accum_resh_weights = th.einsum('IswdioR -> IswdoR', accum_resh_weights)
 
                 log_probs = th.einsum('IsnwdCR -> IsnwCR', log_probs)
 
@@ -1270,9 +1273,10 @@ class RatSpn(nn.Module):
                         target_prob=log_probs_for_update,
                     )
                 elif isinstance(layer, Sum):
-                    continue
                     log_probs = log_probs.squeeze(2)  # Squeeze out sample dim we took mean over in the beginning
                     log_probs = th.einsum('idwR -> wFIRn', log_probs)
+                    assert prev_layer_log_p.size(2) == 1
+                    log_probs_for_update = th.einsum('idnwR -> wdi')
                     if layer_index == self.max_layer_index:
                         w, d, ic, oc, r = reward.shape
                         reward = th.einsum('...ijk -> ...kji', reward)
