@@ -16,6 +16,7 @@ from layers import CrossProduct, Sum
 from type_checks import check_valid
 from utils import *
 from distributions import IndependentMultivariate, GaussianMixture, truncated_normal_
+import more
 
 logger = logging.getLogger(__name__)
 
@@ -764,7 +765,7 @@ class RatSpn(nn.Module):
 
         return tensors, weight_entropy
 
-    def natural_param_leaf_update(self, samples: th.Tensor, eta_guess: np.ndarray, verbose=False, **kwargs):
+    def natural_param_leaf_update_VIPS(self, samples: th.Tensor, eta_guess: np.ndarray, verbose=False, **kwargs):
         """
         Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
         As specified in the VIPS paper.
@@ -792,6 +793,13 @@ class RatSpn(nn.Module):
             quad_fit_params, res, rnk, s = th.linalg.lstsq(design_mat, targets)
             R = quad_fit_params[..., 2].numpy().flatten()
             r = quad_fit_params[..., 1].numpy().flatten()
+            c = quad_fit_params[..., 0].numpy().flatten()
+            if False:
+                print(f"Avg. offset: {round(c.mean(), 6)}, "
+                      f"avg. linear: {round(r.mean(), 6)}, "
+                      f"avg. quadr.: {round(R.mean(), 6)}")
+            if (np.abs(r) > 100).any():
+                print(1)
 
             mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
             var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
@@ -820,6 +828,8 @@ class RatSpn(nn.Module):
             new_var = 1 / Q_step
             new_mean = new_var * q_step
             KL = 0.5 * (new_var / var + np.log(var / new_var) + (mean - new_mean) ** 2 / var - 1)
+            if np.isnan(KL).any():
+                print(1)
             return KL
 
         def grad(*args):
@@ -837,7 +847,9 @@ class RatSpn(nn.Module):
         res = scipy.optimize.minimize(
             loss_fn, eta_guess, args=(Q, q, R, r, epsilon),
             # loss_fn, eta_guess[0], args=(Q[0], q[0], R[0], r[0], epsilon[0]),
-            method='L-BFGS-B', jac=grad, bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
+            method='L-BFGS-B', jac=grad,
+            bounds=scipy.optimize.Bounds(1e-5, np.inf),
+            # bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
         )
 
         kls = KL(res.x, Q, q, R, r)
@@ -919,6 +931,68 @@ class RatSpn(nn.Module):
         self._leaf.base_leaf.mean_param = nn.Parameter(th.as_tensor(new_mean, dtype=th.float,
                                                                     device=self.device))
         return res.x
+
+    def more_leaf_update(self, samples: th.Tensor, more_instances: List[more.MoreGaussian],
+                                  verbose=False, **kwargs):
+        """
+        Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
+        As specified in the VIPS paper.
+
+        Args:
+            samples: th.Tensor of shape [w, self.config.F, self.config.I, self.config.R, n]
+            targets: Tensors of shape [w, self.config.F, self.config.I, self.config.R, n]
+        """
+        assert samples.shape[1:-1] == (self.config.F, self.config.I, self.config.R)
+        keys = list(kwargs.keys())
+        for k in keys:
+            if kwargs[k] is None or not isinstance(kwargs[k], th.Tensor):
+                kwargs.pop(k)
+                continue
+            assert kwargs[k].shape == (samples.shape[0], self.config.F, self.config.I, self.config.R, samples.shape[-1])
+            kwargs[k] = kwargs[k].cpu()
+
+        samples = samples.clone().cpu().flatten(0, -2).numpy()
+        targets = th.stack([val for val in kwargs.values() if val is not None], dim=0).sum(dim=0)
+        targets = targets.cpu().flatten(0, -2).numpy()
+        mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
+        var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
+
+        res_list = []
+        for i in range(len(mu)):
+            learner = more_instances[i]
+            sel_mu = np.expand_dims(mu[[i]], -1)
+            sel_var = np.expand_dims(var[[i]], -1)
+            old_dist = more.Gaussian(sel_mu, sel_var)
+            component = more.Gaussian(sel_mu, sel_var)
+
+            sel_samples = np.expand_dims(samples[i], -1)
+            sel_targets = np.expand_dims(targets[i], -1)
+            surrogate = more.QuadFunc(1e-12, normalize=True, unnormalize_output=False)
+            surrogate.fit(sel_samples, sel_targets, None, old_dist.mean, old_dist.chol_covar)
+
+            # This is a numerical thing we did not use in the original paper: We do not undo the output normalization
+            # of the regression, this will yield the same solution but the optimal lagrangian multipliers of the
+            # MORE dual are scaled, so we also need to adapt the offset. This makes optimizing the dual much more
+            # stable and indifferent to initialization
+            learner.eta_offset = 1.0 / surrogate.o_std
+
+            new_mean, new_covar = learner.more_step(0.01, -1, component, surrogate)
+            if learner.success:
+                mu[i] = new_mean
+                var[i] = new_covar
+                res_list.append((1, component.kl(old_dist), component.entropy(), " "))
+            else:
+                res_list.append((1, 0.0, old_dist.entropy(), "update of component {:d} failed".format(i)))
+
+        # print(f"min/max/avg mean: {mu.min():.2f}/{mu.max():.2f}/{mu.mean():.2f}    "
+        #       f"min/max/avg var: {var.min():.2f}/{var.max():.2f}/{var.mean():.2f}")
+        new_mean = mu.reshape(self._leaf.base_leaf.mean_param.shape)
+        new_log_std = (0.5 * np.log(var)).reshape(self._leaf.base_leaf.mean_param.shape)
+        self._leaf.base_leaf.std_param = nn.Parameter(th.as_tensor(new_log_std, dtype=th.float,
+                                                                   device=self.device))
+        self._leaf.base_leaf.mean_param = nn.Parameter(th.as_tensor(new_mean, dtype=th.float,
+                                                                    device=self.device))
+        return res_list
 
     def layer_entropy_approx(
             self, layer_index=0, child_entropies: th.Tensor = None, child_ll: th.Tensor = None,
