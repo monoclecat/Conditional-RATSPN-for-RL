@@ -266,7 +266,7 @@ if __name__ == "__main__":
     grid = grid.reshape(-1, 2)
 
     def target_callback(x):
-        return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True)
+        return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True) + 200.0
 
     def scale_to_grid(tensor):
         return (tensor - min_x) / (max_x - min_x) * grid_points
@@ -392,8 +392,12 @@ if __name__ == "__main__":
                 )
             else:
                 fps = 5
-                n_steps = 151
-                make_frame_every = 1
+                # n_steps = 151
+                # make_frame_every = 1
+                gif_duration = 10  # seconds
+                n_steps = 500
+                n_frames = fps * gif_duration
+                make_frame_every = int(n_steps / n_frames)
 
                 save_path = os.path.join(
                     args.results_dir, "test.gif"
@@ -401,6 +405,7 @@ if __name__ == "__main__":
         else:
             n_steps = 50000
             make_frame_every = 1 # 5000
+        print(f"Running for {n_steps} steps, making a frame every {make_frame_every} steps.")
 
         def bookmark():
             pass
@@ -447,7 +452,7 @@ if __name__ == "__main__":
 
         if args.vips:
             log_dict = model.vips(
-                target_callback,
+                target_dist_callback=target_callback,
                 steps=n_steps,
                 step_callback=step_callback,
                 sample_size=5,
