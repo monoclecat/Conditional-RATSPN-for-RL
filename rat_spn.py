@@ -765,7 +765,8 @@ class RatSpn(nn.Module):
 
         return tensors, weight_entropy
 
-    def natural_param_leaf_update_VIPS(self, samples: th.Tensor, eta_guess: np.ndarray, verbose=False, **kwargs):
+    def natural_param_leaf_update_VIPS(self, samples: th.Tensor, targets: th.Tensor, eta_guess: Optional[np.ndarray],
+                                       verbose=False):
         """
         Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
         As specified in the VIPS paper.
@@ -775,31 +776,30 @@ class RatSpn(nn.Module):
             targets: Tensors of shape [w, self.config.F, self.config.I, self.config.R, n]
         """
         assert samples.shape[1:-1] == (self.config.F, self.config.I, self.config.R)
-        samples = samples.clone().cpu()
-        keys = list(kwargs.keys())
-        for k in keys:
-            if kwargs[k] is None or not isinstance(kwargs[k], th.Tensor):
-                kwargs.pop(k)
-                continue
-            assert kwargs[k].shape == (samples.shape[0], self.config.F, self.config.I, self.config.R, samples.shape[-1])
-            kwargs[k] = kwargs[k].cpu()
-
-        targets = th.stack([val for val in kwargs.values() if val is not None], dim=0).sum(dim=0)
+        samples = samples.cpu()
+        targets = targets.cpu()
 
         with th.no_grad():
             # The PyTorch LS method can deal with high-dim tensors. We want to keep the dimensions intact for
             # as long as possible to ease traceability when debugging.
             design_mat = th.stack([th.ones_like(samples), samples, -0.5 * samples ** 2], dim=-1).cpu()
-            quad_fit_params, res, rnk, s = th.linalg.lstsq(design_mat, targets)
-            R = quad_fit_params[..., 2].numpy().flatten()
-            r = quad_fit_params[..., 1].numpy().flatten()
-            c = quad_fit_params[..., 0].numpy().flatten()
-            if False:
-                print(f"Avg. offset: {round(c.mean(), 6)}, "
-                      f"avg. linear: {round(r.mean(), 6)}, "
-                      f"avg. quadr.: {round(R.mean(), 6)}")
-            if (np.abs(r) > 100).any():
-                print(1)
+            last_fit = None
+            for i in range(targets.size(0)):
+                quad_fit_params, res, rnk, s = th.linalg.lstsq(design_mat, targets[i])
+                if last_fit is None:
+                    last_fit = quad_fit_params
+                elif (((last_fit[..., 1:] - quad_fit_params[..., 1:]) / quad_fit_params[..., 1:]).abs() > 1e-2).any():
+                    print(1)
+
+                R = quad_fit_params[..., 2].cpu().numpy().flatten()
+                r = quad_fit_params[..., 1].cpu().numpy().flatten()
+                c = quad_fit_params[..., 0].cpu().numpy().flatten()
+                if False:
+                    print(f"Avg. offset: {round(c.mean(), 6)}, "
+                          f"avg. linear: {round(r.mean(), 6)}, "
+                          f"avg. quadr.: {round(R.mean(), 6)}")
+                if (np.abs(r) > 100).any():
+                    print(1)
 
             mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
             var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
@@ -932,7 +932,7 @@ class RatSpn(nn.Module):
                                                                     device=self.device))
         return res.x
 
-    def more_leaf_update(self, samples: th.Tensor, more_instances: List[more.MoreGaussian],
+    def more_leaf_update(self, samples: th.Tensor, targets: th.Tensor, more_instances: List[more.MoreGaussian],
                                   verbose=False, **kwargs):
         """
         Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
@@ -942,18 +942,8 @@ class RatSpn(nn.Module):
             samples: th.Tensor of shape [w, self.config.F, self.config.I, self.config.R, n]
             targets: Tensors of shape [w, self.config.F, self.config.I, self.config.R, n]
         """
-        assert samples.shape[1:-1] == (self.config.F, self.config.I, self.config.R)
-        keys = list(kwargs.keys())
-        for k in keys:
-            if kwargs[k] is None or not isinstance(kwargs[k], th.Tensor):
-                kwargs.pop(k)
-                continue
-            assert kwargs[k].shape == (samples.shape[0], self.config.F, self.config.I, self.config.R, samples.shape[-1])
-            kwargs[k] = kwargs[k].cpu()
-
         samples = samples.clone().cpu().flatten(0, -2).numpy()
-        targets = th.stack([val for val in kwargs.values() if val is not None], dim=0).sum(dim=0)
-        targets = targets.cpu().flatten(0, -2).numpy()
+        targets = targets.cpu().flatten(1, -2).numpy()
         mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
         var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
 
@@ -966,15 +956,35 @@ class RatSpn(nn.Module):
             component = more.Gaussian(sel_mu, sel_var)
 
             sel_samples = np.expand_dims(samples[i], -1)
-            sel_targets = np.expand_dims(targets[i], -1)
-            surrogate = more.QuadFunc(1e-12, normalize=True, unnormalize_output=False)
-            surrogate.fit(sel_samples, sel_targets, None, old_dist.mean, old_dist.chol_covar)
+            sel_targets = np.expand_dims(targets[:, i], -1)
+            old_quad = None
+            old_lin = None
+            for t in sel_targets:
+                surrogate = more.QuadFunc(1e-12, normalize=True, unnormalize_output=False)
+                surrogate.fit(sel_samples, t, None, old_dist.mean, old_dist.chol_covar)
+                if old_quad is None:
+                    old_quad = surrogate.quad_term
+                else:
+                    a = np.abs((old_quad - surrogate.quad_term) / surrogate.quad_term)
+                    if a > 1e-2:
+                        print(1)
+                if old_lin is None:
+                    old_lin = surrogate.lin_term
+                else:
+                    b = np.abs((old_lin - surrogate.lin_term) / surrogate.lin_term)
+                    if b > 1e-2:
+                        print(1)
+            # print(f"{a}, {b}")
+
 
             # This is a numerical thing we did not use in the original paper: We do not undo the output normalization
             # of the regression, this will yield the same solution but the optimal lagrangian multipliers of the
             # MORE dual are scaled, so we also need to adapt the offset. This makes optimizing the dual much more
             # stable and indifferent to initialization
             learner.eta_offset = 1.0 / surrogate.o_std
+
+            # eta_lower_bound = (learner.min_precision - 2 * surrogate.quad_term) / (1/sel_var - learner.min_precision)
+            # learner.eta_offset = eta_lower_bound.item()
 
             new_mean, new_covar = learner.more_step(0.01, -1, component, surrogate)
             if learner.success:
@@ -1199,7 +1209,7 @@ class RatSpn(nn.Module):
         vips_logging = {}
         grad_thru_resp = False
 
-        more_instances = [more.MoreGaussian(1, 1.0, 1.0, True) for _ in range(self.means.numel())]
+        more_instances = [more.MoreGaussian(1, 1.0, 1.0, False) for _ in range(self.means.numel())]
 
         for step in range(int(steps)):
             verbose_on = verbose(step) if callable(verbose) else verbose
@@ -1253,18 +1263,24 @@ class RatSpn(nn.Module):
                 root_ll = self.forward(samples, layer_index=self.max_layer_index, x_needs_permutation=False)
                 if target_dist_callback is None:
                     target_ll = th.zeros_like(root_ll)
+                    target_ll = target_ll.unsqueeze(0)
                 else:
                     target_ll = target_dist_callback(samples)
                     # only for vips_gmm:
                     target_ll = target_ll.nan_to_num().sum(-1, keepdim=True).to(root_ll.device)
+                    if True:
+                        biased_target = target_ll + 200.0
+                        target_ll = th.stack((target_ll, biased_target), dim=0)
+                    else:
+                        # In natural_param_leaf_update this dim is iterated over
+                        target_ll = target_ll.unsqueeze(0)
 
                 root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll)
-                target_ll = th.einsum('AsRnwC -> AsnwCR', target_ll)
+                target_ll = th.einsum('...AsRnwC -> ...AsnwCR', target_ll)
                 root_target_diff = target_ll - root_ll
                 log_probs = root_target_diff
-                log_probs = log_probs.unsqueeze(4)
+                log_probs = log_probs.unsqueeze(-3)
 
-                accum_weights = accum_ls = accum_rs = None
                 accum_weights = th.ones((1, 1, 1, 1), device=root_ll.device)
                 for i in reversed(self.sum_layer_indices[(layer_index//2-1):]):
                     if i == self.max_layer_index:
@@ -1275,16 +1291,16 @@ class RatSpn(nn.Module):
                     resh_log_weights = self.shape_weights_like_crossprod_input_mapping(log_weights)
                     resh_weights = resh_log_weights.exp()
                     # weights have shape [w, s, l, r, o, R]
-                    # log_probs have shape [A, d, n, w, s, o, R]
+                    # log_probs have shape [A, d, n, w, s, o, R], might have additional dim in front
                     resh_log_weights = resh_log_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
                     log_probs = resh_log_weights + log_probs.unsqueeze(-3).unsqueeze(-3)
                     log_probs = resh_weights * log_probs
-                    left_scope, right_scope = split_left_scope_right_scope(log_probs, 1)
-                    left_scope = th.einsum('AdnwslroR -> AdnwsloR', left_scope)
-                    right_scope = th.einsum('AdnwslroR -> AdnwsroR', right_scope)
-                    log_probs = combine_scopes(left_scope, right_scope, scope_dim=4)
+                    left_scope, right_scope = split_left_scope_right_scope(log_probs, -8)
+                    left_scope = th.einsum('...AdnwslroR -> ...AdnwsloR', left_scope)
+                    right_scope = th.einsum('...AdnwslroR -> ...AdnwsroR', right_scope)
+                    log_probs = combine_scopes(left_scope, right_scope, scope_dim=-4)
                     if i > layer_index:
-                        log_probs = th.einsum('AdnwsioR -> AdnwsiR', log_probs)
+                        log_probs = th.einsum('...AdnwsioR -> ...AdnwsiR', log_probs)
 
                     resh_weights = resh_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
                     resh_weights = th.einsum('wslroR -> wslrR', resh_weights)
@@ -1292,48 +1308,56 @@ class RatSpn(nn.Module):
                     right_weights = th.einsum('wslrR -> wsrR', resh_weights)
                     accum_weights = combine_scopes(left_weights, right_weights, scope_dim=1)
 
-                assert log_probs.size(1) == 1, "There are scopes left to be split!"
-                log_probs = th.einsum('AdnwsAoR -> nwsAoR', log_probs)
+                assert log_probs.size(-7) == 1, "There are scopes left to be split!"
+                log_probs = th.einsum('...AdnwsAoR -> ...nwsAoR', log_probs)
                 log_probs = log_probs + (child_ll * accum_weights).unsqueeze(-2)
 
                 if layer_index == 2:
                     samples = ctx.sample.nan_to_num()
                     samples = th.einsum('AsnwFR -> wFARn', samples)
 
-                    log_probs_for_update = th.einsum('nwsAoR -> wsARn', log_probs)
-                    log_probs_for_update = log_probs_for_update.repeat_interleave(self._leaf.cardinality, dim=1)
+                    log_probs_for_update = th.einsum('...nwsAoR -> ...wsARn', log_probs)
+                    log_probs_for_update = log_probs_for_update.repeat_interleave(self._leaf.cardinality, dim=-4)
                     with th.no_grad():
                         if True:
                             etas = self.natural_param_leaf_update_VIPS(
                                 samples=samples,
-                                more_instances=more_instances,
                                 eta_guess=None,
                                 verbose=verbose_on,
-                                target_prob=log_probs_for_update,
+                                targets=log_probs_for_update,
                             )
                         else:
                             res = self.more_leaf_update(
                                 samples=samples,
                                 more_instances=more_instances,
                                 verbose=verbose_on,
-                                target_prob=log_probs_for_update,
+                                targets=log_probs_for_update,
                             )
 
-                log_probs = log_probs.mean(dim=0)
+                log_probs = log_probs.mean(dim=-6)
                 weighed_ch_ent = sampled_node_entropies * accum_weights
                 log_probs = log_probs + weighed_ch_ent.unsqueeze(-2)
-                left_scope, right_scope = split_left_scope_right_scope(log_probs, scope_dim=1)
-                left_scope = left_scope.unsqueeze(2)
-                right_scope = right_scope.unsqueeze(3)
-                new_weights = left_scope + right_scope
-                new_weights = new_weights.flatten(2, 3)
-                if layer_index == self.max_layer_index:
-                    w, d, ic, oc, r = new_weights.shape
-                    new_weights = th.einsum('...ior -> ...roi', new_weights)
-                    new_weights = new_weights.reshape(w, d, ic * r, oc, 1)
-                new_weights = F.log_softmax(new_weights, dim=2)
-                # new_weights [w, 1, ic * r, 1, 1]
-                layer.weight_param = nn.Parameter(new_weights)
+                if True:
+                    new_weights = th.stack([F.log_softmax(w, dim=-3) for w in log_probs], dim=0)
+                    left_scope, right_scope = split_left_scope_right_scope(new_weights, scope_dim=-4)
+                    left_scope = left_scope.unsqueeze(-4)
+                    right_scope = right_scope.unsqueeze(-3)
+                    new_weights = left_scope + right_scope
+                    new_weights = new_weights.flatten(-4, -3)
+                else:
+                    left_scope, right_scope = split_left_scope_right_scope(log_probs, scope_dim=-4)
+                    left_scope = left_scope.unsqueeze(-4)
+                    right_scope = right_scope.unsqueeze(-3)
+                    new_weights = left_scope + right_scope
+                    new_weights = new_weights.flatten(-4, -3)
+                    if layer_index == self.max_layer_index:
+                        ic, oc, r = new_weights.shape[-3:]
+                        new_weights = th.einsum('...ior -> ...roi', new_weights)
+                        new_weights = new_weights.reshape(*new_weights.shape[:-3], ic * r, oc, 1)
+                    # new_weights = F.log_softmax(new_weights, dim=-2)
+                    new_weights = th.stack([F.log_softmax(w, dim=-3) for w in new_weights], dim=0)
+                    # new_weights [w, 1, ic * r, 1, 1]
+                    layer.weight_param = nn.Parameter(new_weights[0])
 
                 vips_logging.update({layer_index: layer_log})
             if step_callback is not None:
