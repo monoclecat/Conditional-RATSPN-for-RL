@@ -842,8 +842,9 @@ class RatSpn(nn.Module):
             return eps - KL(*args[:-1])
 
         # Calculate bounds for the etas, so that the Q_step are always greater min_Q
-        min_Q = 1e-3
-        eta_lower_bound = np.abs((min_Q - R) / (Q - min_Q))
+        min_Q = 1e-5
+        eta_lower_bound = (min_Q - R) / (Q - min_Q)
+        eta_lower_bound = np.max((eta_lower_bound, np.zeros_like(eta_lower_bound)), axis=0)
         if eta_guess is None:
             eta_guess = eta_lower_bound * 10
         print(f"Eta mean: {eta_guess.mean()}")
@@ -852,8 +853,8 @@ class RatSpn(nn.Module):
             loss_fn, eta_guess, args=(Q, q, R, r, epsilon),
             # loss_fn, eta_guess[0], args=(Q[0], q[0], R[0], r[0], epsilon[0]),
             method='L-BFGS-B', jac=grad,
-            # bounds=scipy.optimize.Bounds(1e-5, np.inf),
-            bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
+            bounds=scipy.optimize.Bounds(1e-5, np.inf),
+            # bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
         )
 
         kls = KL(res.x, Q, q, R, r)
@@ -1340,7 +1341,7 @@ class RatSpn(nn.Module):
                     leaf_log_probs = leaf_log_probs.repeat_interleave(self._leaf.cardinality, dim=-3)
                     leaf_log_probs = th.einsum('...nwsAR -> ...wsARn', leaf_log_probs)
                     with th.no_grad():
-                        if False:
+                        if True:
                             etas = self.natural_param_leaf_update_VIPS(
                                 samples=samples,
                                 eta_guess=None,
