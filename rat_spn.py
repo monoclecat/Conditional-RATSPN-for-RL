@@ -522,7 +522,7 @@ class RatSpn(nn.Module):
             A modified Sample. See doc string of sample() for shape information.
         """
         sample = ctx.sample
-        if split_by_scope:
+        if split_by_scope and not ctx.is_split_by_scope:
             assert self.config.F % ctx.scopes == 0, "Size of entire scope is not divisible by the number of" \
                                                     " scopes in the layer we are sampling from. What do?"
             features_per_scope = self.config.F // ctx.scopes
@@ -537,7 +537,7 @@ class RatSpn(nn.Module):
             ctx.is_split_by_scope = True
 
         # Each repetition has its own inverted permutation which we now apply to the samples.
-        if invert_permutation:
+        if invert_permutation and not ctx.permutation_inverted:
             if ctx.sampling_mode == 'index':
                 if ctx.repetition_indices is not None:
                     rep_sel_inv_perm = self.inv_permutation.T[ctx.repetition_indices]
@@ -553,13 +553,13 @@ class RatSpn(nn.Module):
                 else:
                     rep_sel_inv_perm = self.inv_permutation.unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
-            if split_by_scope:
+            if ctx.is_split_by_scope:
                 rep_sel_inv_perm = rep_sel_inv_perm.unsqueeze(1)
             rep_sel_inv_perm = rep_sel_inv_perm.expand_as(sample)
             sample = th.gather(sample, dim=-2 if ctx.has_rep_dim else -1, index=rep_sel_inv_perm)
             ctx.permutation_inverted = True
 
-        if self.config.tanh_squash:
+        if self.config.tanh_squash and ctx.needs_squashing:
             sample = sample.clamp(-6.0, 6.0).tanh()
             ctx.needs_squashing = False
 
@@ -579,8 +579,6 @@ class RatSpn(nn.Module):
             ctx.evidence_filled_in = True
 
         ctx.sample = sample
-        ctx.parent_indices = None
-        ctx.repetition_indices = None
         return ctx
 
     def sample_index_style(self, **kwargs):
@@ -798,8 +796,6 @@ class RatSpn(nn.Module):
                     print(f"Avg. offset: {round(c.mean(), 6)}, "
                           f"avg. linear: {round(r.mean(), 6)}, "
                           f"avg. quadr.: {round(R.mean(), 6)}")
-                if (np.abs(r) > 100).any():
-                    print(1)
 
             mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
             var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
@@ -813,6 +809,10 @@ class RatSpn(nn.Module):
 
         def Q_q_step(eta, Q, q, R, r):
             Q_step = Q * (eta / (eta + 1)) + R * (1 / (eta + 1))
+            if (Q_step < 0.0).any():
+                print(2)
+            elif ((Q_step - min_Q) < -1e-6).any():
+                print(3)
             q_step = q * (eta / (eta + 1)) + r * (1 / (eta + 1))
             return Q_step, q_step
 
@@ -837,9 +837,8 @@ class RatSpn(nn.Module):
             return eps - KL(*args[:-1])
 
         # Calculate bounds for the etas, so that the Q_step are always greater min_Q
-        min_Q = 1e-5
-        eta_lower_bound = (min_Q - R) / (Q - min_Q)
-        eta_lower_bound = np.max((eta_lower_bound, np.zeros_like(eta_lower_bound)), axis=0)
+        min_Q = 1e-3
+        eta_lower_bound = np.abs((min_Q - R) / (Q - min_Q))
         if eta_guess is None:
             eta_guess = eta_lower_bound * 10
         print(f"Eta mean: {eta_guess.mean()}")
@@ -848,8 +847,8 @@ class RatSpn(nn.Module):
             loss_fn, eta_guess, args=(Q, q, R, r, epsilon),
             # loss_fn, eta_guess[0], args=(Q[0], q[0], R[0], r[0], epsilon[0]),
             method='L-BFGS-B', jac=grad,
-            bounds=scipy.optimize.Bounds(1e-5, np.inf),
-            # bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
+            # bounds=scipy.optimize.Bounds(1e-5, np.inf),
+            bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
         )
 
         kls = KL(res.x, Q, q, R, r)
@@ -951,40 +950,27 @@ class RatSpn(nn.Module):
         for i in range(len(mu)):
             learner = more_instances[i]
             sel_mu = np.expand_dims(mu[[i]], -1)
-            sel_var = np.expand_dims(var[[i]], -1)
-            old_dist = more.Gaussian(sel_mu, sel_var)
-            component = more.Gaussian(sel_mu, sel_var)
+            old_var = np.expand_dims(var[[i]], -1)
+            old_dist = more.Gaussian(sel_mu, old_var)
+            component = more.Gaussian(sel_mu, old_var)
 
             sel_samples = np.expand_dims(samples[i], -1)
             sel_targets = np.expand_dims(targets[:, i], -1)
-            old_quad = None
-            old_lin = None
             for t in sel_targets:
-                surrogate = more.QuadFunc(1e-12, normalize=True, unnormalize_output=False)
+                surrogate = more.QuadFunc(1e-12, normalize=False, unnormalize_output=False)
                 surrogate.fit(sel_samples, t, None, old_dist.mean, old_dist.chol_covar)
-                if old_quad is None:
-                    old_quad = surrogate.quad_term
-                else:
-                    a = np.abs((old_quad - surrogate.quad_term) / surrogate.quad_term)
-                    if a > 1e-2:
-                        print(1)
-                if old_lin is None:
-                    old_lin = surrogate.lin_term
-                else:
-                    b = np.abs((old_lin - surrogate.lin_term) / surrogate.lin_term)
-                    if b > 1e-2:
-                        print(1)
-            # print(f"{a}, {b}")
-
 
             # This is a numerical thing we did not use in the original paper: We do not undo the output normalization
             # of the regression, this will yield the same solution but the optimal lagrangian multipliers of the
             # MORE dual are scaled, so we also need to adapt the offset. This makes optimizing the dual much more
             # stable and indifferent to initialization
-            learner.eta_offset = 1.0 / surrogate.o_std
-
-            # eta_lower_bound = (learner.min_precision - 2 * surrogate.quad_term) / (1/sel_var - learner.min_precision)
-            # learner.eta_offset = eta_lower_bound.item()
+            if surrogate.o_std is not None:
+                learner.eta_offset = 1.0 / np.max((surrogate.o_std, 1e-10))
+            else:
+                omega = 1.0
+                learner.eta_offset = np.abs((learner.min_precision * omega - surrogate.quad_term)
+                                            / (1/old_var - learner.min_precision))
+                # print(learner.eta_offset)
 
             new_mean, new_covar = learner.more_step(0.01, -1, component, surrogate)
             if learner.success:
@@ -1166,6 +1152,66 @@ class RatSpn(nn.Module):
 
         log_probs = log_probs.squeeze(-2).squeeze(-2)  # Squeeze out oc=1 and d=1 dims
 
+    @staticmethod
+    def split_concatenated_scopes(t: th.Tensor, scope_dim: int):
+        """
+        The scopes in the tensor are split into a left scope and a right scope, where
+        the scope dimension contains the concatenated scopes of the left side and the right side,
+        [x_{L}, x_{R}], where x_{L} is x_{0}, ..., x_{size of scope dim / 2 -1}, and x_{R} the other half.
+        """
+        shape_before_scope = t.shape[:scope_dim]
+        shape_after_scope = t.shape[scope_dim + 1:]
+        num_scopes = t.size(scope_dim)
+        left_scope_right_scope = t.view(*shape_before_scope, 2, num_scopes // 2, *shape_after_scope)
+        dev = left_scope_right_scope.device
+        index_dim = scope_dim if scope_dim > 0 else scope_dim - 1
+        left_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(0, device=dev)).squeeze(index_dim)
+        right_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(1, device=dev)).squeeze(index_dim)
+        return left_scope, right_scope
+
+    @staticmethod
+    def split_shuffled_scopes(t: th.Tensor, scope_dim: int):
+        """
+        The scopes in the tensor are split into a left scope and a right scope, where
+        the scope dimension contains the shuffled scopes of the left side and the right side,
+        [x_{0,L}, x_{0,R}, x_{1,L}, x_{1,R}, x_{2,L}, x_{2,R}, ...]
+        """
+        shape_before_scope = t.shape[:scope_dim]
+        shape_after_scope = t.shape[scope_dim + 1:]
+        num_scopes = t.size(scope_dim)
+        left_scope_right_scope = t.view(*shape_before_scope, num_scopes // 2, 2, *shape_after_scope)
+        dev = left_scope_right_scope.device
+        index_dim = scope_dim + 1 if scope_dim > 0 else scope_dim
+        left_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(0, device=dev)).squeeze(index_dim)
+        right_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(1, device=dev)).squeeze(index_dim)
+        return left_scope, right_scope
+
+    def vips_sum_prod_pass(self, layer_index: int, log_probs: th.Tensor, accum_weights: th.Tensor):
+        if layer_index == self.max_layer_index:
+            log_weights = self.root_weights_split_by_rep
+        else:
+            log_weights = self.layer_index_to_obj(layer_index).weights
+        resh_log_weights = self.shape_weights_like_crossprod_input_mapping(log_weights)
+        resh_weights = resh_log_weights.exp()
+        # weights have shape [w, s, l, r, o, R]
+        # log_probs have shape [A, d, n, w, s, o, R], might have additional dim in front
+        resh_log_weights = resh_log_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
+        log_probs = resh_log_weights + log_probs.unsqueeze(-3).unsqueeze(-3)
+        log_probs = resh_weights * log_probs
+        left_scope, right_scope = self.split_concatenated_scopes(log_probs, -8)
+        left_scope = th.einsum('...AdnwslroR -> ...AdnwsloR', left_scope)
+        right_scope = th.einsum('...AdnwslroR -> ...AdnwsroR', right_scope)
+        log_probs = th.cat((left_scope, right_scope), dim=-4)
+        log_probs = th.einsum('...AdnwsioR -> ...AdnwsiR', log_probs)
+
+        accum_weights = resh_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
+        # resh_weights = th.einsum('wsioR -> wsiR', resh_weights)
+        left_weights = th.einsum('wslroR -> wsloR', accum_weights)
+        right_weights = th.einsum('wslroR -> wsroR', accum_weights)
+        accum_weights = th.cat((left_weights, right_weights), dim=1)
+        accum_weights = th.einsum('wsioR -> wsiR', accum_weights)
+        return log_probs, accum_weights
+
     def vips(self, target_dist_callback, steps, step_callback: Callable = None,
              sample_size=7, verbose: Union[bool, Callable] = False) \
             -> Dict:
@@ -1183,29 +1229,11 @@ class RatSpn(nn.Module):
         Returns:
 
         """
-        def split_left_scope_right_scope(t: th.Tensor, scope_dim: int):
-            shape_before_scope = t.shape[:scope_dim]
-            shape_after_scope = t.shape[scope_dim+1:]
-            num_scopes = t.size(scope_dim)
-            left_scope_right_scope = t.view(*shape_before_scope, num_scopes // 2, 2, *shape_after_scope)
-            dev = left_scope_right_scope.device
-            index_dim = scope_dim+1 if scope_dim > 0 else scope_dim
-            left_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(0, device=dev)).squeeze(index_dim)
-            right_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(1, device=dev)).squeeze(index_dim)
-            return left_scope, right_scope
-
-        def combine_scopes(left_scope: th.Tensor, right_scope: th.Tensor, scope_dim: int):
-            assert left_scope.shape == right_scope.shape
-            shape_before_scope = left_scope.shape[:scope_dim]
-            shape_after_scope = left_scope.shape[scope_dim+1:]
-            num_scopes = left_scope.size(scope_dim)
-            t = th.stack((left_scope, right_scope), dim=scope_dim)
-            t = t.view(*shape_before_scope, num_scopes * 2, *shape_after_scope)
-            return t
-
         debug = False
         if debug:
             self.debug__set_dist_params()
+            # [self.debug__set_weights_uniform(i) for i in self.sum_layer_indices]
+            [self.debug__set_weights_dirac(i) for i in self.sum_layer_indices]
         vips_logging = {}
         grad_thru_resp = False
 
@@ -1214,6 +1242,8 @@ class RatSpn(nn.Module):
         for step in range(int(steps)):
             verbose_on = verbose(step) if callable(verbose) else verbose
             etas = None
+            if step > 150:
+                print('a')
 
             layer_entropies = None
             for layer_index in self.sum_layer_indices:
@@ -1245,7 +1275,7 @@ class RatSpn(nn.Module):
                     child_entropies=sampled_node_entropies,
                 )
                 ic, w, d_old, ic, R = sampled_self_ll.shape
-                prod_ll_ls, prod_ll_rs = split_left_scope_right_scope(sampled_self_ll, 2)
+                prod_ll_ls, prod_ll_rs = self.split_shuffled_scopes(sampled_self_ll, 2)
                 prod_ll_ls = prod_ll_ls.unsqueeze(4).unsqueeze(1)
                 prod_ll_rs = prod_ll_rs.unsqueeze(3).unsqueeze(0)
                 prod_ll = prod_ll_ls + prod_ll_rs
@@ -1263,17 +1293,25 @@ class RatSpn(nn.Module):
                 root_ll = self.forward(samples, layer_index=self.max_layer_index, x_needs_permutation=False)
                 if target_dist_callback is None:
                     target_ll = th.zeros_like(root_ll)
-                    target_ll = target_ll.unsqueeze(0)
                 else:
-                    target_ll = target_dist_callback(samples)
+                    target_eval_ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
+                    target_ll = target_dist_callback(target_eval_ctx.sample)
                     # only for vips_gmm:
                     target_ll = target_ll.nan_to_num().sum(-1, keepdim=True).to(root_ll.device)
-                    if True:
-                        biased_target = target_ll + 200.0
-                        target_ll = th.stack((target_ll, biased_target), dim=0)
-                    else:
-                        # In natural_param_leaf_update this dim is iterated over
-                        target_ll = target_ll.unsqueeze(0)
+                if layer_index > 2:
+                    root_ll = root_ll.mean(-3, keepdim=True)
+                    target_ll = target_ll.mean(-3, keepdim=True)
+
+                if False:
+                    biased_target = target_ll + 200.0
+                    target_ll = th.stack((target_ll, biased_target), dim=0)
+                else:
+                    # In natural_param_leaf_update this dim is iterated over
+                    target_ll = target_ll.unsqueeze(0)
+
+                if True:
+                    for i in range(target_ll.size(2)):
+                        target_ll[:, :, i] += 1000.0 * (i+1)
 
                 root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll)
                 target_ll = th.einsum('...AsRnwC -> ...AsnwCR', target_ll)
@@ -1282,82 +1320,69 @@ class RatSpn(nn.Module):
                 log_probs = log_probs.unsqueeze(-3)
 
                 accum_weights = th.ones((1, 1, 1, 1), device=root_ll.device)
-                for i in reversed(self.sum_layer_indices[(layer_index//2-1):]):
-                    if i == self.max_layer_index:
-                        log_weights = self.root_weights_split_by_rep
-                    else:
-                        log_weights = self.layer_index_to_obj(i).weights
-                    # current_weights = current_weights.repeat_interleave(ctx.scopes // d, dim=1)
-                    resh_log_weights = self.shape_weights_like_crossprod_input_mapping(log_weights)
-                    resh_weights = resh_log_weights.exp()
-                    # weights have shape [w, s, l, r, o, R]
-                    # log_probs have shape [A, d, n, w, s, o, R], might have additional dim in front
-                    resh_log_weights = resh_log_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
-                    log_probs = resh_log_weights + log_probs.unsqueeze(-3).unsqueeze(-3)
-                    log_probs = resh_weights * log_probs
-                    left_scope, right_scope = split_left_scope_right_scope(log_probs, -8)
-                    left_scope = th.einsum('...AdnwslroR -> ...AdnwsloR', left_scope)
-                    right_scope = th.einsum('...AdnwslroR -> ...AdnwsroR', right_scope)
-                    log_probs = combine_scopes(left_scope, right_scope, scope_dim=-4)
-                    if i > layer_index:
-                        log_probs = th.einsum('...AdnwsioR -> ...AdnwsiR', log_probs)
-
-                    resh_weights = resh_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
-                    resh_weights = th.einsum('wslroR -> wslrR', resh_weights)
-                    left_weights = th.einsum('wslrR -> wslR', resh_weights)
-                    right_weights = th.einsum('wslrR -> wsrR', resh_weights)
-                    accum_weights = combine_scopes(left_weights, right_weights, scope_dim=1)
-
-                assert log_probs.size(-7) == 1, "There are scopes left to be split!"
-                log_probs = th.einsum('...AdnwsAoR -> ...nwsAoR', log_probs)
-                log_probs = log_probs + (child_ll * accum_weights).unsqueeze(-2)
+                for i in reversed(self.sum_layer_indices[(layer_index//2):]):
+                    log_probs, accum_weights = self.vips_sum_prod_pass(i, log_probs, accum_weights)
 
                 if layer_index == 2:
                     samples = ctx.sample.nan_to_num()
                     samples = th.einsum('AsnwFR -> wFARn', samples)
 
-                    log_probs_for_update = th.einsum('...nwsAoR -> ...wsARn', log_probs)
-                    log_probs_for_update = log_probs_for_update.repeat_interleave(self._leaf.cardinality, dim=-4)
+                    leaf_log_probs, leaf_accum_weights = self.vips_sum_prod_pass(layer_index, log_probs, accum_weights)
+                    leaf_log_probs = th.einsum('...AdnwsAR -> ...nwsAR', leaf_log_probs)
+                    leaf_log_probs = leaf_log_probs + (child_ll * leaf_accum_weights)
+                    leaf_log_probs = leaf_log_probs.repeat_interleave(self._leaf.cardinality, dim=-3)
+                    leaf_log_probs = th.einsum('...nwsAR -> ...wsARn', leaf_log_probs)
                     with th.no_grad():
                         if True:
                             etas = self.natural_param_leaf_update_VIPS(
                                 samples=samples,
                                 eta_guess=None,
                                 verbose=verbose_on,
-                                targets=log_probs_for_update,
+                                targets=leaf_log_probs,
                             )
                         else:
                             res = self.more_leaf_update(
                                 samples=samples,
                                 more_instances=more_instances,
                                 verbose=verbose_on,
-                                targets=log_probs_for_update,
+                                targets=leaf_log_probs,
+                                step=step,
                             )
 
-                log_probs = log_probs.mean(dim=-6)
-                weighed_ch_ent = sampled_node_entropies * accum_weights
-                log_probs = log_probs + weighed_ch_ent.unsqueeze(-2)
-                if True:
-                    new_weights = th.stack([F.log_softmax(w, dim=-3) for w in log_probs], dim=0)
-                    left_scope, right_scope = split_left_scope_right_scope(new_weights, scope_dim=-4)
-                    left_scope = left_scope.unsqueeze(-4)
-                    right_scope = right_scope.unsqueeze(-3)
-                    new_weights = left_scope + right_scope
-                    new_weights = new_weights.flatten(-4, -3)
+                if True or step < 100:
+                    continue
+                log_probs = log_probs.mean(-5)
+                child_ll = child_ll.mean(0)
+
+                prod_layer = self.layer_index_to_obj(layer_index-1)
+                # We pass the biased target LLs through the child product layer.
+                left_scope, right_scope = self.split_concatenated_scopes(log_probs, -5)
+                log_probs = th.cat((left_scope, right_scope), dim=-3)
+                log_probs = log_probs.squeeze(-5)
+                log_probs = th.einsum('...AwdoR -> ...owdAR', log_probs)
+                log_probs = prod_layer.forward(log_probs)
+                log_probs = th.einsum('...owdiR -> ...wdioR', log_probs)
+
+                # To complete the total-SPN-responsibility, we add the child product nodes' LLs and the
+                # log weights of this layer, both weighed by the accumulated weights
+                if layer_index == self.max_layer_index:
+                    log_weights = self.root_weights_split_by_rep
                 else:
-                    left_scope, right_scope = split_left_scope_right_scope(log_probs, scope_dim=-4)
-                    left_scope = left_scope.unsqueeze(-4)
-                    right_scope = right_scope.unsqueeze(-3)
-                    new_weights = left_scope + right_scope
-                    new_weights = new_weights.flatten(-4, -3)
-                    if layer_index == self.max_layer_index:
-                        ic, oc, r = new_weights.shape[-3:]
-                        new_weights = th.einsum('...ior -> ...roi', new_weights)
-                        new_weights = new_weights.reshape(*new_weights.shape[:-3], ic * r, oc, 1)
-                    # new_weights = F.log_softmax(new_weights, dim=-2)
-                    new_weights = th.stack([F.log_softmax(w, dim=-3) for w in new_weights], dim=0)
-                    # new_weights [w, 1, ic * r, 1, 1]
-                    layer.weight_param = nn.Parameter(new_weights[0])
+                    log_weights = self.layer_index_to_obj(layer_index).weights
+                biased_prod_ll = prod_layer.forward(child_ll).unsqueeze(-2) + log_weights
+                biased_prod_ll = biased_prod_ll * accum_weights.unsqueeze(-3)
+                prod_ent = prod_layer.forward(sampled_node_entropies)
+                prod_ent = prod_ent.unsqueeze(-2) * accum_weights.unsqueeze(-3)
+
+                new_weights = log_probs + biased_prod_ll + prod_ent
+
+                if layer_index == self.max_layer_index:
+                    ic, oc, r = new_weights.shape[-3:]
+                    new_weights = th.einsum('...ior -> ...roi', new_weights)
+                    new_weights = new_weights.reshape(*new_weights.shape[:-3], ic * r, oc, 1)
+                new_weights = th.stack([F.log_softmax(t, dim=-3) for t in new_weights], dim=0)
+                # new_weights [w, 1, ic * r, 1, 1]
+                layer.weight_param = nn.Parameter(new_weights[0])
 
                 vips_logging.update({layer_index: layer_log})
             if step_callback is not None:
@@ -1381,26 +1406,6 @@ class RatSpn(nn.Module):
         Returns:
 
         """
-        def split_left_scope_right_scope(t: th.Tensor, scope_dim: int):
-            shape_before_scope = t.shape[:scope_dim]
-            shape_after_scope = t.shape[scope_dim+1:]
-            num_scopes = t.size(scope_dim)
-            left_scope_right_scope = t.view(*shape_before_scope, num_scopes // 2, 2, *shape_after_scope)
-            dev = left_scope_right_scope.device
-            index_dim = scope_dim+1 if scope_dim > 0 else scope_dim
-            left_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(0, device=dev)).squeeze(index_dim)
-            right_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(1, device=dev)).squeeze(index_dim)
-            return left_scope, right_scope
-
-        def combine_scopes(left_scope: th.Tensor, right_scope: th.Tensor, scope_dim: int):
-            assert left_scope.shape == right_scope.shape
-            shape_before_scope = left_scope.shape[:scope_dim]
-            shape_after_scope = left_scope.shape[scope_dim+1:]
-            num_scopes = left_scope.size(scope_dim)
-            t = th.stack((left_scope, right_scope), dim=scope_dim)
-            t = t.view(*shape_before_scope, num_scopes * 2, *shape_after_scope)
-            return t
-
         debug = False
         if debug:
             self.debug__set_dist_params()
@@ -1442,7 +1447,7 @@ class RatSpn(nn.Module):
                     child_entropies=sampled_node_entropies,
                 )
                 ic, w, d_old, ic, R = sampled_self_ll.shape
-                prod_ll_ls, prod_ll_rs = split_left_scope_right_scope(sampled_self_ll, 2)
+                prod_ll_ls, prod_ll_rs = self.split_shuffled_scopes(sampled_self_ll, 2)
                 prod_ll_ls = prod_ll_ls.unsqueeze(4).unsqueeze(1)
                 prod_ll_rs = prod_ll_rs.unsqueeze(3).unsqueeze(0)
                 prod_ll = prod_ll_ls + prod_ll_rs
@@ -1472,7 +1477,7 @@ class RatSpn(nn.Module):
 
                     # Previous layer's oc is current layer's ic
                     log_probs = log_probs.unsqueeze(-2)
-                    left_scope, right_scope = split_left_scope_right_scope(log_probs, -4)
+                    left_scope, right_scope = self.split_shuffled_scopes(log_probs, -4)
 
                     # Unsqueeze to create dim to sum scope-split weights over
                     left_scope = left_scope.unsqueeze(-3)
@@ -1482,7 +1487,7 @@ class RatSpn(nn.Module):
                         left_scope = left_scope + resh_log_weights
                         right_scope = right_scope + resh_log_weights
                     else:
-                        accum_ls, accum_rs = split_left_scope_right_scope(accum_resh_weights.unsqueeze(-2), -4)
+                        accum_ls, accum_rs = self.split_shuffled_scopes(accum_resh_weights.unsqueeze(-2), -4)
 
                         accum_ls = accum_ls.unsqueeze(-3)
                         weighted_ls_log_w = accum_ls * resh_log_weights
@@ -1499,7 +1504,7 @@ class RatSpn(nn.Module):
                     right_scope = right_scope * resh_weights
                     right_scope = th.einsum('ABsnwdlroR -> ABsnwdroR', right_scope)
 
-                    log_probs = combine_scopes(left_scope, right_scope, scope_dim=2)
+                    log_probs = th.cat((left_scope, right_scope), dim=2)
 
                     if i == layer_index:
                         resh_weights_ls = th.einsum('wdlroR -> wdloR', resh_weights)
@@ -1515,7 +1520,7 @@ class RatSpn(nn.Module):
                         accum_ls = th.einsum('ABswdlroR -> ABswdloR', accum_ls)
                         accum_rs = accum_rs * resh_weights
                         accum_rs = th.einsum('ABswdlroR -> ABswdroR', accum_rs)
-                        accum_resh_weights = combine_scopes(accum_ls, accum_rs, scope_dim=2)
+                        accum_resh_weights = th.cat((accum_ls, accum_rs), dim=2)
 
                         if i == layer_index + 2:
                             # put current ic dim with the batch dims so we have something to update the sum weights with
@@ -1572,7 +1577,7 @@ class RatSpn(nn.Module):
                 weighed_ch_ent = sampled_node_entropies.unsqueeze(-2) * accum_resh_weights
                 log_probs = th.einsum('ABswR -> wsABR', log_probs)
                 log_probs = log_probs + weighed_ch_ent
-                left_scope, right_scope = split_left_scope_right_scope(log_probs, scope_dim=1)
+                left_scope, right_scope = self.split_shuffled_scopes(log_probs, scope_dim=1)
                 left_scope = left_scope.unsqueeze(2)
                 right_scope = right_scope.unsqueeze(3)
                 new_weights = left_scope + right_scope
@@ -2131,7 +2136,18 @@ class RatSpn(nn.Module):
         assert isinstance(layer, Sum), "Given layer index is not a Sum layer!"
         weights = layer.weights
         weights[:] = -100.0
-        weights[0, 0, 0, 0, 0] = -1e-3
+        weights[0, 0, 0, :, 0] = -1e-3
+        weights = weights.log_softmax(dim=2)
+        if isinstance(layer.weight_param, nn.Parameter):
+            weights = nn.Parameter(weights)
+            del layer.weight_param
+        layer.weight_param = weights
+
+    def debug__set_weights_uniform(self, layer_index):
+        layer = self.layer_index_to_obj(layer_index)
+        assert isinstance(layer, Sum), "Given layer index is not a Sum layer!"
+        weights = layer.weights
+        weights[:] = -100.0
         weights = weights.log_softmax(dim=2)
         if isinstance(layer.weight_param, nn.Parameter):
             weights = nn.Parameter(weights)
