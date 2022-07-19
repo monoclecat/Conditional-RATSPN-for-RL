@@ -1228,8 +1228,6 @@ class RatSpn(nn.Module):
         for step in range(int(steps)):
             verbose_on = verbose(step) if callable(verbose) else verbose
             etas = None
-            if step > 150:
-                print('a')
 
             layer_entropies = None
             for layer_index in self.sum_layer_indices:
@@ -1275,13 +1273,14 @@ class RatSpn(nn.Module):
                 vips_logging.update({layer_index: ent_log})
 
                 ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
+                root_ll = self.forward(th.einsum('AdnwFR -> AdRnwF', ctx.sample),
+                                       layer_index=self.max_layer_index, x_needs_permutation=False)
+                ctx = self.sample_postprocessing(ctx=ctx, invert_permutation=True)
                 samples = th.einsum('AdnwFR -> AdRnwF', ctx.sample)
-                root_ll = self.forward(samples, layer_index=self.max_layer_index, x_needs_permutation=False)
                 if target_dist_callback is None:
                     target_ll = th.zeros_like(root_ll)
                 else:
-                    target_eval_ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
-                    target_ll = target_dist_callback(target_eval_ctx.sample)
+                    target_ll = target_dist_callback(samples)
                     # only for vips_gmm:
                     target_ll = target_ll.nan_to_num().sum(-1, keepdim=True).to(root_ll.device)
                 if layer_index > 2:
