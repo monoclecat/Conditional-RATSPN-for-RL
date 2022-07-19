@@ -15,8 +15,10 @@ class ITPS:
         self._omega = None
         self._grad = np.zeros(2)
         self._succ = False
+        self.step = 0
 
     def opt_dual(self):
+        self.step = 0
         opt = nlopt.opt(nlopt.LD_LBFGS, 2)
         opt.set_lower_bounds(0.0)
         opt.set_upper_bounds(1e12)
@@ -84,6 +86,10 @@ class MoreGaussian(ITPS):
         self._entropy_const_part = 0.5 * (self._dual_const_part + dim)
         self._min_precision = 1/1000.0  # 1/var
 
+    @property
+    def min_precision(self):
+        return self._min_precision
+
     def more_step(self, eps, beta, old_dist, reward_surrogate):
         self._eps = eps
         self._beta = beta
@@ -119,6 +125,7 @@ class MoreGaussian(ITPS):
         return new_lin, new_precision
 
     def _dual(self, eta_omega, grad):
+        self.step += 1
         eta = eta_omega[0] if eta_omega[0] > 0.0 else 0.0
         omega = eta_omega[1] if self._constrain_entropy and eta_omega[1] > 0.0 else 0.0
         self._eta = eta
