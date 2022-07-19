@@ -1156,23 +1156,6 @@ class RatSpn(nn.Module):
         log_probs = log_probs.squeeze(-2).squeeze(-2)  # Squeeze out oc=1 and d=1 dims
 
     @staticmethod
-    def split_concatenated_scopes(t: th.Tensor, scope_dim: int):
-        """
-        The scopes in the tensor are split into a left scope and a right scope, where
-        the scope dimension contains the concatenated scopes of the left side and the right side,
-        [x_{L}, x_{R}], where x_{L} is x_{0}, ..., x_{size of scope dim / 2 -1}, and x_{R} the other half.
-        """
-        shape_before_scope = t.shape[:scope_dim]
-        shape_after_scope = t.shape[scope_dim + 1:]
-        num_scopes = t.size(scope_dim)
-        left_scope_right_scope = t.view(*shape_before_scope, 2, num_scopes // 2, *shape_after_scope)
-        dev = left_scope_right_scope.device
-        index_dim = scope_dim if scope_dim > 0 else scope_dim - 1
-        left_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(0, device=dev)).squeeze(index_dim)
-        right_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(1, device=dev)).squeeze(index_dim)
-        return left_scope, right_scope
-
-    @staticmethod
     def split_shuffled_scopes(t: th.Tensor, scope_dim: int):
         """
         The scopes in the tensor are split into a left scope and a right scope, where
@@ -1201,7 +1184,7 @@ class RatSpn(nn.Module):
         resh_log_weights = resh_log_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
         log_probs = resh_log_weights + log_probs.unsqueeze(-3).unsqueeze(-3)
         log_probs = resh_weights * log_probs
-        left_scope, right_scope = self.split_concatenated_scopes(log_probs, -8)
+        left_scope, right_scope = th.split(log_probs, log_probs.size(-8) // 2, dim=-8)
         left_scope = th.einsum('...AdnwslroR -> ...AdnwsloR', left_scope)
         right_scope = th.einsum('...AdnwslroR -> ...AdnwsroR', right_scope)
         log_probs = th.cat((left_scope, right_scope), dim=-4)
@@ -1359,7 +1342,7 @@ class RatSpn(nn.Module):
 
                 prod_layer = self.layer_index_to_obj(layer_index-1)
                 # We pass the biased target LLs through the child product layer.
-                left_scope, right_scope = self.split_concatenated_scopes(log_probs, -5)
+                left_scope, right_scope = th.split(log_probs, log_probs.size(-5) // 2, dim=-5)
                 log_probs = th.cat((left_scope, right_scope), dim=-3)
                 log_probs = log_probs.squeeze(-5)
                 log_probs = th.einsum('...AwdoR -> ...owdAR', log_probs)
