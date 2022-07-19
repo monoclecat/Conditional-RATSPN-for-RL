@@ -491,7 +491,7 @@ class RatSpn(nn.Module):
                 ctx.scopes = self._leaf.in_features // self._leaf.cardinality
             samples = self._leaf.sample(ctx=ctx, mode=mode)
             if layer_index == 0:
-                samples = samples.permute(3, 0, 1, 2, 4)
+                samples = th.einsum('nwdIR -> InwdR', samples)
             ctx.sample = samples
 
         if do_sample_postprocessing:
@@ -522,7 +522,8 @@ class RatSpn(nn.Module):
             A modified Sample. See doc string of sample() for shape information.
         """
         sample = ctx.sample
-        if split_by_scope and not ctx.is_split_by_scope:
+        if split_by_scope:
+            assert not ctx.is_split_by_scope, "Samples are already split by scope!"
             assert self.config.F % ctx.scopes == 0, "Size of entire scope is not divisible by the number of" \
                                                     " scopes in the layer we are sampling from. What do?"
             features_per_scope = self.config.F // ctx.scopes
@@ -537,7 +538,8 @@ class RatSpn(nn.Module):
             ctx.is_split_by_scope = True
 
         # Each repetition has its own inverted permutation which we now apply to the samples.
-        if invert_permutation and not ctx.permutation_inverted:
+        if invert_permutation:
+            assert not ctx.permutation_inverted, "Permutations are already inverted on the samples!"
             if ctx.sampling_mode == 'index':
                 if ctx.repetition_indices is not None:
                     rep_sel_inv_perm = self.inv_permutation.T[ctx.repetition_indices]
@@ -559,12 +561,13 @@ class RatSpn(nn.Module):
             sample = th.gather(sample, dim=-2 if ctx.has_rep_dim else -1, index=rep_sel_inv_perm)
             ctx.permutation_inverted = True
 
+            if not ctx.has_rep_dim:
+                sample = sample.unsqueeze(-1)
+                ctx.has_rep_dim = True
+
         if self.config.tanh_squash and ctx.needs_squashing:
             sample = sample.clamp(-6.0, 6.0).tanh()
             ctx.needs_squashing = False
-
-        if not ctx.has_rep_dim:
-            sample = sample.unsqueeze(-1)
 
         if evidence is not None:
             if self.config.tanh_squash:
