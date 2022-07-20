@@ -843,18 +843,17 @@ class RatSpn(nn.Module):
 
         # Calculate bounds for the etas, so that the Q_step are always greater min_Q
         min_Q = 1e-5
-        eta_lower_bound = (min_Q - R) / (Q - min_Q)
-        eta_lower_bound = np.max((eta_lower_bound, np.zeros_like(eta_lower_bound)), axis=0)
+        eta_lower_bound = np.abs((min_Q - R) / (Q - min_Q))
         if eta_guess is None:
-            eta_guess = eta_lower_bound * 10
+            eta_guess = eta_lower_bound + 10
         print(f"Eta mean: {eta_guess.mean()}")
 
         res = scipy.optimize.minimize(
             loss_fn, eta_guess, args=(Q, q, R, r, epsilon),
             # loss_fn, eta_guess[0], args=(Q[0], q[0], R[0], r[0], epsilon[0]),
             method='L-BFGS-B', jac=grad,
-            bounds=scipy.optimize.Bounds(1e-5, np.inf),
-            # bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
+            # bounds=scipy.optimize.Bounds(1e-5, np.inf),
+            bounds=scipy.optimize.Bounds(eta_lower_bound, np.inf),
         )
 
         kls = KL(res.x, Q, q, R, r)
