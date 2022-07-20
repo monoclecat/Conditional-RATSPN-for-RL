@@ -94,7 +94,7 @@ def make_spn(S, I, R, D, dropout, device) -> RatSpn:
     config.D = 4
     config.I = 4  #I
     config.S = 3  #S
-    config.C = 9  #10
+    config.C = 11  #10
     config.dropout = dropout
     config.leaf_base_class = RatNormal
     config.leaf_base_kwargs = {}

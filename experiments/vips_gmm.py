@@ -21,7 +21,7 @@ def build_ratspn(F, I):
     config.F = F
     config.R = 3
     config.D = int(np.log2(F))
-    config.I = I
+    config.I = 4
     config.S = 3
     config.dropout = 0.0
     config.leaf_base_class = RatNormal
@@ -69,7 +69,7 @@ class IndGmm:
         """
 
         Args:
-            x: Shape [ic, s, n, w, self.config.F, self.config.R]
+            x: Shape [ic, s, self.config.R, n, w, self.config.F]
                 Samples of the SPN to evaluate the target log-probs of
             dims:
             return_log:
@@ -247,12 +247,12 @@ if __name__ == "__main__":
         else:
             dist_params = {
                 0: {
-                    'mean': th.as_tensor([-40, -30, -20, -10, 10, 20, 30, 40]),
-                    'std': th.as_tensor([1] * 8),
+                    'mean': th.as_tensor([-30]),
+                    'std': th.as_tensor([1] * 1),
                 },
                 1: {
-                    'mean': th.as_tensor([-35, -15, 15, 35]),
-                    'std': th.as_tensor([3] * 4)
+                    'mean': th.as_tensor([35]),
+                    'std': th.as_tensor([3] * 1)
                 }
             }
         for dim, params in dist_params.items():
@@ -266,7 +266,7 @@ if __name__ == "__main__":
     grid = grid.reshape(-1, 2)
 
     def target_callback(x):
-        return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True) + 200.0
+        return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True)# + 200.0
 
     def scale_to_grid(tensor):
         return (tensor - min_x) / (max_x - min_x) * grid_points
@@ -404,7 +404,7 @@ if __name__ == "__main__":
                 )
         else:
             n_steps = 50000
-            make_frame_every = 1 # 5000
+            make_frame_every = 10 # 5000
         print(f"Running for {n_steps} steps, making a frame every {make_frame_every} steps.")
 
         def bookmark():
@@ -415,7 +415,8 @@ if __name__ == "__main__":
         plot_at = 150
 
         def verbose_callback(step):
-            return step == plot_at
+            return False
+            # return step == plot_at
             # return True
 
         def step_callback(step):
