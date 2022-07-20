@@ -1284,10 +1284,10 @@ class RatSpn(nn.Module):
                 )
                 vips_logging.update({layer_index: ent_log})
 
-                ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
+                ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
                 root_ll = self.forward(th.einsum('AdnwFR -> AdRnwF', ctx.sample),
-                                       layer_index=self.max_layer_index, x_needs_permutation=False)
-                ctx = self.sample_postprocessing(ctx=ctx, invert_permutation=True)
+                                       layer_index=self.max_layer_index)
+                # ctx = self.sample_postprocessing(ctx=ctx, invert_permutation=True)
                 samples = th.einsum('AdnwFR -> AdRnwF', ctx.sample)
                 if target_dist_callback is None:
                     target_ll = th.zeros_like(root_ll)
