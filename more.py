@@ -3,7 +3,7 @@ import nlopt
 
 
 class ITPS:
-    grad_bound = 1e-5
+    grad_bound = 1e-4
     value_bound = 1e-10
 
     def __init__(self, eta_offset, omega_offset, constrain_entropy):
@@ -161,6 +161,66 @@ class MoreGaussian(ITPS):
             return 1e12
 
 
+class RepsCategorical(ITPS):
+
+    def reps_step(self, eps, beta, old_dist, rewards):
+        self._eps = eps
+        self._beta = beta
+        self._old_log_prob = old_dist.log_probabilities
+        self._rewards = rewards
+
+        try:
+            opt_eta, opt_omega = self.opt_dual()
+            new_params = self._new_params(opt_eta + self._eta_offset, opt_omega + self._omega_offset)
+            self._succ = True
+            return new_params
+        except Exception:
+            self._succ = False
+            return None
+
+    def _new_params(self, eta, omega):
+        omega = omega if self._constrain_entropy else 0.0
+        new_params = np.exp((eta * self._old_log_prob + self._rewards) / (eta + omega))
+        if np.isnan(new_params).any():
+            print(21)
+        return new_params / np.sum(new_params)
+
+    def _dual(self, eta_omega, grad):
+        self.step += 1
+        eta = eta_omega[0] if eta_omega[0] > 0.0 else 0.0
+        omega = eta_omega[1] if self._constrain_entropy and eta_omega[1] > 0.0 else 0.0
+        self._eta = eta
+        self._omega = omega
+
+        eta_off = eta + self._eta_offset
+        omega_off = omega + self._omega_offset
+
+        t1 = (eta_off * self._old_log_prob + self._rewards) / (eta_off + omega_off)
+        #  one times(eta + omega) in denominator  missing
+        t1_de = (omega_off * self._old_log_prob - self._rewards) / (eta_off + omega_off)
+        #  t1_do = -t1 with one times (eta+omega) in denominator missing
+
+        t1_max = np.max(t1)
+        exp_t1 = np.exp(t1 - t1_max)
+        sum_exp_t1 = np.sum(exp_t1) + 1e-25
+        t2 = t1_max + np.log(sum_exp_t1)
+
+        #  factor of exp(t1_max) is still missing in sum_exp_t1
+        inv_sum = (1 / sum_exp_t1)
+        #  missing factors of exp(t1_max) in both inv_sum and exp_t1, cancel out here.
+        t2_de =   inv_sum * np.sum(t1_de * exp_t1)
+        t2_do = - inv_sum * np.sum(t1    * exp_t1)  #  -t2 =  t2_do
+
+        grad[0] = self._eps + t2 + t2_de  # missing factor in t2_de cancels out with missing factor here
+        #  missing factor in t2_do cancels out with missing factor here
+        grad[1] = - self._beta + t2 + t2_do if self._constrain_entropy else 0.0
+
+        self._grad[:] = grad
+
+        dual = eta * self._eps - omega * self._beta + (eta_off + omega_off) * t2
+        return dual
+
+
 class Gaussian:
 
     def __init__(self, mean, covar):
@@ -236,6 +296,37 @@ class Gaussian:
     @property
     def chol_precision(self):
         return self._chol_precision
+
+
+class Categorical:
+
+    def __init__(self, probabilities):
+        self._p = probabilities
+
+    def sample(self, num_samples):
+        thresholds = np.expand_dims(np.cumsum(self._p), 0)
+        thresholds[0, -1] = 1.0
+        eps = np.random.uniform(size=[num_samples, 1])
+        samples = np.argmax(eps < thresholds, axis=-1)
+        return samples
+
+    @property
+    def probabilities(self):
+        return self._p
+
+    @probabilities.setter
+    def probabilities(self, new_probabilities):
+        self._p = new_probabilities
+
+    @property
+    def log_probabilities(self):
+        return np.log(self._p + 1e-25)
+
+    def entropy(self):
+        return - np.sum(self._p * np.log(self._p + 1e-25))
+
+    def kl(self, other):
+        return np.sum(self._p * (np.log(self._p + 1e-25) - other.log_probabilities))
 
 
 class RegressionFunc:
