@@ -218,12 +218,8 @@ class RatSpn(nn.Module):
 
         if layer_index == self.max_layer_index:
             # Merge results from the different repetitions into the channel dimension
-            w, d, c, r = x.shape[-4:]
-            batch_dims = x.shape[:-4]
-            assert d == 1  # number of features should be 1 at this point
-            x = x.view(*batch_dims, w, d, c * r, 1)
-            # x = th.einsum('...dir -> ...dri', x)
-            # x = x.flatten(-2, -1).unsqueeze(-1)
+            x = th.einsum('...dir -> ...dri', x)
+            x = x.flatten(-2, -1).unsqueeze(-1)
 
             # Apply C sum node outputs
             x = self.root(x)
@@ -287,7 +283,7 @@ class RatSpn(nn.Module):
             in_channels=self.config.C, in_features=1, out_channels=1, num_repetitions=1, ratspn=self.config.is_ratspn,
         )
         self._sampling_root.weight_param = nn.Parameter(
-            th.ones(size=(1, self.config.C, 1, 1)) * th.tensor(1 / self.config.C), requires_grad=False
+            th.ones(size=(1, 1, self.config.C, 1, 1)) * th.tensor(1 / self.config.C), requires_grad=False
         )
 
     def _build_input_distribution(self, gmm_leaves):
@@ -437,11 +433,13 @@ class RatSpn(nn.Module):
                 layer_index -= 1
                 ctx.scopes = 1
                 if class_index is not None:
-                    ctx.parent_indices = th.as_tensor(class_index).repeat_interleave(n)
+                    n = (*n, len(class_index))
+                    ctx.parent_indices = th.as_tensor(class_index).expand(*n)
+                    ctx.parent_indices = th.einsum('...c -> c...', ctx.parent_indices)
                     if mode == 'onehot':
                         ctx.parent_indices = F.one_hot(ctx.parent_indices, num_classes=self.config.C)
-                    ctx.n = n * len(class_index)
-                    ctx.parent_indices = ctx.parent_indices.unsqueeze(1).unsqueeze(1).unsqueeze(0).unsqueeze(-1)
+                    ctx.n = n
+                    ctx.parent_indices = ctx.parent_indices.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
 
                 ctx = self.root.sample(ctx=ctx, mode=mode)
 
@@ -457,23 +455,16 @@ class RatSpn(nn.Module):
                 # Sample from RatSpn root layer: Results are one-hot vectors of the indices
                 # into the stacked output channels of all repetitions
 
-                # The weights of the root sum node represent the input channel and repetitions in this manner:
-                # The CSPN case is assumed where the weights are different for each batch index condition.
-                # Looking at one batch index and one output channel, there are IC*R weights.
-                # An element of this weight vector is defined as
-                # w_{r,c}, with r and c being the repetition and channel the weight belongs to, respectively.
-                # The weight vector will then contain [w_{0,0},w_{1,0},w_{2,0},w_{0,1},w_{1,1},w_{2,1},w_{0,2},...]
-                # This weight vector was used as the logits in a IC*R-categorical distribution,
-                # yielding indexes [0,C*R-1].
                 if mode == 'index':
-                    # ctx.parent_indices = ctx.parent_indices.squeeze(-1)
-                    # To match the index to the correct repetition and its input channel, we do the following
-                    ctx.repetition_indices = (ctx.parent_indices % self.config.R).squeeze(-1).squeeze(-1)
+                    ic_per_rep = self.root.weights.size(2) // self.config.R
+                    ctx.repetition_indices = th.div(ctx.parent_indices, ic_per_rep, rounding_mode='trunc')
+                    ctx.repetition_indices = ctx.repetition_indices.squeeze(-1).squeeze(-1)
                     # repetition_indices [nr_nodes, *sample_shape, w]
-                    ctx.parent_indices = th.div(ctx.parent_indices, self.config.R, rounding_mode='trunc')
+                    ctx.parent_indices = ctx.parent_indices % ic_per_rep
                     # parent_indices [nr_nodes, *sample_shape, w, d, r = 1]
                 else:
-                    ctx.parent_indices = ctx.parent_indices.view(*ctx.parent_indices.shape[:-2], -1, self.config.R)
+                    ctx.parent_indices = ctx.parent_indices.view(*ctx.parent_indices.shape[:-2], self.config.R, -1)
+                    ctx.parent_indices = th.einsum('...ri -> ...ir', ctx.parent_indices)
                     # ctx.parent_indices [nr_nodes, *sample_shape, w, d, ic, r]
                 ctx.has_rep_dim = False  # The final sample will be of one repetition only
 
@@ -493,7 +484,7 @@ class RatSpn(nn.Module):
                 ctx.scopes = self._leaf.in_features // self._leaf.cardinality
             samples = self._leaf.sample(ctx=ctx, mode=mode)
             if layer_index == 0:
-                samples = th.einsum('nwdIR -> InwdR', samples)
+                samples = th.einsum('nwFIR -> InwFR', samples)
             ctx.sample = samples
 
         if do_sample_postprocessing:
