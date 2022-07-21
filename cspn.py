@@ -66,6 +66,11 @@ class CSPN(RatSpn):
         self.replace_layer_params()
         self.create_feat_layers(config.F_cond)
 
+    @property
+    def device(self):
+        """Small hack to obtain the current device."""
+        return self.dist_mean_head.bias.device
+
     def forward(self, x: th.Tensor, condition: th.Tensor = None, **kwargs) -> th.Tensor:
         """
         Forward pass through RatSpn. Computes the conditional log-likelihood P(X | C).
@@ -240,9 +245,9 @@ class CSPN(RatSpn):
 
         placeholder = th.zeros_like(self._leaf.base_leaf.mean_param)
         del self._leaf.base_leaf.mean_param
-        del self._leaf.base_leaf.std_param
+        del self._leaf.base_leaf.log_std_param
         self._leaf.base_leaf.mean_param = placeholder
-        self._leaf.base_leaf.std_param = placeholder
+        self._leaf.base_leaf.log_std_param = placeholder
 
     def create_feat_layers(self, feature_dim: tuple):
         assert len(feature_dim) == 3 or len(feature_dim) == 1, \
@@ -323,9 +328,9 @@ class CSPN(RatSpn):
         self.dist_layers = nn.Sequential(*dist_layers)
 
         self.dist_mean_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.mean_param.numel())
-        self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.std_param.numel())
+        self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.log_std_param.numel())
         print(f"Dist layer has {self._leaf.base_leaf.mean_param.numel()} + "
-              f"{self._leaf.base_leaf.std_param.numel()} weights.")
+              f"{self._leaf.base_leaf.log_std_param.numel()} weights.")
 
     def create_one_hot_in_channel_mapping(self):
         for lay in self._inner_layers:
@@ -367,7 +372,7 @@ class CSPN(RatSpn):
 
         # Sampling root weights need to have 5 dims as well
         weight_shape = (num_conditionals, 1, 1, 1, 1)
-        self._sampling_root.weight_param = th.ones(weight_shape).to(self.root.weights.device)
+        self._sampling_root.weight_param = th.ones(weight_shape).to(self.device)
         self._sampling_root.weight_param = self._sampling_root.weights.mul_(1/self.config.C).log_()
 
         # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
@@ -382,7 +387,7 @@ class CSPN(RatSpn):
         dist_param_shape = (num_conditionals, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         dist_weights_pre_output = self.dist_layers(features)
         dist_means = self.dist_mean_head(dist_weights_pre_output).view(dist_param_shape)
-        dist_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
+        dist_log_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
         self._leaf.base_leaf.mean_param = self._leaf.base_leaf.bounded_means(dist_means)
-        self._leaf.base_leaf.std_param = self._leaf.base_leaf.bounded_stds(dist_stds)
+        self._leaf.base_leaf.log_std_param = self._leaf.base_leaf.bounded_log_stds(dist_log_stds)
 

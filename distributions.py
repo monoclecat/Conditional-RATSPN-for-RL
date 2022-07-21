@@ -54,10 +54,10 @@ class RatNormal(Leaf):
 
         if min_sigma is not None and max_sigma is not None:
             # Init from normal
-            self.std_param = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
+            self.log_std_param = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
         else:
             # Init uniform between 0 and 1
-            self.std_param = nn.Parameter(th.rand(1, in_features, out_channels, num_repetitions))
+            self.log_std_param = nn.Parameter(th.rand(1, in_features, out_channels, num_repetitions))
 
         self.min_sigma = check_valid(min_sigma, float, 0.0, max_sigma, allow_none=True)
         self.max_sigma = check_valid(max_sigma, float, min_sigma, allow_none=True)
@@ -71,15 +71,17 @@ class RatNormal(Leaf):
             means = self.mean_param
         if self._tanh_squash:
             means = th.clamp(means, -6.0, 6.0)
+        elif self.min_mean is not None or self.max_mean is not None:
+            means = th.clamp(means, self.min_mean, self.max_mean)
         return means
 
-    def bounded_stds(self, stds: th.Tensor = None):
-        if stds is None:
-            stds = self.std_param
+    def bounded_log_stds(self, log_stds: th.Tensor = None):
+        if log_stds is None:
+            log_stds = self.log_std_param
         LOG_STD_MAX = 2
         LOG_STD_MIN = -15
-        stds = th.clamp(stds, LOG_STD_MIN, LOG_STD_MAX).exp()
-        return stds
+        log_stds = th.clamp(log_stds, LOG_STD_MIN, LOG_STD_MAX)
+        return log_stds
 
     @property
     def means(self):
@@ -88,12 +90,30 @@ class RatNormal(Leaf):
         else:
             return self.mean_param
 
+    @means.setter
+    def means(self, means: th.Tensor):
+        if isinstance(means, np.ndarray):
+            means = th.as_tensor(means)
+        means = self.bounded_means(means)
+        self.mean_param = nn.Parameter(th.as_tensor(means, dtype=th.float, device=self.mean_param.device))
+
+    @property
+    def log_stds(self):
+        if self._ratspn:
+            return self.bounded_log_stds()
+        else:
+            return self.log_std_param
+
+    @log_stds.setter
+    def log_stds(self, log_stds: th.Tensor):
+        if isinstance(log_stds, np.ndarray):
+            log_stds = th.as_tensor(log_stds)
+        log_stds = self.bounded_log_stds(log_stds)
+        self.log_std_param = nn.Parameter(th.as_tensor(log_stds, dtype=th.float, device=self.log_std_param.device))
+
     @property
     def stds(self):
-        if self._ratspn:
-            return self.bounded_stds()
-        else:
-            return self.std_param
+        return self.log_stds.exp()
 
     def set_no_tanh_log_prob_correction(self):
         self._no_tanh_log_prob_correction = False
@@ -110,7 +130,7 @@ class RatNormal(Leaf):
             # This correction term assumes the input to be squashed already
             # correction = th.log(1 - x**2 + 1e-6)
 
-        d = dist.Normal(self.means, self.stds, validate_args=False)
+        d = dist.Normal(self.means, self.log_stds.exp(), validate_args=False)
         x = d.log_prob(x)  # Shape: [n, w, d, oc, r]
 
         if self._tanh_squash and not self._no_tanh_log_prob_correction:

@@ -930,10 +930,8 @@ class RatSpn(nn.Module):
                 debug_plot(i, means=t, samples=samples, eta_lower_bound=eta_lower_bound)
             print(1)
 
-        self._leaf.base_leaf.std_param = nn.Parameter(th.as_tensor(new_log_std, dtype=th.float,
-                                                                   device=self.device))
-        self._leaf.base_leaf.mean_param = nn.Parameter(th.as_tensor(new_mean, dtype=th.float,
-                                                                    device=self.device))
+        self.means = new_mean
+        self.log_stds = new_log_std
         return res.x
 
     def reps_weight_update(self, layer_index: int, targets: th.Tensor,
@@ -979,8 +977,8 @@ class RatSpn(nn.Module):
         """
         samples = samples.clone().cpu().flatten(0, -2).numpy()
         targets = targets.cpu().flatten(1, -2).numpy()
-        mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
-        var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
+        mu = self.means.cpu().numpy().flatten()
+        var = (self.stds ** 2).cpu().numpy().flatten()
 
         res_list = []
         for i in range(len(mu)):
@@ -1016,14 +1014,11 @@ class RatSpn(nn.Module):
             else:
                 res_list.append((1, 0.0, old_dist.entropy(), "update of component {:d} failed".format(i)))
 
-        # print(f"min/max/avg mean: {mu.min():.2f}/{mu.max():.2f}/{mu.mean():.2f}    "
-        #       f"min/max/avg var: {var.min():.2f}/{var.max():.2f}/{var.mean():.2f}")
-        new_mean = mu.reshape(self._leaf.base_leaf.mean_param.shape)
-        new_log_std = (0.5 * np.log(var)).reshape(self._leaf.base_leaf.mean_param.shape)
-        self._leaf.base_leaf.std_param = nn.Parameter(th.as_tensor(new_log_std, dtype=th.float,
-                                                                   device=self.device))
-        self._leaf.base_leaf.mean_param = nn.Parameter(th.as_tensor(new_mean, dtype=th.float,
-                                                                    device=self.device))
+        param_shape = self.means.shape
+        new_mean = mu.reshape(param_shape)
+        new_log_std = (0.5 * np.log(var)).reshape(param_shape)
+        self.log_stds = new_log_std
+        self.means = new_mean
         return res_list
 
     def layer_entropy_approx(
@@ -1812,9 +1807,21 @@ class RatSpn(nn.Module):
     def means(self):
         return self._leaf.base_leaf.means
 
+    @means.setter
+    def means(self, means: th.Tensor):
+        self._leaf.base_leaf.means = means
+
     @property
     def stds(self):
         return self._leaf.base_leaf.stds
+
+    @property
+    def log_stds(self):
+        return self._leaf.base_leaf.log_stds
+
+    @log_stds.setter
+    def log_stds(self, log_stds: th.Tensor):
+        self._leaf.base_leaf.log_stds = log_stds
 
     def debug__set_root_weights_dirac(self):
         self.debug__set_weights_dirac(self.max_layer_index)
