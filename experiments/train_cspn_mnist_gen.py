@@ -85,7 +85,10 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
             if eval_ll:
                 log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
         else:
-            samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample.squeeze(0)
+            if model.config.C > 1:
+                samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample.squeeze(0)
+            else:
+                samples = model.sample(n=samples_per_label, mode=style, is_mpe=mpe).sample.squeeze(0)
             if eval_ll:
                 log_like.append(model(x=samples).mean().tolist())
         if model.config.tanh_squash:
@@ -101,20 +104,24 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
             for layer_nr in range(model.config.D * 2):
                 layer_nr_dir = os.path.join(base_path, f"layer{layer_nr}")
                 os.makedirs(layer_nr_dir, exist_ok=True)
-                samples = model.sample(mode='index', n=10, start_at_layer=layer_nr, split_by_scope=True).sample
-                if layer_nr == 0:
-                    samples.unsqueeze_(-1)
+                samples = model.sample(mode='index', n=10, layer_index=layer_nr,
+                                       post_processing_kwargs={'split_by_scope': True}).sample
                 # samples [nr_nodes, scopes, n, w, f, r]
-                samples = samples.permute(5, 0, 1, 2, 3, 4)
+                samples = th.einsum('isnwFR -> RisnwF', samples).unsqueeze(-1)
                 # samples [r, nr_nodes, scopes, n, w, f]
                 if samples.isnan().any():
-                    evidence_samples = samples.reshape(np.prod(samples.shape[:4]), *samples.shape[4:])
+                    # evidence_samples = samples.reshape(np.prod(samples.shape[:4]), *samples.shape[4:])
+                    evidence_samples = samples
                     if model.config.tanh_squash:
                         evidence_samples = evidence_samples.atanh()
-                    evidence_samples = model.sample(
-                        condition=label, mode='index', evidence=evidence_samples,
-                        n=None, is_mpe=mpe,
-                    ).sample
+                    if isinstance(model, CSPN):
+                        evidence_samples = model.sample(
+                            condition=label, mode='index', evidence=evidence_samples, n=(1,), is_mpe=mpe,
+                        ).sample
+                    else:
+                        evidence_samples = model.sample(
+                            class_index=label, mode='index', evidence=evidence_samples, n=(1,), is_mpe=mpe,
+                        ).sample
                     if model.config.tanh_squash:
                         evidence_samples.mul_(0.5).add_(0.5)
                     evidence_samples = evidence_samples.view(*samples.shape)
@@ -216,7 +223,7 @@ class CsvLogger(dict):
         self.path = path
         self.other_keys = ['epoch', 'time']
         self.keys_to_avg = [
-            'mnist_test_ll', 'nll_loss', 'mse_loss', 'ent_loss',
+            'mnist_test_ll', 'nll_loss', 'mse_loss', 'ce_loss', 'ent_loss',
             'vi_ent_approx', 'loss'
         ]
         for i in range(20):
@@ -277,6 +284,8 @@ class CsvLogger(dict):
             return_str += f" - NLL loss: {mean:.2f}"
         if mean := self._valid('mse_loss'):
             return_str += f" - MSE loss: {mean:.4f}"
+        if mean := self._valid('ce_loss'):
+            return_str += f" - CE loss: {mean:.4f}"
         if mean := self._valid('ent_loss'):
             return_str += f" - Entropy loss: {mean:.2f}"
         if mean := self._valid('mnist_test_ll'):
@@ -348,8 +357,8 @@ if __name__ == "__main__":
                         help='List of sizes of the CSPN sum param layers.')
     parser.add_argument('--dist_param_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN dist param layers.')
-    parser.add_argument('--save_interval', type=int, default=50, help='Epoch interval to save model')
-    parser.add_argument('--eval_interval', type=int, default=10, help='Epoch interval to evaluate model')
+    parser.add_argument('--save_interval', '-save', type=int, default=50, help='Epoch interval to save model')
+    parser.add_argument('--eval_interval', '-eval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')
     parser.add_argument('--ratspn', action='store_true', help='Use a RATSPN and not a CSPN')
     parser.add_argument('--no_ent_approx', '-no_ent', action='store_true', help="Don't compute entropy")
@@ -401,7 +410,7 @@ if __name__ == "__main__":
     if not args.model_path:
         if args.ratspn:
             config = RatSpnConfig()
-            config.C = 10
+            config.C = 1#10
         else:
             config = CspnConfig()
             config.F_cond = (cond_size,)
@@ -443,7 +452,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     print(f"Optimizer: {optimizer}")
 
-    lmbda = 1.0
+    lmbda = 0.0
     sample_interval = 1 if args.verbose else args.eval_interval  # number of epochs
     save_interval = 1 if args.verbose else args.save_interval  # number of epochs
 
@@ -465,12 +474,12 @@ if __name__ == "__main__":
         logger.write()
     for epoch in range(args.epochs):
         if epoch > 20:
-            lmbda = 0.5
+            lmbda = 0.7
         t_start = time.time()
         logger.reset(epoch)
         for batch_index, (image, label) in enumerate(train_loader):
             # Send data to correct device
-            label = label.to(device)
+            label = F.one_hot(label, cond_size).float().to(device)
             image = image.to(device)
             if model.config.tanh_squash:
                 image.sub_(0.5).mul_(2).atanh_()
@@ -481,18 +490,18 @@ if __name__ == "__main__":
             # Inference
             optimizer.zero_grad()
             data = image.reshape(image.shape[0], -1)
-            mse_loss = ll_loss = ent_loss = vi_ent_approx = th.zeros(1).to(device)
+            mse_loss = ll_loss = ent_loss = loss_ce = vi_ent_approx = th.zeros(1).to(device)
             def bookmark():
                 pass
             if model.is_ratspn:
-                output: th.Tensor = model(x=data)
-                loss_ce = F.cross_entropy(output.squeeze(1), label)
+                output: th.Tensor = model(x=data).squeeze(1)
+                if model.config.C > 1:
+                    loss_ce = F.binary_cross_entropy_with_logits(output, label)
                 ll_loss = -output.mean()
                 loss = (1 - lmbda) * ll_loss + lmbda * loss_ce
                 if not args.no_ent_approx:
                     vi_ent_approx = model.vi_entropy_approx(sample_size=args.ent_approx__sample_size).mean()
             else:
-                label = F.one_hot(label, cond_size).float().to(device)
                 if args.learn_by_sampling:
                     sample: th.Tensor = model.sample_onehot_style(condition=label, n=args.learn_by_sampling__sample_size)
                     if model.config.tanh_squash:
@@ -501,18 +510,19 @@ if __name__ == "__main__":
                 else:
                     output: th.Tensor = model(x=data, condition=label)
                     ll_loss = -output.mean()
-                    vi_ent_approx, batch_ent_log = model.vi_entropy_approx(
-                        sample_size=args.ent_approx__sample_size, condition=label, verbose=True,
-                    )
-                    vi_ent_approx = vi_ent_approx.mean()
-                    if args.ent_loss_coef > 0.0:
-                        ent_loss = -args.ent_loss_coef * vi_ent_approx
+                    if not args.no_ent_approx:
+                        vi_ent_approx, batch_ent_log = model.vi_entropy_approx(
+                            sample_size=args.ent_approx__sample_size, condition=label, verbose=True,
+                        )
+                        vi_ent_approx = vi_ent_approx.mean()
+                        if args.ent_loss_coef > 0.0:
+                            ent_loss = -args.ent_loss_coef * vi_ent_approx
                 loss = mse_loss + ll_loss + ent_loss
 
             loss.backward()
             optimizer.step()
             logger.add_to_avg_keys(
-                nll_loss=ll_loss, mse_loss=mse_loss, ent_loss=ent_loss, loss=loss,
+                nll_loss=ll_loss, mse_loss=mse_loss, ce_loss=loss_ce, ent_loss=ent_loss, loss=loss,
                 vi_ent_approx=vi_ent_approx,
             )
             if False:
