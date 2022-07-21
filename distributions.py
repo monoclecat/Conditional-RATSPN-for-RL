@@ -322,7 +322,7 @@ class IndependentMultivariate(Leaf):
 
             # Remove padding
             if self._pad:
-                ctx.parent_indices = ctx.parent_indices[:, :, :, :-self._pad]
+                ctx.parent_indices = ctx.parent_indices[..., :-self._pad, :]
 
         samples = self.base_leaf.sample(ctx=ctx, mode=mode)
         return samples
