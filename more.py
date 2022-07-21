@@ -360,7 +360,7 @@ class RegressionFunc:
     def _normalize_outputs(self, outputs):
         mean = np.mean(outputs)
         std = np.std(outputs)
-        outputs = (outputs - mean) / std
+        outputs = (outputs - mean) / (std + 1e-25)
         return outputs, mean, std
 
     def _undo_normalization(self, params, f_mean, f_std, o_mean, o_std):

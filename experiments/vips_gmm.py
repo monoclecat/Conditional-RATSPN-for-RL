@@ -15,7 +15,7 @@ import time
 from utils import *
 
 
-def build_ratspn(F, I):
+def build_ratspn(F, I, bounds):
     config = RatSpnConfig()
     config.C = 1
     config.F = F
@@ -25,6 +25,7 @@ def build_ratspn(F, I):
     config.S = 3
     config.dropout = 0.0
     config.leaf_base_class = RatNormal
+    config.leaf_base_kwargs = {'min_mean': float(bounds[0]), 'max_mean': float(bounds[1])}
     model = RatSpn(config)
     count_params(model)
     return model
@@ -233,7 +234,7 @@ if __name__ == "__main__":
                                                                target_gmm_prior_variance)
     else:
         target_mixture = IndGmm(num_dimensions)
-        if True:
+        if False:
             dist_params = {
                 0: {
                     'mean': th.as_tensor([-40, -20, -10, 10, 30, 40]),
@@ -357,8 +358,9 @@ if __name__ == "__main__":
             load_path = None
         if load_path is None:
             model = build_ratspn(
-                2,
-                int(num_true_components * 1.0)
+                F=2,
+                I=int(num_true_components * 1.0),
+                bounds=(min_x, max_x),
             ).to(args.device)
         else:
             model = th.load(load_path, map_location=args.device)
