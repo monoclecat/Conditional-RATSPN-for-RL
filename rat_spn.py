@@ -802,8 +802,8 @@ class RatSpn(nn.Module):
                           f"avg. linear: {round(r.mean(), 6)}, "
                           f"avg. quadr.: {round(R.mean(), 6)}")
 
-            mu = self._leaf.base_leaf.mean_param.cpu().numpy().flatten()
-            var = (self._leaf.base_leaf.std_param.exp() ** 2).cpu().numpy().flatten()
+            mu = self.means.cpu().numpy().flatten()
+            var = (self.stds ** 2).cpu().numpy().flatten()
         Q = 1 / var
         q = Q * mu
 
@@ -861,7 +861,7 @@ class RatSpn(nn.Module):
         Q_step, q_step = Q_q_step(res.x, Q, q, R, r)
         Q_step = Q_step.reshape(self._leaf.base_leaf.mean_param.shape)
         q_step = q_step.reshape(self._leaf.base_leaf.mean_param.shape)
-        new_log_std = np.log(np.sqrt(1 / Q_step))
+        new_log_std = -0.5 * np.log(Q_step)
         new_mean = 1 / Q_step * q_step
 
         def debug_plot(flat_ind, means, samples, eta_lower_bound):
@@ -951,17 +951,19 @@ class RatSpn(nn.Module):
                     sel_targets = targets[0, 0, d, :, c, r]
                     old_dist = more.Categorical(np.exp(sel_log_weights))
                     reps_inst = reps_instances_of_layer[(d, c, r)]
-                    kl_bound = 1e-4
+                    kl_bound = 1e-2
                     new_probabilities = reps_inst.reps_step(kl_bound, -1, old_dist, sel_targets)
 
+                    debug = False
                     if reps_inst.success:
                         layer_log_weights[0, d, :, c, r] = np.log(new_probabilities + 1e-25)
                         new_dist = more.Categorical(new_probabilities)
                         kl = new_dist.kl(old_dist)
                         entropy = new_dist.entropy()
-                        print(f"Layer:{layer_index}, d:{d}, c:{c}, r:{r} - KL new/old {kl:.4f}"
-                              f" - Old ent {old_dist.entropy():.4f} - New ent {entropy:.4f}")
-                    else:
+                        if debug:
+                            print(f"Layer:{layer_index}, d:{d}, c:{c}, r:{r} - KL new/old {kl:.4f}"
+                                  f" - Old ent {old_dist.entropy():.4f} - New ent {entropy:.4f}")
+                    elif debug:
                         print(f"Failed for layer:{layer_index}, d:{d}, c:{c}, r:{r}")
         layer.weight_param = nn.Parameter(th.as_tensor(layer_log_weights, device=self.device))
 
@@ -991,7 +993,7 @@ class RatSpn(nn.Module):
             sel_samples = np.expand_dims(samples[i], -1)
             sel_targets = np.expand_dims(targets[:, i], -1)
             for t in sel_targets:
-                surrogate = more.QuadFunc(1e-12, normalize=False, unnormalize_output=False)
+                surrogate = more.QuadFunc(1e-12, normalize=True, unnormalize_output=False)
                 surrogate.fit(sel_samples, t, None, old_dist.mean, old_dist.chol_covar)
 
             # This is a numerical thing we did not use in the original paper: We do not undo the output normalization
@@ -1233,8 +1235,6 @@ class RatSpn(nn.Module):
             verbose_on = verbose(step) if callable(verbose) else verbose
             etas = None
 
-            if step > 150:
-                print('a')
             layer_entropies = None
             for layer_index in self.sum_layer_indices:
                 layer_log = {}
@@ -1335,7 +1335,7 @@ class RatSpn(nn.Module):
                     leaf_log_probs = leaf_log_probs.repeat_interleave(self._leaf.cardinality, dim=-3)
                     leaf_log_probs = th.einsum('...nwsAR -> ...wsARn', leaf_log_probs)
                     with th.no_grad():
-                        if True:
+                        if False:
                             etas = self.natural_param_leaf_update_VIPS(
                                 samples=samples,
                                 eta_guess=None,
@@ -1351,7 +1351,7 @@ class RatSpn(nn.Module):
                                 step=step,
                             )
 
-                if True or step < 100:
+                if step < 200:
                     continue
                 log_probs = log_probs.mean(-5)
                 child_ll = child_ll.mean(0)
