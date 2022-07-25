@@ -31,6 +31,95 @@ def build_ratspn(F, I, bounds):
     return model
 
 
+def target_callback(x):
+    return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True)  # + 200.0
+
+
+def scale_to_grid(tensor):
+    return (tensor - min_x) / (max_x - min_x) * grid_points
+
+
+def scale_to_x(tensor):
+    return (tensor / grid_points) * (max_x - min_x) + min_x
+
+
+def exp_view(tensor: th.Tensor):
+    return tensor.exp().view(grid_points, grid_points).T.cpu()
+
+
+def dist_imshow(handle, probs, apply_exp_view=True, **kwargs):
+    # handle is either an axis or plt
+    if apply_exp_view:
+        probs = exp_view(probs)
+    handle.imshow(forplot(probs), extent=[min_x, max_x, max_x, min_x], **kwargs)
+
+
+def forplot(tensor: th.Tensor, scale=False):
+    tensor = tensor.detach().cpu().numpy()
+    if scale:
+        tensor = scale_to_grid(tensor)
+    return tensor
+
+
+@gif.frame
+def gif_frame(probs):
+    fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
+    ax1.imshow(forplot(exp_view(probs)))
+    ax1.set_title(f"RatSpn distribution at step {step}")
+
+
+@gif.frame
+def gif_target_dist(model_probs, step, leaf_mpe, root_children_mpe):
+    plot_target_dist(model_probs, True, step, leaf_mpe, root_children_mpe)
+
+
+def plot_target_dist(model_probs=None, noshow=False, step=None, leaf_mpe=None, root_children_mpe=None):
+    target_probs = exp_view(target_mixture.evaluate(grid, dims=None, return_log=True))
+    if model_probs is not None:
+        model_probs = exp_view(model_probs)
+    if isinstance(target_mixture, IndGmm):
+        fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(10, 15), dpi=100)
+        if model_probs is None:
+            dist_imshow(ax1, target_probs, apply_exp_view=False)
+        else:
+            dist_imshow(ax1, target_probs, apply_exp_view=False, alpha=0.5, cmap='cividis')
+            dist_imshow(ax1, model_probs, apply_exp_view=False, alpha=0.7)
+        if root_children_mpe is not None:
+            root_children_mpe = th.einsum('...ij -> ...ji', root_children_mpe).flatten(0, -2)
+            root_children_mpe = forplot(root_children_mpe)
+            ax1.scatter(root_children_mpe[:, 0], root_children_mpe[:, 1], s=1, color='r', label='Modes')
+        ax1.set_title(
+            f"Target distribution with "
+            f"{', '.join([f'{target_mixture.num_components[i]} components over {dim}' for i, dim in enumerate(['x', 'y'])])}."
+        )
+        ax2.plot(scale_to_x(np.arange(grid_points)), forplot(target_probs.sum(0)), color='b', label='Target dist')
+        ax2.set_ylim(None, 0.25)
+        ax3.plot(scale_to_x(np.arange(grid_points)), forplot(target_probs.sum(1)), color='b', label='Target dist')
+        ax3.set_ylim(None, 0.25)
+        if model_probs is not None:
+            ax2.plot(scale_to_x(np.arange(grid_points)), forplot(model_probs.sum(0)), color='r',
+                     label='Model dist')
+            ax3.plot(scale_to_x(np.arange(grid_points)), forplot(model_probs.sum(1)), color='r',
+                     label='Model dist')
+        if leaf_mpe is not None:
+            leaf_mpe = th.einsum('...ij -> ...ji', leaf_mpe).flatten(0, -2)
+            leaf_mpe = forplot(leaf_mpe)
+            ax2.vlines(leaf_mpe[:, 0], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
+            ax3.vlines(leaf_mpe[:, 1], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
+
+        ax2.set_title("Marginal target distribution over x")
+        ax3.set_title("Marginal target distribution over y")
+        ax2.legend()
+        ax3.legend()
+        if step is not None:
+            fig.suptitle(f"VIPS at step {step}")
+    else:
+        plt.imshow(target_probs)
+        plt.title(f"Target distribution with {num_true_components} components.")
+    if not noshow:
+        plt.show()
+
+
 class Target:
     """
         Target distribution to fit. Is kind of like a prison.
@@ -203,7 +292,10 @@ def build_GMM_lnpdf(num_dimensions, num_true_components, prior_variance=1e3):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('--exp_name', '-name', type=str, default='vips_gmm_test',
+                        help='Experiment name. The results dir will contain it.')
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
+    parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--device', '-d', type=str, default='cuda',
                         help='cuda or cpu')
     parser.add_argument('--ent_approx_sample_size', '-samples', type=int, default=5)
@@ -215,8 +307,14 @@ if __name__ == "__main__":
                         help="If True, create a new SPN and train it to increase entropy only.")
     parser.add_argument('--vips', action='store_true',
                         help="If True, fit model to target dist using our flavor of VIPS.")
+    parser.add_argument('--gif_duration', '-gif_d', type=int, default=30)
     parser.add_argument('--make_gif', '-gif', action='store_true',
                         help="Create gif of plots")
+    parser.add_argument('--init_weight_kl_bound', '-w_kl', type=float, default=0.0,
+                        help='Initial KL bound on all sum weights.')
+    parser.add_argument('--weight_update_start', '-w_start', type=int, default=0, help='Start weight updates at step.')
+    parser.add_argument('--init_leaf_kl_bound', '-l_kl', type=float, default=1e-2,
+                        help='Initial KL bound on all sum weights.')
     args = parser.parse_args()
 
     assert not (args.with_ent_loss and args.vips)
@@ -234,7 +332,18 @@ if __name__ == "__main__":
                                                                target_gmm_prior_variance)
     else:
         target_mixture = IndGmm(num_dimensions)
-        if False:
+        if True:
+            dist_params = {
+                0: {
+                    'mean': th.as_tensor([-40, -20, -10, 10, 30, 40]),
+                    'std': th.as_tensor([2, 4, 2, 3, 2, 3]),
+                },
+                1: {
+                    'mean': th.as_tensor([-35, -20, 0, 15, 35]),
+                    'std': th.as_tensor([3, 2, 3, 4, 2])
+                }
+            }
+        elif False:
             dist_params = {
                 0: {
                     'mean': th.as_tensor([-40, -20, -10, 10, 30, 40]),
@@ -265,86 +374,6 @@ if __name__ == "__main__":
     x = th.linspace(min_x, max_x, grid_points)
     grid = th.stack(th.meshgrid((x, x), indexing='ij'), dim=-1)
     grid = grid.reshape(-1, 2)
-
-    def target_callback(x):
-        return target_mixture.evaluate(x, dims=None, return_log=True, has_rep_dim=True)# + 200.0
-
-    def scale_to_grid(tensor):
-        return (tensor - min_x) / (max_x - min_x) * grid_points
-
-    def scale_to_x(tensor):
-        return (tensor / grid_points) * (max_x - min_x) + min_x
-
-    def exp_view(tensor: th.Tensor):
-        return tensor.exp().view(grid_points, grid_points).T.cpu()
-
-    def dist_imshow(handle, probs, apply_exp_view=True, **kwargs):
-        # handle is either an axis or plt
-        if apply_exp_view:
-            probs = exp_view(probs)
-        handle.imshow(forplot(probs), extent=[min_x, max_x, max_x, min_x], **kwargs)
-
-    def forplot(tensor: th.Tensor, scale=False):
-        tensor = tensor.detach().cpu().numpy()
-        if scale:
-            tensor = scale_to_grid(tensor)
-        return tensor
-
-    @gif.frame
-    def gif_frame(probs):
-        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
-        ax1.imshow(forplot(exp_view(probs)))
-        ax1.set_title(f"RatSpn distribution at step {step}")
-
-    @gif.frame
-    def gif_target_dist(model_probs, step, leaf_mpe, root_children_mpe):
-        plot_target_dist(model_probs, True, step, leaf_mpe, root_children_mpe)
-
-    def plot_target_dist(model_probs=None, noshow=False, step=None, leaf_mpe=None, root_children_mpe=None):
-        target_probs = exp_view(target_mixture.evaluate(grid, dims=None, return_log=True))
-        if model_probs is not None:
-            model_probs = exp_view(model_probs)
-        if isinstance(target_mixture, IndGmm):
-            fig, (ax1, ax2, ax3) = plt.subplots(3, figsize=(10, 15), dpi=100)
-            if model_probs is None:
-                dist_imshow(ax1, target_probs, apply_exp_view=False)
-            else:
-                dist_imshow(ax1, target_probs, apply_exp_view=False, alpha=0.5, cmap='cividis')
-                dist_imshow(ax1, model_probs, apply_exp_view=False, alpha=0.7)
-            if root_children_mpe is not None:
-                root_children_mpe = th.einsum('...ij -> ...ji', root_children_mpe).flatten(0, -2)
-                root_children_mpe = forplot(root_children_mpe)
-                ax1.scatter(root_children_mpe[:, 0], root_children_mpe[:, 1], s=1, color='r', label='Modes')
-            ax1.set_title(
-                f"Target distribution with "
-                f"{', '.join([f'{target_mixture.num_components[i]} components over {dim}' for i, dim in enumerate(['x', 'y'])])}."
-            )
-            ax2.plot(scale_to_x(np.arange(grid_points)), forplot(target_probs.sum(0)), color='b',
-                     label='Target dist')
-            ax3.plot(scale_to_x(np.arange(grid_points)), forplot(target_probs.sum(1)), color='b',
-                     label='Target dist')
-            if model_probs is not None:
-                ax2.plot(scale_to_x(np.arange(grid_points)), forplot(model_probs.sum(0)), color='r',
-                         label='Model dist')
-                ax3.plot(scale_to_x(np.arange(grid_points)), forplot(model_probs.sum(1)), color='r',
-                         label='Model dist')
-            if leaf_mpe is not None:
-                leaf_mpe = th.einsum('...ij -> ...ji', leaf_mpe).flatten(0, -2)
-                leaf_mpe = forplot(leaf_mpe)
-                ax2.vlines(leaf_mpe[:, 0], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
-                ax3.vlines(leaf_mpe[:, 1], ymin=0, ymax=0.1, linestyles='-', alpha=0.7, label='Modes', colors='r')
-
-            ax2.set_title("Marginal target distribution over x")
-            ax3.set_title("Marginal target distribution over y")
-            ax2.legend()
-            ax3.legend()
-            if step is not None:
-                fig.suptitle(f"VIPS at step {step}")
-        else:
-            plt.imshow(target_probs)
-            plt.title(f"Target distribution with {num_true_components} components.")
-        if not noshow:
-            plt.show()
 
     if args.vips:
         plot_target_dist()
@@ -393,16 +422,16 @@ if __name__ == "__main__":
                     f"_seed{seed}.gif"
                 )
             else:
-                fps = 5
+                fps = 10
                 # n_steps = 151
                 # make_frame_every = 1
-                gif_duration = 10  # seconds
-                n_steps = 500
+                gif_duration = args.gif_duration  # seconds
+                n_steps = args.steps
                 n_frames = fps * gif_duration
                 make_frame_every = int(n_steps / n_frames)
 
                 save_path = os.path.join(
-                    args.results_dir, "test.gif"
+                    args.results_dir, f"{args.exp_name}.gif"
                 )
         else:
             n_steps = 50000
@@ -458,7 +487,10 @@ if __name__ == "__main__":
                 target_dist_callback=target_callback,
                 steps=n_steps,
                 step_callback=step_callback,
-                sample_size=5,
+                sample_size=50,
+                init_weight_kl_bound=args.init_weight_kl_bound,
+                init_leaf_kl_bound=args.init_leaf_kl_bound,
+                weight_update_start=args.weight_update_start,
                 verbose=verbose_callback,
             )
         elif args.with_ent_loss:

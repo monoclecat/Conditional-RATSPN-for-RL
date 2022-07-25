@@ -759,8 +759,8 @@ class RatSpn(nn.Module):
 
         return tensors, weight_entropy
 
-    def natural_param_leaf_update_VIPS(self, samples: th.Tensor, targets: th.Tensor, eta_guess: Optional[np.ndarray],
-                                       verbose=False):
+    def natural_param_leaf_update_VIPS(self, samples: th.Tensor, targets: th.Tensor,
+                                       step: int, kl_bounds: np.ndarray, verbose=False):
         """
         Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
         As specified in the VIPS paper.
@@ -797,8 +797,7 @@ class RatSpn(nn.Module):
             var = (self.stds ** 2).cpu().numpy().flatten()
         Q = 1 / var
         q = Q * mu
-
-        epsilon = np.ones_like(Q) * 0.01
+        kl_bounds = kl_bounds.flatten()
 
         def log_part_fn(X, x):
             return -0.5 * (x ** 2 * 1 / X + np.log(np.abs(2 * np.pi * 1 / X)))
@@ -835,12 +834,11 @@ class RatSpn(nn.Module):
         # Calculate bounds for the etas, so that the Q_step are always greater min_Q
         min_Q = 1e-5
         eta_lower_bound = np.abs((min_Q - R) / (Q - min_Q))
-        if eta_guess is None:
-            eta_guess = eta_lower_bound + 10
+        eta_guess = eta_lower_bound + 10
         print(f"Eta mean: {eta_guess.mean()}")
 
         res = scipy.optimize.minimize(
-            loss_fn, eta_guess, args=(Q, q, R, r, epsilon),
+            loss_fn, eta_guess, args=(Q, q, R, r, kl_bounds),
             # loss_fn, eta_guess[0], args=(Q[0], q[0], R[0], r[0], epsilon[0]),
             method='L-BFGS-B', jac=grad,
             # bounds=scipy.optimize.Bounds(1e-5, np.inf),
@@ -926,7 +924,7 @@ class RatSpn(nn.Module):
         return res.x
 
     def reps_weight_update(self, layer_index: int, targets: th.Tensor,
-                           reps_instances_of_layer: List[more.RepsCategorical]):
+                           reps_instances_of_layer: Dict):
         layer = self.layer_index_to_obj(layer_index)
         layer_log_weights = layer.weights.detach().cpu().numpy()
         _, feat, ic, oc, rep = layer_log_weights.shape
@@ -941,8 +939,8 @@ class RatSpn(nn.Module):
                     sel_log_weights = layer_log_weights[0, d, :, c, r]
                     sel_targets = targets[0, 0, d, :, c, r]
                     old_dist = more.Categorical(np.exp(sel_log_weights))
-                    reps_inst = reps_instances_of_layer[(d, c, r)]
-                    kl_bound = 1e-2
+                    reps_inst = reps_instances_of_layer[(d, c, r)][1]
+                    kl_bound = reps_instances_of_layer[(d, c, r)][0]
                     new_probabilities = reps_inst.reps_step(kl_bound, -1, old_dist, sel_targets)
 
                     debug = False
@@ -959,7 +957,7 @@ class RatSpn(nn.Module):
         layer.weight_param = nn.Parameter(th.as_tensor(layer_log_weights, device=self.device))
 
     def more_leaf_update(self, samples: th.Tensor, targets: th.Tensor, more_instances: List[more.MoreGaussian],
-                         verbose=False, **kwargs):
+                         step: int, kl_bounds: np.ndarray, verbose=False):
         """
         Updates the mean and log-std parameters of the Gaussian leaves in the natural parameter space.
         As specified in the VIPS paper.
@@ -970,16 +968,18 @@ class RatSpn(nn.Module):
         """
         samples = samples.clone().cpu().flatten(0, -2).numpy()
         targets = targets.cpu().flatten(1, -2).numpy()
+        kl_bounds = kl_bounds.flatten()
         mu = self.means.cpu().numpy().flatten()
         var = (self.stds ** 2).cpu().numpy().flatten()
 
         res_list = []
         for i in range(len(mu)):
             learner = more_instances[i]
-            sel_mu = np.expand_dims(mu[[i]], -1)
+            kl_bound = kl_bounds[i]
+            old_mu = np.expand_dims(mu[[i]], -1)
             old_var = np.expand_dims(var[[i]], -1)
-            old_dist = more.Gaussian(sel_mu, old_var)
-            component = more.Gaussian(sel_mu, old_var)
+            old_dist = more.Gaussian(old_mu, old_var)
+            component = more.Gaussian(old_mu, old_var)
 
             sel_samples = np.expand_dims(samples[i], -1)
             sel_targets = np.expand_dims(targets[:, i], -1)
@@ -999,7 +999,7 @@ class RatSpn(nn.Module):
                                             / (1/old_var - learner.min_precision))
                 # print(learner.eta_offset)
 
-            new_mean, new_covar = learner.more_step(0.01, -1, component, surrogate)
+            new_mean, new_covar = learner.more_step(kl_bound, -1, component, surrogate)
             if learner.success:
                 mu[i] = new_mean
                 var[i] = new_covar
@@ -1188,8 +1188,8 @@ class RatSpn(nn.Module):
         return log_probs, accum_weights
 
     def vips(self, target_dist_callback, steps, step_callback: Callable = None,
-             sample_size=7, verbose: Union[bool, Callable] = False) \
-            -> Dict:
+             sample_size=7, init_leaf_kl_bound=1e-2, init_weight_kl_bound=1e-2, weight_update_start=0,
+             verbose: Union[bool, Callable] = False) -> Dict:
         """
 
         Args:
@@ -1220,7 +1220,11 @@ class RatSpn(nn.Module):
             for d in range(feat):
                 for c in range(oc):
                     for r in range(rep):
-                        weight_learners[l].update({(d, c, r): more.RepsCategorical(1.0, 0.0, False)})
+                        weight_learners[l].update({
+                            (d, c, r): (init_weight_kl_bound, more.RepsCategorical(1.0, 0.0, False)),
+                        })
+
+        leaf_kl_bounds = init_leaf_kl_bound * np.ones(self._leaf.base_leaf.mean_param.shape)
 
         for step in range(int(steps)):
             verbose_on = verbose(step) if callable(verbose) else verbose
@@ -1291,17 +1295,13 @@ class RatSpn(nn.Module):
                     # In natural_param_leaf_update this dim is iterated over
                     target_ll = target_ll.unsqueeze(0)
 
-                if False:
-                    for i in range(target_ll.size(2)):
-                        target_ll[:, :, i] += 1000.0 * (i+1)
-
                 root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll)
                 target_ll = th.einsum('...AsRnwC -> ...AsnwCR', target_ll)
                 root_target_diff = target_ll - root_ll
                 log_probs = root_target_diff
                 log_probs = log_probs.unsqueeze(-3)
 
-                use_no_mult = False
+                use_no_mult = True
 
                 accum_weights = th.ones((1, 1, 1, 1), device=root_ll.device)
                 if use_no_mult:
@@ -1325,51 +1325,64 @@ class RatSpn(nn.Module):
                         leaf_log_probs = leaf_log_probs + (child_ll * leaf_accum_weights)
                     leaf_log_probs = leaf_log_probs.repeat_interleave(self._leaf.cardinality, dim=-3)
                     leaf_log_probs = th.einsum('...nwsAR -> ...wsARn', leaf_log_probs)
+                    leaf_param_args = {
+                        'samples': samples,
+                        'verbose': verbose_on,
+                        'targets': leaf_log_probs,
+                        'step': step,
+                        'kl_bounds': leaf_kl_bounds,
+                    }
                     with th.no_grad():
                         if False:
-                            etas = self.natural_param_leaf_update_VIPS(
-                                samples=samples,
-                                eta_guess=None,
-                                verbose=verbose_on,
-                                targets=leaf_log_probs,
+                            res = self.natural_param_leaf_update_VIPS(
+                                **leaf_param_args,
                             )
                         else:
                             res = self.more_leaf_update(
-                                samples=samples,
                                 more_instances=more_instances,
-                                verbose=verbose_on,
-                                targets=leaf_log_probs,
-                                step=step,
+                                **leaf_param_args,
                             )
 
-                if step < 200:
+                if step < weight_update_start:
                     continue
-                log_probs = log_probs.mean(-5)
                 child_ll = child_ll.mean(0)
-
-                prod_layer = self.layer_index_to_obj(layer_index - 1)
-                # We pass the biased target LLs through the child product layer.
-                left_scope, right_scope = th.split(log_probs, log_probs.size(-5) // 2, dim=-5)
-                log_probs = th.cat((left_scope, right_scope), dim=-3)
-                log_probs = log_probs.squeeze(-5)
-                log_probs = th.einsum('...AwdoR -> ...owdAR', log_probs)
-                log_probs = prod_layer.forward(log_probs)
-                log_probs = th.einsum('...owdiR -> ...wdioR', log_probs)
-
-                # To complete the total-SPN-responsibility, we add the child product nodes' LLs and the
-                # log weights of this layer, both weighed by the accumulated weights
-                if layer_index == self.max_layer_index:
-                    log_weights = self.root_weights_split_by_rep
+                if use_no_mult:
+                    log_probs = log_probs.mean(-4)
+                    left_scope, right_scope = th.split(log_probs, log_probs.size(-2) // 2, dim=-2)
+                    left_scope = left_scope.unsqueeze(-5)
+                    right_scope = right_scope.unsqueeze(-6)
+                    log_probs = left_scope + right_scope
+                    log_probs = log_probs.flatten(1, 2)
+                    log_probs = th.einsum('...idwoR -> ...wdioR', log_probs)
                 else:
-                    log_weights = self.layer_index_to_obj(layer_index).weights
-                biased_prod_ll = prod_layer.forward(child_ll).unsqueeze(-2) + log_weights
-                biased_prod_ll = biased_prod_ll * accum_weights.unsqueeze(-3)
-                prod_ent = prod_layer.forward(sampled_node_entropies)
-                prod_ent = prod_ent.unsqueeze(-2) * accum_weights.unsqueeze(-3)
+                    log_probs = log_probs.mean(-5)
+                    prod_layer = self.layer_index_to_obj(layer_index - 1)
+                    # We pass the biased target LLs through the child product layer.
+                    left_scope, right_scope = th.split(log_probs, log_probs.size(-5) // 2, dim=-5)
+                    log_probs = th.cat((left_scope, right_scope), dim=-3)
+                    log_probs = log_probs.squeeze(-5)
+                    log_probs = th.einsum('...AwdoR -> ...owdAR', log_probs)
+                    log_probs = prod_layer.forward(log_probs)
+                    log_probs = th.einsum('...owdiR -> ...wdioR', log_probs)
 
-                log_probs = log_probs + biased_prod_ll + prod_ent
-                if True:
-                    self.reps_weight_update(layer_index, log_probs, weight_learners[layer_index])
+                    # To complete the total-SPN-responsibility, we add the child product nodes' LLs and the
+                    # log weights of this layer, both weighed by the accumulated weights
+                    if layer_index == self.max_layer_index:
+                        log_weights = self.root_weights_split_by_rep
+                    else:
+                        log_weights = self.layer_index_to_obj(layer_index).weights
+                    biased_prod_ll = prod_layer.forward(child_ll).unsqueeze(-2) + log_weights
+                    biased_prod_ll = biased_prod_ll * accum_weights.unsqueeze(-3)
+                    weighed_prod_ent = prod_entropies.unsqueeze(-2) * accum_weights.unsqueeze(-3)
+
+                    log_probs = log_probs + biased_prod_ll + weighed_prod_ent
+
+                if init_weight_kl_bound > 0.0:
+                    weight_param_args = {
+                        'targets': log_probs,
+                        'layer_index': layer_index,
+                    }
+                    self.reps_weight_update(reps_instances_of_layer=weight_learners[layer_index], **weight_param_args)
                 else:
                     new_weights = log_probs
                     if layer_index == self.max_layer_index:
