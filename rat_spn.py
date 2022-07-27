@@ -1187,6 +1187,69 @@ class RatSpn(nn.Module):
             accum_weights = th.einsum('wsioR -> wsiR', accum_weights)
         return log_probs, accum_weights
 
+    def vi_entropy_approx(self, sample_size=7, grad_thru_resp: bool = False,
+                          verbose: bool = False) -> Tuple[th.Tensor, Optional[Dict]]:
+        """
+        Args:
+            sample_size: Approximate the entropy with this many samples of the leaves.
+            grad_thru_resp: If True, entropy approximation can be backpropagated through.
+            verbose: Either a bool or a callable that returns bool and takes the current step as its only argument.
+                Is evaluated at the beginning of each step to determine if the functions make plots or return logs.
+
+        Returns:
+
+        """
+        [self.debug__set_weights_uniform(i) for i in self.sum_layer_indices]
+        debug = False
+        if debug:
+            self.debug__set_dist_params()
+            [self.debug__set_weights_dirac(i) for i in self.sum_layer_indices]
+        vips_logging = {}
+
+        layer_log = {}
+
+        ctx = self.sample(
+            mode='onehot' if grad_thru_resp else 'index', n=sample_size, layer_index=0, is_mpe=debug,
+            do_sample_postprocessing=False,
+            # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
+        )
+
+        leaf_ll = self.forward(
+            th.einsum('AnwFR -> nwFAR', ctx.sample), layer_index=0, x_needs_permutation=ctx.permutation_inverted
+        )
+        leaf_entropies = -leaf_ll.mean(dim=0)
+
+        ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
+        root_ll = self.forward(
+            th.einsum('AdnwFR -> AdRnwF', ctx.sample),
+            layer_index=self.max_layer_index, x_needs_permutation=ctx.permutation_inverted
+        )
+        root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll)
+
+        weighed_resp = - root_ll
+        weighed_resp = weighed_resp.unsqueeze(-3)
+
+        weighed_weight_ents = None
+        accum_weights = th.ones((1, 1, 1, 1), device=root_ll.device)
+        for i in reversed(self.sum_layer_indices):
+            layer = self.layer_index_to_obj(i)
+            layer_weight_ent = -th.sum(layer.weights * layer.weights.exp(), dim=-3)
+            layer_weight_ent = th.sum(layer_weight_ent * accum_weights, dim=-2)
+            if weighed_weight_ents is None:
+                weighed_weight_ents = layer_weight_ent
+            else:
+                weighed_weight_ents = th.repeat_interleave(weighed_weight_ents, 2, dim=1)
+                weighed_weight_ents = weighed_weight_ents + layer_weight_ent
+            weighed_resp, accum_weights = self.vips_sum_prod_pass(i, weighed_resp, accum_weights)
+
+        weighed_resp = th.einsum('AdnwsAR -> nwsAR', weighed_resp)
+        weighted_leaf_ll = leaf_ll * accum_weights
+        weighed_weight_ents = th.repeat_interleave(weighed_weight_ents, 2, dim=1).unsqueeze(-2)
+        entropy_approx = weighed_resp + weighted_leaf_ll + weighed_weight_ents
+
+        vips_logging.update({layer_index: layer_log})
+        return vips_logging
+
     def vips(self, target_dist_callback, steps, step_callback: Callable = None,
              sample_size=7, init_leaf_kl_bound=1e-2, init_weight_kl_bound=1e-2, weight_update_start=0,
              verbose: Union[bool, Callable] = False) -> Dict:
@@ -1605,7 +1668,7 @@ class RatSpn(nn.Module):
                 step_callback(step)
         return vips_logging
 
-    def vi_entropy_approx(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) \
+    def vi_entropy_approx_layerwise(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) \
             -> Tuple[th.Tensor, Optional[Dict]]:
         """
         Approximate the entropy of the root sum node via variational inference,
