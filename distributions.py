@@ -130,8 +130,20 @@ class RatNormal(Leaf):
             # This correction term assumes the input to be squashed already
             # correction = th.log(1 - x**2 + 1e-6)
 
-        d = dist.Normal(self.means, self.log_stds.exp(), validate_args=False)
-        x = d.log_prob(x)  # Shape: [n, w, d, oc, r]
+        if x.isnan().any():
+            means = self.means
+            log_std = self.log_stds
+            var = self.var
+            repeat = np.asarray(means.shape[-2:]) // np.asarray(x.shape[-2:])
+            x = x.repeat(*([1] * (x.dim()-2)), *repeat)
+            mask = ~x.isnan()
+            means = means.expand_as(x)
+            log_std = log_std.expand_as(x)
+            var = var.expand_as(x)
+            x[mask] = -((x[mask] - means[mask]) ** 2) / (2 * var[mask]) - log_std[mask] - math.log(math.sqrt(2 * math.pi))
+        else:
+            d = dist.Normal(self.means, self.log_stds.exp())
+            x = d.log_prob(x)  # Shape: [n, w, d, oc, r]
 
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
             x -= correction
