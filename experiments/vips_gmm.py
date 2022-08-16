@@ -303,7 +303,7 @@ if __name__ == "__main__":
                         help='The base directory where the directory containing the results will be saved to.')
     parser.add_argument('--no_resp_grad', action='store_true',
                         help="If True, approximation of responsibilities is done with grad disabled.")
-    parser.add_argument('--with_ent_loss', '-ent', action='store_true',
+    parser.add_argument('--entropy', '-ent', action='store_true',
                         help="If True, create a new SPN and train it to increase entropy only.")
     parser.add_argument('--vips', action='store_true',
                         help="If True, fit model to target dist using our flavor of VIPS.")
@@ -317,7 +317,7 @@ if __name__ == "__main__":
                         help='Initial KL bound on all sum weights.')
     args = parser.parse_args()
 
-    assert not (args.with_ent_loss and args.vips)
+    assert not (args.entropy and args.vips)
 
     for d in [args.results_dir]:
         if not os.path.exists(d):
@@ -409,10 +409,10 @@ if __name__ == "__main__":
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
         if args.make_gif:
-            if args.with_ent_loss:
+            if args.entropy:
                 fps = 5
-                gif_duration = 10  # seconds
-                n_steps = 3000 if args.no_resp_grad else 40000
+                gif_duration = args.gif_duration  # seconds
+                n_steps = args.steps
                 n_frames = fps * gif_duration
                 make_frame_every = int(n_steps / n_frames)
                 save_path = os.path.join(
@@ -434,7 +434,7 @@ if __name__ == "__main__":
                     args.results_dir, f"{args.exp_name}.gif"
                 )
         else:
-            n_steps = 50000
+            n_steps = args.steps
             make_frame_every = 10 # 5000
         print(f"Running for {n_steps} steps, making a frame every {make_frame_every} steps.")
 
@@ -451,7 +451,7 @@ if __name__ == "__main__":
             # return True
 
         def step_callback(step):
-            global t_start, losses
+            global t_start, losses, log
             if step % make_frame_every == 0:
                 with th.no_grad():
                     probs = model(grid_tensor)
@@ -493,13 +493,15 @@ if __name__ == "__main__":
                 weight_update_start=args.weight_update_start,
                 verbose=verbose_callback,
             )
-        elif args.with_ent_loss:
+        elif args.entropy:
+            # th.set_anomaly_enabled(True)
             for step in range(int(n_steps)):
-                ent, _ = model.vi_entropy_approx(
+                ent, log = model.vi_entropy_approx(
                     sample_size=args.ent_approx_sample_size,
                     grad_thru_resp=not args.no_resp_grad,
+                    verbose=True,
                 )
-                loss = -ent.mean() * 10.0
+                loss = -ent.mean()
                 losses.append(loss.item())
                 optimizer.zero_grad()
                 loss.backward()

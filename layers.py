@@ -599,7 +599,6 @@ class CrossProduct(AbstractLayer):
                 indices = th.einsum('...ij -> ...ji', indices)
                 indices = indices.reshape(*indices.shape[:-3], indices.shape[-3] * self.cardinality, indices.shape[-1])
             else:  # mode == 'onehot'
-                nr_nodes, n1, n2, w, d, oc, r = ctx.parent_indices.shape
                 indices = th.einsum('...ij -> ...ji', ctx.parent_indices).unsqueeze(-1).unsqueeze(-1)
                 indices = indices * self.one_hot_in_channel_mapping
                 # Shape [nr_nodes, *batch_dims, w, d, r, oc, 2, ic]

@@ -21,17 +21,6 @@ import more
 logger = logging.getLogger(__name__)
 
 
-def invert_permutation(p: th.Tensor):
-    """
-    The argument p is assumed to be some permutation of 0, 1, ..., len(p)-1. 
-    Returns an array s, where s[i] gives the index of i in p.
-    Taken from: https://stackoverflow.com/a/25535723, adapted to PyTorch.
-    """
-    s = th.empty(p.shape[0], dtype=p.dtype, device=p.device)
-    s[p] = th.arange(p.shape[0]).to(p.device)
-    return s
-
-
 @dataclass
 class RatSpnConfig:
     """
@@ -124,9 +113,6 @@ class RatSpn(nn.Module):
         # Initialize weights
         self._init_weights()
 
-        # Obtain permutation indices
-        self._make_random_repetition_permutation_indices()
-
         self.__max_layer_index = len(self._inner_layers) + 1
         self.num_layers = self.__max_layer_index + 1
 
@@ -149,65 +135,32 @@ class RatSpn(nn.Module):
             raise IndexError(f"layer_index must take a value between 0 and {self.max_layer_index}, "
                              f"but it was {layer_index}!")
 
-    def _make_random_repetition_permutation_indices(self):
-        """Create random permutation indices for each repetition."""
-        permutation = []
-        inv_permutation = []
-        for r in range(self.config.R):
-            permutation.append(th.tensor(np.random.permutation(self.config.F)))
-            inv_permutation.append(invert_permutation(permutation[-1]))
-        # self.permutation: th.Tensor = th.stack(self.permutation, dim=-1)
-        # self.inv_permutation: th.Tensor = th.stack(self.inv_permutation, dim=-1)
-        self.permutation = nn.Parameter(th.stack(permutation, dim=-1), requires_grad=False)
-        self.inv_permutation = nn.Parameter(th.stack(inv_permutation, dim=-1), requires_grad=False)
-
-    def _randomize(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: th.Tensor, layer_index: int = None) -> th.Tensor:
         """
-        Randomize the input at each repetition according to `self.permutation`.
-
-        Args:
-            x: Input.
-
-        Returns:
-            th.Tensor: Randomized input along feature axis. Each repetition has its own permutation.
-        """
-        assert x.size(-1) == 1 or x.size(-1) == self.config.R
-        if x.size(-1) == 1:
-            x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
-        perm_indices = self.permutation.expand_as(x)
-        x = th.gather(x, dim=-2, index=perm_indices)
-
-        return x
-
-    def forward(self, x: th.Tensor, layer_index: int = None, x_needs_permutation: bool = True) -> th.Tensor:
-        """
-        Forward pass through RatSpn. Computes the conditional log-likelihood P(X | C).
+        Forward pass through RatSpn.
 
         Args:
             x:
-                Input of shape [*batch_dims, weight_sets, self.config.F,
+                Input of shape [*batch_dims, weight_sets, self.config.F, output_channels,
                                 self.config.R or 1 if no rep is to be specified].
                     batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
                     weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
+                    output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
             layer_index: Evaluate log-likelihood of x at layer
-            x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
-                permuted in the forward pass.
         Returns:
-            th.Tensor: Conditional log-likelihood P(X | C) of the input.
+            th.Tensor: Log-likelihood of the input.
         """
         if layer_index is None:
             layer_index = self.max_layer_index
 
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
+        assert x.dim() >= 5, "Input needs at least 5 dims. Did you read the docstring of RatSpn.forward()?"
+        assert x.size(-3) == self.config.F and (x.size(-2) == 1 or x.size(-2) == self.config.I) \
+            and (x.size(-1) == 1 or x.size(-1) == self.config.R), \
+            f"Shape of last three dims is {tuple(x.shape[3:])} but must be ({self.config.F}, 1 or {self.config.I}, " \
+            f"1 or {self.config.R})"
 
-        if x.size(-1) == self.config.F:
-            # x has no repetition dimension
-            x = x.unsqueeze(-1)
-
-        if x_needs_permutation:
-            # Apply feature randomization for each repetition
-            x = self._randomize(x)
+        if x.size(-1) == 1:
+            x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
 
         # Apply leaf distributions
         x = self._leaf(x)
@@ -368,7 +321,7 @@ class RatSpn(nn.Module):
             do_sample_postprocessing: If True, samples will be given to sample_postprocessing to fill in evidence,
                 split by scope, be squashed, etc.
             post_processing_kwargs: Keyword args to the postprocessing.
-                split_by_scope (bool), invert_permutation (bool)
+                split_by_scope (bool)
 
         Returns:
             Sample with
@@ -494,7 +447,6 @@ class RatSpn(nn.Module):
 
     def sample_postprocessing(
             self, ctx: Sample, evidence: th.Tensor = None, split_by_scope: bool = False,
-            invert_permutation: bool = True,
     ) -> Sample:
         """
         Apply postprocessing to samples.
@@ -509,7 +461,6 @@ class RatSpn(nn.Module):
                 cover the entire feature set f, but rather a scope of it. split_by_scope allows makes the
                 scope of a single node's samples visible in the entire Spn's scope, as features in f not
                 covered by this node are filled with NaNs.
-            invert_permutation: Invert permutation of data features.
 
         Returns:
             A modified Sample. See doc string of sample() for shape information.
@@ -531,7 +482,7 @@ class RatSpn(nn.Module):
             ctx.is_split_by_scope = True
 
         # Each repetition has its own inverted permutation which we now apply to the samples.
-        if invert_permutation:
+        if False:
             assert not ctx.permutation_inverted, "Permutations are already inverted on the samples!"
             if ctx.sampling_mode == 'index':
                 if ctx.repetition_indices is not None:
@@ -681,7 +632,7 @@ class RatSpn(nn.Module):
             samples = ctx.sample
             # We sampled all ic nodes of each repetition in the child layer
 
-            child_ll = self.forward(x=samples, layer_index=layer_index-1, x_needs_permutation=False)
+            child_ll = self.forward(x=samples.unsqueeze(-2), layer_index=layer_index-1)
             child_ll = child_ll.mean(dim=1)
 
         ic, w, d, _, r = child_ll.shape
@@ -1048,7 +999,7 @@ class RatSpn(nn.Module):
                 # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
                 child_ll = self.forward(
                     x=th.einsum('InwFR -> nwFIR', ctx.sample),
-                    layer_index=layer_index, x_needs_permutation=False
+                    layer_index=layer_index
                 )
             # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
             node_entropies = -child_ll.mean(dim=0)
@@ -1082,7 +1033,7 @@ class RatSpn(nn.Module):
 
         return node_entropies, logging
 
-    def log_dict_from_metric(self, metrics: Dict, rep_dim=-1, batch_dim=0):
+    def log_dict_from_metric(self, metrics: Dict, rep_dim=-1, batch_dim: Optional[int] = 0):
         log_dict = {}
         for rep in range(list(metrics.values())[0].size(rep_dim)):
             rep_key = f"rep{rep}"
@@ -1095,8 +1046,12 @@ class RatSpn(nn.Module):
                     f"{rep_key}/{key}/min": metric.index_select(rep_dim, rep).min().item(),
                     f"{rep_key}/{key}/max": metric.index_select(rep_dim, rep).max().item(),
                     f"{rep_key}/{key}/mean": metric.index_select(rep_dim, rep).mean().item(),
-                    f"{rep_key}/{key}/std": metric.index_select(rep_dim, rep).std(dim=batch_dim).mean().item(),
                 })
+                if batch_dim is not None:
+                    log_dict.update({
+                        f"{rep_key}/{key}/std": metric.index_select(rep_dim, rep).std(dim=batch_dim).mean().item(),
+                    })
+
         return log_dict
 
     @staticmethod
@@ -1133,6 +1088,7 @@ class RatSpn(nn.Module):
         right_scope = th.einsum('...AdnwslroR -> ...AdnwsroR', right_scope)
         log_probs = th.cat((left_scope, right_scope), dim=-4)
         log_probs = th.einsum('...AdnwsioR -> ...AdnwsiR', log_probs)
+        # log_probs = th.mean(log_probs, dim=-2)
 
         accum_weights = resh_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
         # resh_weights = th.einsum('wsioR -> wsiR', resh_weights)
@@ -1140,6 +1096,7 @@ class RatSpn(nn.Module):
         right_weights = th.einsum('wslroR -> wsroR', accum_weights)
         accum_weights = th.cat((left_weights, right_weights), dim=1)
         accum_weights = th.einsum('wsioR -> wsiR', accum_weights)
+        # accum_weights = th.mean(accum_weights, dim=-2)
         return log_probs, accum_weights
 
     def vips_sum_prod_pass_no_mult(self, layer_index: int, log_probs: th.Tensor, accum_weights: th.Tensor):
@@ -1199,32 +1156,30 @@ class RatSpn(nn.Module):
         Returns:
 
         """
-        [self.debug__set_weights_uniform(i) for i in self.sum_layer_indices]
         debug = False
         if debug:
+            [self.debug__set_weights_uniform(i) for i in self.sum_layer_indices]
             self.debug__set_dist_params()
             [self.debug__set_weights_dirac(i) for i in self.sum_layer_indices]
-        vips_logging = {}
-
-        layer_log = {}
 
         ctx = self.sample(
             mode='onehot' if grad_thru_resp else 'index', n=sample_size, layer_index=0, is_mpe=debug,
             do_sample_postprocessing=False,
-            # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
         )
 
+        samples = th.einsum('AnwFR -> nwFAR', ctx.sample)
         leaf_ll = self.forward(
-            th.einsum('AnwFR -> nwFAR', ctx.sample), layer_index=0, x_needs_permutation=ctx.permutation_inverted
-        )
-        leaf_entropies = -leaf_ll.mean(dim=0)
+            samples, layer_index=0,
+        ).mean(0, keepdim=True)
+        leaf_entropies = -leaf_ll
 
-        ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
-        root_ll = self.forward(
-            th.einsum('AdnwFR -> AdRnwF', ctx.sample),
-            layer_index=self.max_layer_index, x_needs_permutation=ctx.permutation_inverted
-        )
-        root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll)
+        with th.set_grad_enabled(grad_thru_resp):
+            ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
+            root_ll = self.forward(
+                th.einsum('AdnwFR -> AdRnwF', ctx.sample),
+                layer_index=self.max_layer_index
+            )
+            root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll).mean(2, keepdim=True)
 
         weighed_resp = - root_ll
         weighed_resp = weighed_resp.unsqueeze(-3)
@@ -1234,6 +1189,7 @@ class RatSpn(nn.Module):
         for i in reversed(self.sum_layer_indices):
             layer = self.layer_index_to_obj(i)
             layer_weight_ent = -th.sum(layer.weights * layer.weights.exp(), dim=-3)
+            # layer_weight_ent = th.mean(layer_weight_ent * accum_weights, dim=-2)
             layer_weight_ent = th.sum(layer_weight_ent * accum_weights, dim=-2)
             if weighed_weight_ents is None:
                 weighed_weight_ents = layer_weight_ent
@@ -1243,11 +1199,100 @@ class RatSpn(nn.Module):
             weighed_resp, accum_weights = self.vips_sum_prod_pass(i, weighed_resp, accum_weights)
 
         weighed_resp = th.einsum('AdnwsAR -> nwsAR', weighed_resp)
-        weighted_leaf_ll = leaf_ll * accum_weights
+        with th.set_grad_enabled(grad_thru_resp):
+            weighed_resp = weighed_resp + leaf_ll * accum_weights
         weighed_weight_ents = th.repeat_interleave(weighed_weight_ents, 2, dim=1).unsqueeze(-2)
-        entropy_approx = weighed_resp + weighted_leaf_ll + weighed_weight_ents
+        weighed_leaf_ents = leaf_entropies * accum_weights
+        entropy_approx = weighed_resp + weighed_weight_ents + weighed_leaf_ents
+        entropy_approx = th.einsum('nwsAR -> nw', entropy_approx)
+        logging = {}
+        if verbose:
+            metrics = {
+                'weight_entropy': weighed_weight_ents.detach(),
+                'weighted_child_ent': weighed_leaf_ents.detach(),
+                'weighted_resp': weighed_resp.detach(),
+            }
+            logging = self.log_dict_from_metric(metrics)
+        return entropy_approx, logging
 
-        vips_logging.update({layer_index: layer_log})
+    def vi_entropy_approx_bottom_up(self, sample_size=7, grad_thru_resp: bool = False,
+                                    verbose: bool = False) -> Tuple[th.Tensor, Optional[Dict]]:
+        debug = False
+        if debug:
+            self.debug__set_dist_params()
+
+        ctx = self.sample(
+            mode='onehot' if grad_thru_resp else 'index', n=sample_size, layer_index=0, is_mpe=debug,
+            do_sample_postprocessing=False,
+        )
+
+        leaf_ll = self.forward(
+            th.einsum('AnwFR -> nwFAR', ctx.sample), layer_index=0
+        )
+        leaf_ll = leaf_ll.mean(0)
+        leaf_entropies = -leaf_ll
+
+        weighed_resp = leaf_ll
+        weighed_resp = weighed_resp.unsqueeze(0)  # Prepare the scope dim
+
+        accum_weights = th.ones((1, 1, 2, 1, 1))  # [s, w, d, o, R]
+        for i in self.sum_layer_indices:
+            if i == self.max_layer_index:
+                log_weights = self.root_weights_split_by_rep
+            else:
+                log_weights = self.layer_index_to_obj(i).weights
+            # current_weights = current_weights.repeat_interleave(ctx.scopes // d, dim=1)
+            resh_log_weights = self.shape_like_crossprod_input_mapping(log_weights)
+            resh_weights = resh_log_weights.exp()
+
+            weighed_resp = weighed_resp.unsqueeze(-2)
+            weighed_resp_ls, weighed_resp_rs = self.split_shuffled_scopes(weighed_resp, -4)
+            weighed_resp_ls = weighed_resp_ls.unsqueeze(-3)
+            weighed_resp_rs = weighed_resp_rs.unsqueeze(-4)
+
+            accum_weights = accum_weights.unsqueeze(-2)
+            accum_ls, accum_rs = self.split_shuffled_scopes(accum_weights, -4)
+            accum_ls = accum_ls.unsqueeze(-3)
+            accum_rs = accum_rs.unsqueeze(-4)
+
+            bias_ls = accum_ls * resh_log_weights
+            bias_rs = accum_rs * resh_log_weights
+
+            # Unsqueeze for n dim
+            weighed_resp_ls = weighed_resp_ls + bias_ls
+            weighed_resp_rs = weighed_resp_rs + bias_rs
+
+            weighed_resp_ls = weighed_resp_ls * resh_weights
+            weighed_resp_rs = weighed_resp_rs * resh_weights
+
+            weighed_resp_ls = th.einsum('swdlroR -> swdloR', weighed_resp_ls)
+            weighed_resp_rs = th.einsum('swdlroR -> swdroR', weighed_resp_rs)
+            weighed_resp = th.cat((weighed_resp_ls, weighed_resp_rs), dim=0)
+            weighed_resp = th.einsum('swdioR -> swdoR', weighed_resp)
+
+            accum_ls = accum_ls * resh_weights
+            accum_rs = accum_rs * resh_weights
+
+            accum_ls = th.einsum('swdlroR -> swdloR', accum_ls)
+            accum_rs = th.einsum('swdlroR -> swdroR', accum_rs)
+            accum_weights = th.cat((accum_ls, accum_rs), dim=0)
+            accum_weights = th.einsum('swdioR -> swdoR', accum_weights)
+
+        assert weighed_resp.size(-3) == 1
+        weighed_resp = th.einsum('nswdCR -> nswCR', weighed_resp)
+
+        ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
+        root_ll = self.forward(
+            th.einsum('AdnwFR -> AdRnwF', ctx.sample),
+            layer_index=self.max_layer_index
+        )
+        root_ll = th.einsum('AsRnwC -> AsnwCR', root_ll)
+
+
+        accum_weights = th.einsum('ABsnwdCR -> ABsnwCR', accum_weights.unsqueeze(3))
+        log_probs = - root_ll * accum_weights + log_probs
+
+        layer_log = {}
         return vips_logging
 
     def vips(self, target_dist_callback, steps, step_callback: Callable = None,
@@ -1301,10 +1346,9 @@ class RatSpn(nn.Module):
                 ctx = self.sample(
                     mode='index', n=sample_size, layer_index=layer_index-2, is_mpe=debug,
                     do_sample_postprocessing=False,
-                    # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
                 )
 
-                sampled_self_ll = self.forward(ctx.sample, layer_index=layer_index-2, x_needs_permutation=False)
+                sampled_self_ll = self.forward(ctx.sample, layer_index=layer_index-2)
                 child_ll = th.einsum('AnwdAR -> nwdAR', sampled_self_ll)
                 sampled_self_ll = sampled_self_ll.mean(1)
                 if layer_index == 2:
@@ -1339,7 +1383,6 @@ class RatSpn(nn.Module):
                 ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
                 root_ll = self.forward(th.einsum('AdnwFR -> AdRnwF', ctx.sample),
                                        layer_index=self.max_layer_index)
-                # ctx = self.sample_postprocessing(ctx=ctx, invert_permutation=True)
                 samples = th.einsum('AdnwFR -> AdRnwF', ctx.sample)
                 if target_dist_callback is None:
                     target_ll = th.zeros_like(root_ll)
@@ -1497,10 +1540,9 @@ class RatSpn(nn.Module):
                 ctx = self.sample(
                     mode='index', n=sample_size, layer_index=layer_index-2, is_mpe=debug,
                     do_sample_postprocessing=False,
-                    # post_processing_kwargs={'split_by_scope': True, 'invert_permutation': False},
                 )
                 # We can get the self_ll simply by permuting the samples to line up with the dist parameters
-                sampled_self_ll = self.forward(ctx.sample, layer_index=layer_index-2, x_needs_permutation=False)
+                sampled_self_ll = self.forward(ctx.sample, layer_index=layer_index-2)
                 child_ll = th.einsum('AnwdAR -> nwdAR', sampled_self_ll)
                 sampled_self_ll = sampled_self_ll.mean(1)
                 if layer_index == 2:
@@ -1608,9 +1650,9 @@ class RatSpn(nn.Module):
                 assert log_probs.size(-3) == 1
                 log_probs = th.einsum('ABsnwdCR -> ABsnwCR', log_probs)
 
-                ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True, invert_permutation=False)
+                ctx = self.sample_postprocessing(ctx=ctx, split_by_scope=True)
                 samples = th.einsum('AdnwFR -> AdRnwF', ctx.sample)
-                root_ll = self.forward(samples, layer_index=self.max_layer_index, x_needs_permutation=False)
+                root_ll = self.forward(samples, layer_index=self.max_layer_index)
                 root_ll = root_ll.unsqueeze(1)
                 if target_dist_callback is None:
                     target_ll = th.zeros_like(root_ll)
@@ -1689,6 +1731,91 @@ class RatSpn(nn.Module):
             )
             logging.update({layer_index: layer_log})
         return child_entropies.flatten(), logging
+
+    def monte_carlo_ent_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
+        if layer_index is None:
+            layer_index = self.max_layer_index
+
+        sample_args = {
+            'n': sample_size, 'layer_index': layer_index, 'do_sample_postprocessing': False
+        }
+        if sample_with_grad:
+            samples = self.sample(mode='onehot', **sample_args)
+        else:
+            with th.no_grad():
+                samples = self.sample(mode='index', **sample_args)
+
+        log_probs = self.forward(th.einsum('o...FR -> ...FoR', samples.sample), layer_index=layer_index)
+        return -log_probs.mean()
+
+    def huber_entropy_lb(self, layer_index: int = None, verbose=True):
+        """
+        Calculate the entropy lower bound of the SPN as in Huber '08.
+
+        Args:
+            layer_index: Compute the entropy LB for this layer. Can take values from 1 to self.max_layer_index+1.
+                self.max_layer_index+1 is the sampling root.
+
+        Returns:
+
+        """
+        logging = {}
+        entropy_lb = None
+        if layer_index is None:
+            layer_index = self.max_layer_index
+
+        means = self.means
+        var = self.var
+        var = var.unsqueeze(2) + var.unsqueeze(3)
+        std = th.sqrt(var)
+        d = dist.Normal(means.unsqueeze(2).expand_as(std), std)
+        log_probs = d.log_prob(means.unsqueeze(3).expand_as(std))
+        log_probs = th.einsum('wFijR -> iwFjR', log_probs)
+        log_probs = self._leaf.prod(log_probs)
+        for i in range(1, layer_index+1):
+            if i % 2 == 1 and i != self.max_layer_index+1:
+                # It is a CrossProduct layer
+                # Calculate the log_probs of the product nodes among themselves
+                left_scope, right_scope = self.split_shuffled_scopes(log_probs, 2)
+                _, w, d, o, R = left_scope.shape  # first dim is o as well
+                left_scope = left_scope.unsqueeze(0).unsqueeze(-3)
+                right_scope = right_scope.unsqueeze(1).unsqueeze(-2)
+                if i == self.max_layer_index-1:
+                    left_scope = left_scope.unsqueeze(-2)
+                    right_scope = right_scope.unsqueeze(-1)
+                    log_probs = left_scope + right_scope
+                    log_probs = th.einsum('ab...cdij -> jab...icd', log_probs)
+                    log_probs = log_probs.reshape(o**2 * R, w, d, o**2 * R, 1)
+                else:
+                    log_probs = left_scope + right_scope
+                    log_probs = log_probs.view(o**2, w, d, o**2, R)
+            else:
+                # Add log weights to log probs and sum in linear space
+                if i <= self.max_layer_index:
+                    weights = self.layer_index_to_obj(i).weights
+                else:
+                    weights = self._sampling_root.weights
+
+                log_probs = log_probs.unsqueeze(-2) + weights.unsqueeze(0)
+                log_probs = log_probs.logsumexp(-3)
+                log_probs = th.einsum('iwdkR -> wdikR', log_probs)
+
+                if verbose or i == layer_index:
+                    entropy_lb = - th.sum(weights.exp() * log_probs, dim=-3)
+                if i < layer_index:
+                    log_probs = log_probs.unsqueeze(-2) + weights.unsqueeze(-3)
+                    log_probs = log_probs.logsumexp(2)
+                    log_probs = th.einsum('wdklR -> kwdlR', log_probs)
+
+                if verbose:
+                    weight_entropy = - th.sum(weights * weights.exp(), dim=2).unsqueeze(0)
+                    metrics = {
+                        'weight_entropy': weight_entropy.detach(),
+                        'huber_entropy_LB': entropy_lb.detach(),
+                    }
+                    logging[i] = self.log_dict_from_metric(metrics, batch_dim=None)
+
+        return entropy_lb, logging
 
     def consolidate_weights(self):
         """
@@ -1890,6 +2017,10 @@ class RatSpn(nn.Module):
     def log_stds(self, log_stds: th.Tensor):
         self._leaf.base_leaf.log_stds = log_stds
 
+    @property
+    def var(self):
+        return self._leaf.base_leaf.var
+
     def debug__set_root_weights_dirac(self):
         self.debug__set_weights_dirac(self.max_layer_index)
 
@@ -1916,23 +2047,21 @@ class RatSpn(nn.Module):
             del layer.weight_param
         layer.weight_param = weights
 
-    def debug__set_dist_params(self):
+    def debug__set_dist_params(self, min_mean = -100.0, max_mean = 100.0):
         """
             Set the dist parameters for debugging purposes.
             Std is set to a very low value.
         """
-        min_mean = -100.0
-        max_mean = 100.0
-        means = th.arange(min_mean, max_mean, (max_mean - min_mean) / self.config.I, device=self.device).unsqueeze(-1)
-        means = means.expand_as(self._leaf.base_leaf.means)
-        log_stds = self._leaf.base_leaf.stds.data.mul(0).add(3e-5).log()
-        if isinstance(self._leaf.base_leaf.means, nn.Parameter):
+        means = th.arange(min_mean, max_mean, (max_mean - min_mean) / self._leaf.base_leaf.means.numel(), device=self.device)
+        means = means.reshape_as(self._leaf.base_leaf.means)
+        log_stds = self._leaf.base_leaf.log_stds * 0.0
+        if isinstance(self._leaf.base_leaf.mean_param, nn.Parameter):
             means = nn.Parameter(means)
             log_stds = nn.Parameter(log_stds)
             del self._leaf.base_leaf.mean_param
-            del self._leaf.base_leaf.std_param
+            del self._leaf.base_leaf.log_std_param
         self._leaf.base_leaf.mean_param = means
-        self._leaf.base_leaf.std_param = log_stds
+        self._leaf.base_leaf.log_std_param = log_stds
 
     def set_all_consolidated_weights(self):
         for i in self.sum_layer_indices:

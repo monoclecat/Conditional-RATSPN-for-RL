@@ -47,6 +47,8 @@ class RatNormal(Leaf):
 
         # Create gaussian means and stds
         self.mean_param = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
+        self.in_features = in_features
+        self.num_repetitions = num_repetitions
 
         self._tanh_squash = tanh_squash
         self._no_tanh_log_prob_correction = no_tanh_log_prob_correction
@@ -65,6 +67,28 @@ class RatNormal(Leaf):
         self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
 
         self._dist_params_are_bounded = False
+
+        # Create random permutation indices for each repetition.
+        permutation = []
+        inv_permutation = []
+        for r in range(self.num_repetitions):
+            permutation.append(th.tensor(np.random.permutation(self.in_features)))
+            inv_permutation.append(self.invert_permutation(permutation[-1]))
+        # self.permutation: th.Tensor = th.stack(self.permutation, dim=-1)
+        # self.inv_permutation: th.Tensor = th.stack(self.inv_permutation, dim=-1)
+        self.permutation = nn.Parameter(th.stack(permutation, dim=-1).unsqueeze(-2), requires_grad=False)
+        self.inv_permutation = nn.Parameter(th.stack(inv_permutation, dim=-1).unsqueeze(-2), requires_grad=False)
+
+    @staticmethod
+    def invert_permutation(p: th.Tensor):
+        """
+        The argument p is assumed to be some permutation of 0, 1, ..., len(p)-1.
+        Returns an array s, where s[i] gives the index of i in p.
+        Taken from: https://stackoverflow.com/a/25535723, adapted to PyTorch.
+        """
+        s = th.empty(p.shape[0], dtype=p.dtype, device=p.device)
+        s[p] = th.arange(p.shape[0]).to(p.device)
+        return s
 
     def bounded_means(self, means: th.Tensor = None):
         if means is None:
@@ -115,13 +139,30 @@ class RatNormal(Leaf):
     def stds(self):
         return self.log_stds.exp()
 
+    @property
+    def var(self):
+        return self.stds ** 2
+
     def set_no_tanh_log_prob_correction(self):
         self._no_tanh_log_prob_correction = False
 
     def forward(self, x):
-        if x.shape[-4:] != self.means.shape:
-            # Create extra output-channel dimension
-            x = x.unsqueeze(-2)
+        """
+        Forward pass through the leaf layer.
+
+        Args:
+            x:
+                Input of shape
+                    [*batch_dims, weight_sets, self.config.F, output_channels, self.config.R]
+                    batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
+                    weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
+                    output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
+            layer_index: Evaluate log-likelihood of x at layer
+        Returns:
+            th.Tensor: Log-likelihood of the input.
+        """
+        perm_indices = self.permutation.expand_as(x)
+        x = th.gather(x, dim=-3, index=perm_indices)
 
         correction = None
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
@@ -159,6 +200,9 @@ class RatNormal(Leaf):
         for each input shall be used.
         """
         means, stds = self.means, self.stds
+        inv_permutation = self.inv_permutation.expand_as(means)
+        means = th.gather(means, dim=-3, index=inv_permutation)
+        stds = th.gather(stds, dim=-3, index=inv_permutation)
         selected_means, selected_stds, rep_ind = None, None, None
 
         if ctx.is_root:
@@ -178,13 +222,11 @@ class RatNormal(Leaf):
             # Select means and std in the output_channel dimension
             par_ind = ctx.parent_indices.unsqueeze(-2)
             selected_means = th.gather(selected_means, dim=-2, index=par_ind).squeeze(-2)
-            selected_means = selected_means.squeeze(-1)
             if not ctx.is_mpe:
                 selected_stds = stds.expand(*ctx.parent_indices.shape[:-3], *stds.shape)
                 if ctx.repetition_indices is not None:
                     selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind)
                 selected_stds = th.gather(selected_stds, dim=-2, index=par_ind).squeeze(-2)
-                selected_stds = selected_stds.squeeze(-1)
 
         else:  # mode == 'onehot'
             # ctx.parent_indices shape [nr_nodes, *batch_dims, w, f, oc, r]
@@ -195,6 +237,7 @@ class RatNormal(Leaf):
             if not ctx.has_rep_dim:
                 # Only one repetition is selected, remove repetition dim of parameters
                 selected_means = selected_means.sum(-1)
+                selected_means = selected_means.unsqueeze(-1)
 
             if not ctx.is_mpe:
                 selected_stds = stds * ctx.parent_indices
@@ -202,6 +245,7 @@ class RatNormal(Leaf):
                 if not ctx.has_rep_dim:
                     # Only one repetition is selected, remove repetition dim of parameters
                     selected_stds = selected_stds.sum(-1)
+                    selected_stds = selected_stds.unsqueeze(-1)
 
         if ctx.is_mpe:
             samples = selected_means
