@@ -99,16 +99,11 @@ if __name__ == "__main__":
                        f"_seed{seed}" \
                        f"_{n_steps}steps" \
                        f"_{args.features}feat"
-        save_path = os.path.join(args.results_dir, f"{exp_name}")
-        experiment_nr = 0
-        while os.path.exists(save_path):
-            experiment_nr += 1
-            save_path = os.path.join(args.results_dir, f"{exp_name}__{experiment_nr}")
-        os.makedirs(save_path, exist_ok=False)
+        file_name_base = non_existing_folder_name(args.results_dir, exp_name)
+        save_path = os.path.join(args.results_dir, file_name_base)
         model_save_path = os.path.join(save_path, "models")
         os.makedirs(model_save_path, exist_ok=False)
-        file_name_base = f"{exp_name}__{experiment_nr}"
-        print(f"Running for {n_steps} steps, saving model every {args.log_interval} steps.")
+        print(f"Running for {n_steps} steps, saving model every {args.log_interval} steps in {model_save_path}.")
 
         def bookmark():
             pass

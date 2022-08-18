@@ -2,10 +2,27 @@
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Dict, Type, List, Union, Optional, Tuple
+import os
 
 import numpy as np
 import torch as th
 from torch import nn
+
+
+def non_existing_folder_name(base_dir: str, folder_name: str, create_path: bool = True) -> str:
+    """
+    Appends a number to folder_name if the path base_dir/folder_name already exists.
+    The number is incremented until the path doesn't exist.
+    The path can optionally be created.
+    """
+    new_folder_name = folder_name
+    nr = 0
+    while os.path.exists(os.path.join(base_dir, new_folder_name)):
+        nr += 1
+        new_folder_name = f"{folder_name}__{nr}"
+    if create_path:
+        os.makedirs(os.path.join(base_dir, new_folder_name), exist_ok=False)
+    return new_folder_name
 
 
 def flat_index_to_tensor_index(index: int, tensor_shape: th.Size):

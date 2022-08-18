@@ -19,6 +19,7 @@ from distributions import RatNormal
 from cspn import CSPN, CspnConfig, print_cspn_params
 from rat_spn import RatSpn, RatSpnConfig
 from experiments.train_mnist import count_params
+from utils import non_existing_folder_name
 
 
 def time_delta(t_delta: float) -> str:
@@ -381,13 +382,10 @@ if __name__ == "__main__":
     if args.model_path:
         assert os.path.exists(args.model_path), f"The model_path doesn't exist! {args.model_path}"
 
-    results_dir = os.path.join(args.results_dir, f"results_{args.exp_name}")
-    model_dir = os.path.join(results_dir, "models")
-    sample_dir = os.path.join(results_dir, "samples")
-
-    for d in [results_dir, model_dir, sample_dir, args.dataset_dir]:
-        if not os.path.exists(d):
-            os.makedirs(d)
+    results_dir = os.path.join(args.results_dir, non_existing_folder_name(args.results_dir, f"results_{args.exp_name}"))
+    model_dir = os.path.join(results_dir, non_existing_folder_name(results_dir, "models"))
+    sample_dir = os.path.join(results_dir, non_existing_folder_name(results_dir, "samples"))
+    os.makedirs(args.dataset_dir, exist_ok=True)
 
     if args.device == "cpu":
         device = th.device("cpu")

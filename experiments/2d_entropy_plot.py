@@ -51,11 +51,7 @@ if __name__ == "__main__":
     grid = grid.reshape(-1, 2)
     grid_tensor = th.as_tensor(grid, device=args.device, dtype=th.float)
 
-    save_path = os.path.join(args.dir, f"{dir_name}")
-    save_nr = 1
-    while os.path.exists(save_path):
-        save_path = os.path.join(args.dir, f"{dir_name}__{save_nr}")
-        save_nr += 1
+    save_path = os.path.join(args.results_dir, non_existing_folder_name(args.results_dir, dir_name))
 
     frames = []
     fps = 0
