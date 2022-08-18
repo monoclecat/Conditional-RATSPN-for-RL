@@ -1764,23 +1764,32 @@ class RatSpn(nn.Module):
         if layer_index is None:
             layer_index = self.max_layer_index
 
-        means = self.means
-        var = self.var
-        var = var.unsqueeze(2) + var.unsqueeze(3)
+        # Distribution layer of leaf layer
+        leaf = self._leaf.base_leaf
+        means = leaf.inv_permutation_means
+        var = leaf.inv_permutation_log_stds.exp() ** 2
+        var = var.unsqueeze(2).unsqueeze(-2) + var.unsqueeze(3).unsqueeze(-1)
         std = th.sqrt(var)
-        d = dist.Normal(means.unsqueeze(2).expand_as(std), std)
-        log_probs = d.log_prob(means.unsqueeze(3).expand_as(std))
-        log_probs = th.einsum('wFijR -> iwFjR', log_probs)
-        log_probs = self._leaf.prod(log_probs)
+        gauss = dist.Normal(means.unsqueeze(2).unsqueeze(-2).expand_as(std), std)
+        log_probs = gauss.log_prob(means.unsqueeze(3).unsqueeze(-1).expand_as(std))
+        permutation = leaf.permutation.unsqueeze(-2).unsqueeze(-2).expand_as(log_probs)
+        log_probs = th.gather(log_probs, dim=1, index=permutation)
+
+        # Product layer of leaf layer
+        w, F, o1, o2, r1, r2 = log_probs.shape
+        d_out = F // self._leaf.prod.cardinality
+        log_probs = log_probs.view(w, d_out, self._leaf.prod.cardinality, o1, o2, r1, r2)
+        log_probs = log_probs.sum(2)
+
         for i in range(1, layer_index+1):
             if i % 2 == 1 and i != self.max_layer_index+1:
                 # It is a CrossProduct layer
                 # Calculate the log_probs of the product nodes among themselves
-                left_scope, right_scope = self.split_shuffled_scopes(log_probs, 2)
-                _, w, d, o, R = left_scope.shape  # first dim is o as well
-                left_scope = left_scope.unsqueeze(0).unsqueeze(-3)
-                right_scope = right_scope.unsqueeze(1).unsqueeze(-2)
-                if i == self.max_layer_index-1:
+                left_scope, right_scope = self.split_shuffled_scopes(log_probs, 1)
+                w, d, o, _, R, _ = left_scope.shape  # first dim is o as well
+                left_scope = left_scope.unsqueeze(2).unsqueeze(-4)
+                right_scope = right_scope.unsqueeze(3).unsqueeze(-3)
+                if i == self.max_layer_index-1 and False:
                     left_scope = left_scope.unsqueeze(-2)
                     right_scope = right_scope.unsqueeze(-1)
                     log_probs = left_scope + right_scope
@@ -1788,14 +1797,37 @@ class RatSpn(nn.Module):
                     log_probs = log_probs.reshape(o**2 * R, w, d, o**2 * R, 1)
                 else:
                     log_probs = left_scope + right_scope
-                    log_probs = log_probs.view(o**2, w, d, o**2, R)
+                    log_probs = log_probs.view(w, d, o**2, o**2, R, R)
             else:
                 # Add log weights to log probs and sum in linear space
-                if i <= self.max_layer_index:
+                if i < self.max_layer_index:
                     weights = self.layer_index_to_obj(i).weights
+                elif i == self.max_layer_index:
+                    weights = self.root_weights_split_by_rep
                 else:
                     weights = self._sampling_root.weights
 
+                # weights = weights.unsqueeze(2).unsqueeze(-3).unsqueeze(-2) + weights.unsqueeze(3).unsqueeze(-2).unsqueeze(-1)
+                # log_probs = log_probs.unsqueeze(-3).unsqueeze(-3) + weights
+                # log_probs = log_probs.logsumexp(2).logsumexp(2)
+                log_probs = log_probs.unsqueeze(-3) + weights.unsqueeze(2).unsqueeze(-2)
+                # We don't logsumexp over the unsqueezed dims
+                log_probs = log_probs.logsumexp(3)
+                if i == self.max_layer_index:
+                    log_probs = log_probs.logsumexp(-1)
+
+                if verbose or i == layer_index:
+                    if i < self.max_layer_index:
+                        probs_for_ent_lb = th.einsum('...ii -> ...i', log_probs)
+                    else:
+                        probs_for_ent_lb = log_probs
+                    entropy_lb = - th.sum(weights.exp() * probs_for_ent_lb, dim=-3)
+                    if i == self.max_layer_index:
+                        entropy_lb = entropy_lb.sum(-1)
+                if i < layer_index:
+                    log_probs = log_probs.unsqueeze(-3) + weights.unsqueeze(-3).unsqueeze(-1)
+                    log_probs = log_probs.logsumexp(2)
+                continue
                 log_probs = log_probs.unsqueeze(-2) + weights.unsqueeze(0)
                 log_probs = log_probs.logsumexp(-3)
                 log_probs = th.einsum('iwdkR -> wdikR', log_probs)
