@@ -178,10 +178,10 @@ class RatSpn(nn.Module):
             x = self.root(x)
 
             # Remove repetition dimension
-            x = x.squeeze(-1)
+            # x = x.squeeze(-1)
 
             # Remove in_features dimension
-            x = x.squeeze(-3)
+            # x = x.squeeze(-3)
 
         return x
 
