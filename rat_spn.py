@@ -21,6 +21,17 @@ import more
 logger = logging.getLogger(__name__)
 
 
+def invert_permutation(p: th.Tensor):
+    """
+    The argument p is assumed to be some permutation of 0, 1, ..., len(p)-1.
+    Returns an array s, where s[i] gives the index of i in p.
+    Taken from: https://stackoverflow.com/a/25535723, adapted to PyTorch.
+    """
+    s = th.empty(p.shape[0], dtype=p.dtype, device=p.device)
+    s[p] = th.arange(p.shape[0]).to(p.device)
+    return s
+
+
 @dataclass
 class RatSpnConfig:
     """
@@ -113,6 +124,9 @@ class RatSpn(nn.Module):
         # Initialize weights
         self._init_weights()
 
+        # Obtain permutation indices
+        self._make_random_repetition_permutation_indices()
+
         self.__max_layer_index = len(self._inner_layers) + 1
         self.num_layers = self.__max_layer_index + 1
 
@@ -135,7 +149,37 @@ class RatSpn(nn.Module):
             raise IndexError(f"layer_index must take a value between 0 and {self.max_layer_index}, "
                              f"but it was {layer_index}!")
 
-    def forward(self, x: th.Tensor, layer_index: int = None) -> th.Tensor:
+    def _make_random_repetition_permutation_indices(self):
+        """Create random permutation indices for each repetition."""
+        permutation = []
+        inv_permutation = []
+        for r in range(self.config.R):
+            permutation.append(th.tensor(np.random.permutation(self.config.F)))
+            inv_permutation.append(invert_permutation(permutation[-1]))
+        # self.permutation: th.Tensor = th.stack(self.permutation, dim=-1)
+        # self.inv_permutation: th.Tensor = th.stack(self.inv_permutation, dim=-1)
+        self.permutation = nn.Parameter(th.stack(permutation, dim=-1), requires_grad=False)
+        self.inv_permutation = nn.Parameter(th.stack(inv_permutation, dim=-1), requires_grad=False)
+
+    def _randomize(self, x: th.Tensor) -> th.Tensor:
+        """
+        Randomize the input at each repetition according to `self.permutation`.
+
+        Args:
+            x: Input.
+
+        Returns:
+            th.Tensor: Randomized input along feature axis. Each repetition has its own permutation.
+        """
+        assert x.size(-1) == 1 or x.size(-1) == self.config.R
+        if x.size(-1) == 1:
+            x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
+        perm_indices = self.permutation.unsqueeze(-2).expand_as(x)
+        x = th.gather(x, dim=-3, index=perm_indices)
+
+        return x
+
+    def forward(self, x: th.Tensor, layer_index: int = None, x_needs_permutation: bool = True) -> th.Tensor:
         """
         Forward pass through RatSpn.
 
@@ -147,6 +191,8 @@ class RatSpn(nn.Module):
                     weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
                     output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
             layer_index: Evaluate log-likelihood of x at layer
+            x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
+                permuted in the forward pass.
         Returns:
             th.Tensor: Log-likelihood of the input.
         """
@@ -159,8 +205,9 @@ class RatSpn(nn.Module):
             f"Shape of last three dims is {tuple(x.shape[3:])} but must be ({self.config.F}, 1 or {self.config.I}, " \
             f"1 or {self.config.R})"
 
-        if x.size(-1) == 1:
-            x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
+        if x_needs_permutation:
+            # Apply feature randomization for each repetition
+            x = self._randomize(x)
 
         # Apply leaf distributions
         x = self._leaf(x)
@@ -321,7 +368,7 @@ class RatSpn(nn.Module):
             do_sample_postprocessing: If True, samples will be given to sample_postprocessing to fill in evidence,
                 split by scope, be squashed, etc.
             post_processing_kwargs: Keyword args to the postprocessing.
-                split_by_scope (bool)
+                split_by_scope (bool), invert_permutation (bool)
 
         Returns:
             Sample with
@@ -447,6 +494,7 @@ class RatSpn(nn.Module):
 
     def sample_postprocessing(
             self, ctx: Sample, evidence: th.Tensor = None, split_by_scope: bool = False,
+            invert_permutation: bool = True,
     ) -> Sample:
         """
         Apply postprocessing to samples.
@@ -461,6 +509,7 @@ class RatSpn(nn.Module):
                 cover the entire feature set f, but rather a scope of it. split_by_scope allows makes the
                 scope of a single node's samples visible in the entire Spn's scope, as features in f not
                 covered by this node are filled with NaNs.
+            invert_permutation: Invert permutation of data features.
 
         Returns:
             A modified Sample. See doc string of sample() for shape information.
@@ -482,7 +531,7 @@ class RatSpn(nn.Module):
             ctx.is_split_by_scope = True
 
         # Each repetition has its own inverted permutation which we now apply to the samples.
-        if False:
+        if invert_permutation:
             assert not ctx.permutation_inverted, "Permutations are already inverted on the samples!"
             if ctx.sampling_mode == 'index':
                 if ctx.repetition_indices is not None:
@@ -632,7 +681,7 @@ class RatSpn(nn.Module):
             samples = ctx.sample
             # We sampled all ic nodes of each repetition in the child layer
 
-            child_ll = self.forward(x=samples.unsqueeze(-2), layer_index=layer_index-1)
+            child_ll = self.forward(x=samples, layer_index=layer_index-1, x_needs_permutation=False)
             child_ll = child_ll.mean(dim=1)
 
         ic, w, d, _, r = child_ll.shape
@@ -999,7 +1048,7 @@ class RatSpn(nn.Module):
                 # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
                 child_ll = self.forward(
                     x=th.einsum('InwFR -> nwFIR', ctx.sample),
-                    layer_index=layer_index
+                    layer_index=layer_index, x_needs_permutation=False
                 )
             # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
             node_entropies = -child_ll.mean(dim=0)
@@ -1088,7 +1137,6 @@ class RatSpn(nn.Module):
         right_scope = th.einsum('...AdnwslroR -> ...AdnwsroR', right_scope)
         log_probs = th.cat((left_scope, right_scope), dim=-4)
         log_probs = th.einsum('...AdnwsioR -> ...AdnwsiR', log_probs)
-        # log_probs = th.mean(log_probs, dim=-2)
 
         accum_weights = resh_weights * accum_weights.unsqueeze(-3).unsqueeze(-3)
         # resh_weights = th.einsum('wsioR -> wsiR', resh_weights)
@@ -1096,7 +1144,6 @@ class RatSpn(nn.Module):
         right_weights = th.einsum('wslroR -> wsroR', accum_weights)
         accum_weights = th.cat((left_weights, right_weights), dim=1)
         accum_weights = th.einsum('wsioR -> wsiR', accum_weights)
-        # accum_weights = th.mean(accum_weights, dim=-2)
         return log_probs, accum_weights
 
     def vips_sum_prod_pass_no_mult(self, layer_index: int, log_probs: th.Tensor, accum_weights: th.Tensor):
@@ -2086,7 +2133,7 @@ class RatSpn(nn.Module):
         """
         means = th.arange(min_mean, max_mean, (max_mean - min_mean) / self._leaf.base_leaf.means.numel(), device=self.device)
         means = means.reshape_as(self._leaf.base_leaf.means)
-        log_stds = self._leaf.base_leaf.log_stds * 0.0
+        log_stds = self._leaf.base_leaf.log_stds * 0.0 - 20.0
         if isinstance(self._leaf.base_leaf.mean_param, nn.Parameter):
             means = nn.Parameter(means)
             log_stds = nn.Parameter(log_stds)

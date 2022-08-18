@@ -68,28 +68,6 @@ class RatNormal(Leaf):
 
         self._dist_params_are_bounded = False
 
-        # Create random permutation indices for each repetition.
-        permutation = []
-        inv_permutation = []
-        for r in range(self.num_repetitions):
-            permutation.append(th.tensor(np.random.permutation(self.in_features)))
-            inv_permutation.append(self.invert_permutation(permutation[-1]))
-        # self.permutation: th.Tensor = th.stack(self.permutation, dim=-1)
-        # self.inv_permutation: th.Tensor = th.stack(self.inv_permutation, dim=-1)
-        self.permutation = nn.Parameter(th.stack(permutation, dim=-1).unsqueeze(-2), requires_grad=False)
-        self.inv_permutation = nn.Parameter(th.stack(inv_permutation, dim=-1).unsqueeze(-2), requires_grad=False)
-
-    @staticmethod
-    def invert_permutation(p: th.Tensor):
-        """
-        The argument p is assumed to be some permutation of 0, 1, ..., len(p)-1.
-        Returns an array s, where s[i] gives the index of i in p.
-        Taken from: https://stackoverflow.com/a/25535723, adapted to PyTorch.
-        """
-        s = th.empty(p.shape[0], dtype=p.dtype, device=p.device)
-        s[p] = th.arange(p.shape[0]).to(p.device)
-        return s
-
     def bounded_means(self, means: th.Tensor = None):
         if means is None:
             means = self.mean_param
@@ -161,7 +139,6 @@ class RatNormal(Leaf):
         Returns:
             th.Tensor: Log-likelihood of the input.
         """
-        x = self.apply_permutation(x)
 
         correction = None
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
@@ -193,33 +170,13 @@ class RatNormal(Leaf):
 
         return x
 
-    def apply_permutation(self, t: th.Tensor) -> th.Tensor:
-        """
-        Args:
-            t: th.Tensor with three dimensions: [F, *, R]. * = any size
-        Returns:
-            t where the inverted permutation has been applied.
-        """
-        permutation = self.permutation.expand_as(t)
-        return th.gather(t, dim=-3, index=permutation)
-
-    def apply_inverted_permutation(self, t: th.Tensor) -> th.Tensor:
-        """
-        Args:
-            t: th.Tensor with three dimensions: [F, *, R]. * = any size
-        Returns:
-            t where the inverted permutation has been applied.
-        """
-        inv_permutation = self.inv_permutation.expand_as(t)
-        return th.gather(t, dim=-3, index=inv_permutation)
-
     def sample(self, mode: str = None, ctx: Sample = None):
         """
         Perform sampling, given indices from the parent layer that indicate which of the multiple representations
         for each input shall be used.
         """
-        means = self.apply_inverted_permutation(self.means)
-        stds = self.apply_inverted_permutation(self.stds)
+        means = self.means
+        stds = self.stds
         selected_means, selected_stds, rep_ind = None, None, None
 
         if ctx.is_root:
@@ -239,11 +196,13 @@ class RatNormal(Leaf):
             # Select means and std in the output_channel dimension
             par_ind = ctx.parent_indices.unsqueeze(-2)
             selected_means = th.gather(selected_means, dim=-2, index=par_ind).squeeze(-2)
+            selected_means = selected_means.squeeze(-1)
             if not ctx.is_mpe:
                 selected_stds = stds.expand(*ctx.parent_indices.shape[:-3], *stds.shape)
                 if ctx.repetition_indices is not None:
                     selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind)
                 selected_stds = th.gather(selected_stds, dim=-2, index=par_ind).squeeze(-2)
+                selected_stds = selected_stds.squeeze(-1)
 
         else:  # mode == 'onehot'
             # ctx.parent_indices shape [nr_nodes, *batch_dims, w, f, oc, r]
@@ -254,7 +213,6 @@ class RatNormal(Leaf):
             if not ctx.has_rep_dim:
                 # Only one repetition is selected, remove repetition dim of parameters
                 selected_means = selected_means.sum(-1)
-                selected_means = selected_means.unsqueeze(-1)
 
             if not ctx.is_mpe:
                 selected_stds = stds * ctx.parent_indices
@@ -262,7 +220,6 @@ class RatNormal(Leaf):
                 if not ctx.has_rep_dim:
                     # Only one repetition is selected, remove repetition dim of parameters
                     selected_stds = selected_stds.sum(-1)
-                    selected_stds = selected_stds.unsqueeze(-1)
 
         if ctx.is_mpe:
             samples = selected_means

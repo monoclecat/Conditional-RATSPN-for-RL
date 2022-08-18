@@ -82,9 +82,10 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
     with th.no_grad():
         if isinstance(model, CSPN):
             label = F.one_hot(label, 10).float().to(device)
-            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).sample.squeeze(0)
+            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).sample
+            samples = th.einsum('o...r -> ...or', samples)
             if eval_ll:
-                log_like.append(model(x=samples.atanh().unsqueeze(-1), condition=None).mean().tolist())
+                log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
         else:
             if model.config.C > 1:
                 samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample.squeeze(0)
