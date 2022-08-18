@@ -350,8 +350,8 @@ if __name__ == "__main__":
                              'all other SPN config parameters are ignored.')
     parser.add_argument('--exp_name', '-name', type=str, default='cspn_test',
                         help='Experiment name. The results dir will contain it.')
-    parser.add_argument('--repetitions', '-R', type=int, default=5, help='Number of parallel CSPNs to learn at once. ')
-    parser.add_argument('--cspn_depth', '-D', type=int, default=3, help='Depth of the CSPN.')
+    parser.add_argument('--repetitions', '-R', type=int, default=5, help='Number of repetitions in RatSPN. ')
+    parser.add_argument('--cspn_depth', '-D', type=int, default=3, help='Depth of the SPN.')
     parser.add_argument('--num_dist', '-I', type=int, default=5, help='Number of Gauss dists per pixel.')
     parser.add_argument('--num_sums', '-S', type=int, default=5, help='Number of sums per RV in each sum layer.')
     parser.add_argument('--dropout', type=float, default=0.0, help='Dropout to apply')
@@ -361,7 +361,7 @@ if __name__ == "__main__":
                         help='List of sizes of the CSPN sum param layers.')
     parser.add_argument('--dist_param_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN dist param layers.')
-    parser.add_argument('--save_interval', '-save', type=int, default=50, help='Epoch interval to save model')
+    parser.add_argument('--save_interval', '-save', type=int, default=10, help='Epoch interval to save model')
     parser.add_argument('--eval_interval', '-eval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')
     parser.add_argument('--ratspn', action='store_true', help='Use a RATSPN and not a CSPN')
@@ -390,6 +390,11 @@ if __name__ == "__main__":
     sample_dir = os.path.join(results_dir, non_existing_folder_name(results_dir, "samples"))
     os.makedirs(args.dataset_dir, exist_ok=True)
 
+    with open(os.path.join(results_dir, f"args_{args.exp_name}.csv"), 'w') as f:
+        w = csv.DictWriter(f, vars(args).keys())
+        w.writeheader()
+        w.writerow(vars(args))
+
     if args.device == "cpu":
         device = th.device("cpu")
         use_cuda = False
@@ -411,7 +416,7 @@ if __name__ == "__main__":
     if not args.model_path:
         if args.ratspn:
             config = RatSpnConfig()
-            config.C = 1#10
+            config.C = 10
         else:
             config = CspnConfig()
             config.F_cond = (cond_size,)
@@ -453,7 +458,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     print(f"Optimizer: {optimizer}")
 
-    lmbda = 0.0
+    lmbda = 1.0
     sample_interval = 1 if args.verbose else args.eval_interval  # number of epochs
     save_interval = 1 if args.verbose else args.save_interval  # number of epochs
 
@@ -495,7 +500,8 @@ if __name__ == "__main__":
             def bookmark():
                 pass
             if model.is_ratspn:
-                output: th.Tensor = model(x=data).squeeze(1)
+                output: th.Tensor = model(x=data)
+                label = label.unsqueeze(0).unsqueeze(-2).unsqueeze(-1)
                 if model.config.C > 1:
                     loss_ce = F.binary_cross_entropy_with_logits(output, label)
                 ll_loss = -output.mean()
