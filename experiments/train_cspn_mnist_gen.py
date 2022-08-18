@@ -84,7 +84,7 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
             label = F.one_hot(label, 10).float().to(device)
             samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).sample.squeeze(0)
             if eval_ll:
-                log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
+                log_like.append(model(x=samples.atanh().unsqueeze(-1), condition=None).mean().tolist())
         else:
             if model.config.C > 1:
                 samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample.squeeze(0)
@@ -187,7 +187,7 @@ def evaluate_model(model, device, loader, tag):
     log_like = []
     with th.no_grad():
         for image, label in loader:
-            image = image.flatten(start_dim=1).to(device)
+            image = image.flatten(start_dim=1).to(device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
             if model.config.tanh_squash:
                 image.sub_(0.5).mul_(2).atanh_()
             if isinstance(model, CSPN):
@@ -393,7 +393,7 @@ if __name__ == "__main__":
     else:
         device = th.device("cuda:0")
         use_cuda = True
-        th.cuda.benchmark = True
+        # th.cuda.benchmark = True
     print("Using device:", device)
     batch_size = args.batch_size
 
@@ -442,8 +442,8 @@ if __name__ == "__main__":
     else:
         print(f"Using pretrained model under {args.model_path}")
         model = th.load(args.model_path, map_location=device)
-        model.create_one_hot_in_channel_mapping()
-        model.set_no_tanh_log_prob_correction()
+        # model.create_one_hot_in_channel_mapping()
+        # model.set_no_tanh_log_prob_correction()
     model.train()
     print("Config:", model.config)
     print(model)
@@ -487,7 +487,7 @@ if __name__ == "__main__":
 
             # Inference
             optimizer.zero_grad()
-            data = image.reshape(image.shape[0], -1)
+            data = image.reshape(image.shape[0], -1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
             mse_loss = ll_loss = ent_loss = loss_ce = vi_ent_approx = th.zeros(1).to(device)
             def bookmark():
                 pass
