@@ -308,3 +308,36 @@ class CSPN(RatSpn):
         self._leaf.base_leaf.mean_param = self._leaf.base_leaf.bounded_means(dist_means)
         self._leaf.base_leaf.log_std_param = self._leaf.base_leaf.bounded_log_stds(dist_log_stds)
 
+    def clear_params(self):
+        for layer in self._inner_layers:
+            if isinstance(layer, Sum):
+                weight_shape = (0, layer.in_features, layer.in_channels, layer.out_channels, layer.num_repetitions)
+                layer.weight_param = th.zeros(weight_shape)
+            else:
+                layer.num_conditionals = 0
+
+        # Set normalized weights of the root sum layer
+        weight_shape = (0, self.root.in_features, self.root.in_channels, self.root.out_channels, self.root.num_repetitions)
+        self.root.weight_param = th.zeros(weight_shape)
+
+        # Sampling root weights need to have 5 dims as well
+        weight_shape = (0, 1, 1, 1, 1)
+        self._sampling_root.weight_param = th.zeros(weight_shape).to(self.device)
+
+        # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
+        if isinstance(self._leaf, GaussianMixture):
+            weight_shape = (0, self._leaf.sum.in_features, self._leaf.sum.in_channels,
+                            self._leaf.sum.out_channels, self._leaf.sum.num_repetitions)
+            self._leaf.sum.weight_param = th.zeros(weight_shape)
+
+        # Set bounded weights of the Gaussian distributions in the leaves
+        dist_param_shape = (0, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
+        self._leaf.base_leaf.mean_param = th.zeros(dist_param_shape)
+        self._leaf.base_leaf.log_std_param = th.zeros(dist_param_shape)
+
+    def save(self, *args, **kwargs):
+        save_model = CSPN(self.config)
+        save_model.load_state_dict(self.state_dict())
+        th.save(save_model, *args, **kwargs)
+
+

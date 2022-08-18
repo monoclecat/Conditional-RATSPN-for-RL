@@ -541,7 +541,7 @@ if __name__ == "__main__":
         t_delta = np.around(time.time()-t_start, 2)
         if epoch % save_interval == (save_interval-1):
             print("Saving model ...")
-            th.save(model, os.path.join(model_dir, f"epoch-{epoch:03}_{args.exp_name}.pt"))
+            model.save(os.path.join(model_dir, f"epoch-{epoch:03}_{args.exp_name}.pt"))
 
         if epoch % sample_interval == (sample_interval-1):
             print("Evaluating model ...")

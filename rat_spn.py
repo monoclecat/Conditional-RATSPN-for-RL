@@ -1992,3 +1992,6 @@ class RatSpn(nn.Module):
         #    [[w_0, w_1, ..., w_{ic_new-1}],
         #     [w_{ic_new}, ...,w_{2*ic_new-1}], and so on with ic_new rows in total.
         return t
+
+    def save(self, *args, **kwargs):
+        th.save(self, *args, **kwargs)
