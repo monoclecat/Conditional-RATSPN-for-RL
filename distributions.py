@@ -359,10 +359,6 @@ class GaussianMixture(IndependentMultivariate):
             dropout=dropout, leaf_base_class=leaf_base_class, leaf_base_kwargs=leaf_base_kwargs)
         self.sum = Sum(in_features=self.out_features, in_channels=gmm_modes, num_repetitions=num_repetitions,
                        out_channels=out_channels, dropout=dropout)
-        self._cached_moments = None
-
-    def reset_moment_cache(self):
-        self._cached_moments = None
 
     def forward(self, x: th.Tensor, reduction='sum'):
         x = super().forward(x=x, reduction=reduction)

@@ -295,7 +295,6 @@ class CSPN(RatSpn):
 
         # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
         if isinstance(self._leaf, GaussianMixture):
-            self._leaf.reset_moment_cache()
             weight_shape = (num_conditionals, self._leaf.sum.in_features, self._leaf.sum.in_channels,
                             self._leaf.sum.out_channels, self._leaf.sum.num_repetitions)
             weights = self.sum_param_heads[i+1](sum_weights_pre_output).view(weight_shape)
