@@ -84,7 +84,7 @@ class CSPN(RatSpn):
             th.Tensor: Conditional log-likelihood P(X | C) of the input.
         """
         if condition is not None:
-            self.set_weights(condition)
+            self.set_params(condition)
         weight_sets = self._leaf.base_leaf.means.shape[0]
         if x.dim() == 3:
             assert x.shape[1] == weight_sets, \
@@ -103,7 +103,7 @@ class CSPN(RatSpn):
 
     def vi_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> th.Tensor:
         if condition is not None:
-            self.set_weights(condition)
+            self.set_params(condition)
         return super().vi_entropy_approx(**kwargs)
 
     def sum_node_entropies(self, condition=None, reduction='mean'):
@@ -111,7 +111,7 @@ class CSPN(RatSpn):
             Calculate the entropies of the hidden categorical random variables in the sum nodes
         """
         if condition is not None:
-            self.set_weights(condition)
+            self.set_params(condition)
         return super().sum_node_entropies(reduction)
 
     def sample(self, mode: str = None, condition: th.Tensor = None, class_index=None,
@@ -129,7 +129,7 @@ class CSPN(RatSpn):
             evidence: See doc of RatSpn.sample_index_style()
         """
         if condition is not None:
-            self.set_weights(condition)
+            self.set_params(condition)
         assert class_index is None or condition.shape[0] == len(class_index), \
             "The batch size of the condition must equal the length of the class index list if they are provided!"
         # TODO add assert to check dimension of evidence, if given.
@@ -258,7 +258,7 @@ class CSPN(RatSpn):
     def set_no_tanh_log_prob_correction(self):
         self._leaf.base_leaf.set_no_tanh_log_prob_correction()
 
-    def set_weights(self, feat_inp: th.Tensor):
+    def set_params(self, feat_inp: th.Tensor):
         """
             Sets the weights of the sum and dist nodes, using the input from the conditional passed through the
             feature extraction layers.
