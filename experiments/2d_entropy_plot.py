@@ -14,10 +14,11 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', '-d', type=str, help='Directory with npz files')
-    parser.add_argument('--gif_duration', '-gif_d', type=int, default=30)
+    parser.add_argument('--duration', type=int, default=30)
     parser.add_argument('--grid_points', type=int, default=501)
     parser.add_argument('--make_gif', '-gif', action='store_true', help="Create gif of plots")
-    parser.add_argument('--device', '-dev', type=str, default='cuda', help='cuda or cpu')
+    parser.add_argument('--make_video', '-video', action='store_true', help="Create video of plots")
+    parser.add_argument('--device', '-dev', type=str, default='cpu', help='cuda or cpu')
     parser.add_argument('--vi_ent_samples', type=int, default=5,
                         help="VI entropy approximation with these many samples")
     parser.add_argument('--mc_ent_samples', type=int, default=100,
@@ -58,8 +59,8 @@ if __name__ == "__main__":
     fps = 0
     if args.make_gif:
         fps = 5
-        gif_duration = args.gif_duration  # seconds
-        n_frames = fps * gif_duration
+        duration = args.duration  # seconds
+        n_frames = fps * duration
         make_frame_every = int(config['steps']) / n_frames
     else:
         make_frame_every = 10  # 5000
@@ -108,6 +109,11 @@ if __name__ == "__main__":
 
         fig.suptitle(f"RatSpn distribution at step {step}, trained with {train_mode}")
         ax1.set_title(f"Huber ent. LB: {huber_ent:.2f} - VI ent. approx.: {vi_ent:.2f} - MC ent. approx.: {mc_ent:.2f}")
+        return fig
+
+    def plot_voronoi(probs, huber_ent, vi_ent, mc_ent, mpe, step, train_mode: str):
+        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
+
 
     step_pattern = re.compile('step([0-9]+)')
 
@@ -148,9 +154,16 @@ if __name__ == "__main__":
         if args.make_gif:
             frame = gif_frame(**plot_args)
             frames.append(frame)
-        elif True:
+        if True:
+            fig = plot_dist(**plot_args)
+            fig.savefig(os.path.join(frame_save_path, f"plot_{dir_name}__step{step}.jpg"))
+            plt.close(fig)
+        else:
             plot_dist(**plot_args)
             plt.show()
 
     if args.make_gif:
         gif.save(frames, f"{save_path}.gif", duration=1 / fps, unit='s')
+    elif args.make_video:
+        os.system(
+            f"ffmpeg -f image2 -r {1/fps} -i {frame_save_path}/* -vcodec mpeg4 -y {save_path}.mp4")
