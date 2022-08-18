@@ -161,8 +161,7 @@ class RatNormal(Leaf):
         Returns:
             th.Tensor: Log-likelihood of the input.
         """
-        perm_indices = self.permutation.expand_as(x)
-        x = th.gather(x, dim=-3, index=perm_indices)
+        x = self.apply_permutation(x)
 
         correction = None
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
@@ -194,15 +193,33 @@ class RatNormal(Leaf):
 
         return x
 
+    def apply_permutation(self, t: th.Tensor) -> th.Tensor:
+        """
+        Args:
+            t: th.Tensor with three dimensions: [F, *, R]. * = any size
+        Returns:
+            t where the inverted permutation has been applied.
+        """
+        permutation = self.permutation.expand_as(t)
+        return th.gather(t, dim=-3, index=permutation)
+
+    def apply_inverted_permutation(self, t: th.Tensor) -> th.Tensor:
+        """
+        Args:
+            t: th.Tensor with three dimensions: [F, *, R]. * = any size
+        Returns:
+            t where the inverted permutation has been applied.
+        """
+        inv_permutation = self.inv_permutation.expand_as(t)
+        return th.gather(t, dim=-3, index=inv_permutation)
+
     def sample(self, mode: str = None, ctx: Sample = None):
         """
         Perform sampling, given indices from the parent layer that indicate which of the multiple representations
         for each input shall be used.
         """
-        means, stds = self.means, self.stds
-        inv_permutation = self.inv_permutation.expand_as(means)
-        means = th.gather(means, dim=-3, index=inv_permutation)
-        stds = th.gather(stds, dim=-3, index=inv_permutation)
+        means = self.apply_inverted_permutation(self.means)
+        stds = self.apply_inverted_permutation(self.stds)
         selected_means, selected_stds, rep_ind = None, None, None
 
         if ctx.is_root:
