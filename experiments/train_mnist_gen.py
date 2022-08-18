@@ -88,9 +88,11 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
                 log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
         else:
             if model.config.C > 1:
-                samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample.squeeze(0)
+                samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample
+                samples = th.einsum('o...r -> ...or', samples)
             else:
-                samples = model.sample(n=samples_per_label, mode=style, is_mpe=mpe).sample.squeeze(0)
+                samples = model.sample(n=samples_per_label, mode=style, is_mpe=mpe).sample
+                samples = th.einsum('o...r -> ...or', samples)
             if eval_ll:
                 log_like.append(model(x=samples).mean().tolist())
         if model.config.tanh_squash:
@@ -473,7 +475,7 @@ if __name__ == "__main__":
         logger.write()
     for epoch in range(args.epochs):
         if epoch > 20:
-            lmbda = 0.7
+            lmbda = 0.5
         t_start = time.time()
         logger.reset(epoch)
         for batch_index, (image, label) in enumerate(train_loader):

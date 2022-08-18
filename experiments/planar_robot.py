@@ -20,7 +20,7 @@ from cspn import CSPN, CspnConfig, print_cspn_params
 from rat_spn import RatSpn, RatSpnConfig
 from experiments.vips_paper_exps import build_target_likelihood_planar_n_link
 
-from experiments.train_cspn_mnist_gen import CsvLogger
+from experiments.train_mnist_gen import CsvLogger
 from experiments.train_mnist import count_params
 
 if __name__ == '__main__':

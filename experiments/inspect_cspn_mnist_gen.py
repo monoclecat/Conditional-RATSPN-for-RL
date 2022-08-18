@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import skimage
-from experiments.train_cspn_mnist_gen import evaluate_sampling
+from experiments.train_mnist_gen import evaluate_sampling
 from cspn import CSPN
 from utils import SamplingContext
 import matplotlib.pyplot as plt
