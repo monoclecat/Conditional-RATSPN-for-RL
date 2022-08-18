@@ -106,61 +106,6 @@ class CSPN(RatSpn):
             self.set_weights(condition)
         return super().vi_entropy_approx(**kwargs)
 
-    def consolidate_weights(self, condition=None):
-        if condition is not None:
-            self.set_weights(condition)
-        return super().consolidate_weights()
-
-    def compute_moments(self, condition=None):
-        if condition is not None:
-            self.set_weights(condition)
-        return super().compute_moments()
-
-    def compute_gradients(self, x, with_log_prob_x=False, condition=None):
-        if condition is not None:
-            self.set_weights(condition)
-        return super().compute_gradients(x, with_log_prob_x)
-
-    def entropy_taylor_approx(self, condition=None, components=3):
-        """
-            Calculates the Taylor series approximation of the entropy up to a given order.
-            The first order of the approximation is zero.
-            'components' is the number of Taylor series terms that aren't zero, starting at the zero'th order.
-        """
-        # assert isinstance(self._inner_layers[0], Sum), "First layer after the leaf layer must be a sum layer!"
-        if condition is not None:
-            self.set_weights(condition)
-        self.consolidate_weights(condition=None)
-        moments = super().compute_moments(order=components)
-        mean = moments[0]
-        # Gradients are all evaluated at the mean of the SPN
-        # grad, ggrad, gggrad, log_p_mean = super().compute_gradients(mean, with_log_prob_x=True, order=components)
-        grads = super().compute_gradients(mean, with_log_prob_x=True, order=components)
-        log_p_mean = grads[-1]
-        entropy = grad = inv_sq_mean_prob = ggrad = inv_mean_prob = 0  # To satisfy the IDE
-        if components >= 1:
-            H_0 = - log_p_mean
-            entropy = H_0
-        if components >= 2:
-            var = moments[1]
-            grad, ggrad = grads[0:2]
-            inv_mean_prob = (-log_p_mean).exp()
-            inv_sq_mean_prob = (-2 * log_p_mean).exp()
-            ggrad_log = -inv_sq_mean_prob * grad + inv_mean_prob * ggrad
-            H_2 = - (ggrad_log * var) / 2
-            entropy += H_2
-        if components >= 3:
-            skew = moments[2]
-            gggrad = grads[2]
-            inv_cub_mean_prob = (-3 * log_p_mean).exp()
-            gggrad_log = 2 * inv_cub_mean_prob * grad - 2 * inv_sq_mean_prob * ggrad + inv_mean_prob * gggrad
-            H_3 = - (gggrad_log * skew) / 6
-            entropy += H_3
-
-        # grad_log = inv_mean_prob * grad
-        entropy = entropy.sum(dim=1)
-        return entropy
-
     def iterative_gmm_entropy_lb(self, condition=None, reduction='mean'):
         """
             Calculate the entropy lower bound of the first-level mixtures.

@@ -238,31 +238,6 @@ class RatNormal(Leaf):
         gauss = dist.Normal(self.means, self.stds)
         return gauss
 
-    def moments(self):
-        """Get the mean and variance"""
-        return self.means, self.stds.pow(2)
-
-    def gradient(self, x: th.Tensor, order: int):
-        """Get the gradient up to a given order at the point x"""
-        assert order <= 3, "Gradient only implemented up to the third order!"
-
-        if x.dim() == 3:  # Number of repetition dimension already exists
-            x = x.unsqueeze(2)  # Shape [n, d, 1, r]
-        elif x.dim() == 2:
-            x = x.unsqueeze(2).unsqueeze(3)  # Shape: [n, d, 1, 1]
-        d = self._get_base_distribution()
-        prob = d.log_prob(x).exp_()
-        inv_var = 1/d.variance
-        a = inv_var * (x - d.mean)
-        grads = []
-        if order >= 1:
-            grads += [- prob * a]
-        if order >= 2:
-            grads += [prob * (a**2 - inv_var)]
-        if order >= 3:
-            grads += [prob * (-a**3 + 3 * a * inv_var)]
-        return grads
-
 
 class IndependentMultivariate(Leaf):
     def __init__(
@@ -363,14 +338,6 @@ class IndependentMultivariate(Leaf):
     def sample_onehot_style(self, ctx: Sample = None) -> th.Tensor:
         return self.sample(ctx=ctx, mode='onehot')
 
-    def moments(self):
-        """Get the mean, variance and third central moment (unnormalized skew)"""
-        return [self.prod(self.pad_input(m), reduction=None) for m in self.base_leaf.moments()]
-
-    def gradient(self, x: th.Tensor, order: int):
-        """Get the gradient up to the given order at the point x"""
-        return [self.prod(self.pad_input(g), reduction=None) for g in self.base_leaf.gradient(x, order)]
-
     def __repr__(self):
         return f"IndependentMultivariate(in_features={self.in_features}, out_channels={self.out_channels}, dropout={self.dropout}, cardinality={self.cardinality}, out_shape={self.out_shape})"
 
@@ -413,54 +380,6 @@ class GaussianMixture(IndependentMultivariate):
         ctx = self.sum.sample(ctx=ctx)
         return super(GaussianMixture, self).sample(ctx=ctx)
 
-    def moments(self):
-        """Get the mean, variance and third central moment (unnormalized skew)"""
-        if self._cached_moments is not None:
-            return self._cached_moments
-        dist_moments = [self.prod(self.pad_input(m), reduction=None) for m in self.base_leaf.moments()]
-        weights = self.sum.weights
-        if weights.dim() == 5:
-            # Only in the Cspn case are the weights already log-normalized
-            weights = weights.exp()
-        else:
-            weights = th.softmax(weights, dim=2)
-        assert self.sum.weights.dim() == 5, "This isn't adopted to the 4-dimensional RatSpn weights yet"
-        weights = weights.unsqueeze(2)
-        # Weights is of shape [n, d, 1, ic, oc, r]
-        # Create an extra dimension for the mean vector so all elements of the mean vector are multiplied by the same
-        # weight for that feature and output channel.
-
-        child_mean = dist_moments[0]
-        # moments have shape [n, d, cardinality, ic, r]
-        # Create an extra 'output channels' dimension, as the weights are separate for each output channel.
-        child_mean.unsqueeze_(4)
-        mean = child_mean * weights
-        # mean has shape [n, d, cardinality, ic, oc, r]
-        mean = mean.sum(dim=3)
-        # mean has shape [n, d, cardinality, oc, r]
-        moments = [mean]
-
-        if len(dist_moments) >= 2:
-            child_var = dist_moments[1]
-            child_var.unsqueeze_(4)
-            centered_mean = child_mean - mean.unsqueeze(4)
-            var = child_var + centered_mean.pow(2)
-            var = var * weights
-            var = var.sum(dim=3)
-            moments += [var]
-
-            skew = 3 * centered_mean * child_var + centered_mean ** 3
-            if len(dist_moments) >= 3:
-                child_skew = dist_moments[2]
-                child_skew.unsqueeze_(4)
-                skew = skew + child_skew
-            skew = skew * weights
-            skew = skew.sum(dim=3)
-            moments += [skew]
-
-        self._cached_moments = moments
-        return moments
-
     def _weighted_sum(self, x: th.Tensor):
         weights = self.sum.weights
         if weights.dim() == 5:
@@ -473,60 +392,6 @@ class GaussianMixture(IndependentMultivariate):
         # The extra dimension is created so all elements of the gradient vectors are multiplied by the same
         # weight for that feature and output channel.
         return (x.unsqueeze(4) * weights.unsqueeze(2)).sum(dim=3)
-
-    def gradient(self, x: th.Tensor, order: int):
-        """Get the gradient up to the given order at the point x"""
-        grads = self.base_leaf.gradient(x, order)
-        grads = [self.prod(self.pad_input(g), reduction=None) for g in grads]
-        grads = [self._weighted_sum(g) for g in grads]
-        return grads
-
-    def entropy_taylor_approx(self, components=3, reduction='mean'):
-        mean, var, skew = self.moments()
-        n, d, cardinality, oc, r = mean.shape
-        # Gradients are all evaluated at the mean of the SPN
-        mean_full_vec = mean.view(n, d * cardinality, oc, r)
-        grads = self.gradient(mean_full_vec, order=components)
-        log_p_mean = self(mean_full_vec, reduction=None)
-        # clamp_at = -2
-        # print(f"Percent of mean log probs under clamp threshold of {clamp_at}: "
-              # f"{(log_p_mean < clamp_at).sum()/log_p_mean.numel():.5f}")
-        # log_p_mean.clamp_(min=clamp_at)
-
-        entropy = th.zeros(1).to(self._device)
-        H_0 = th.zeros(1).to(self._device)
-        H_2 = th.zeros(1).to(self._device)
-        H_3 = th.zeros(1).to(self._device)
-        if components >= 1:
-            H_0 = - log_p_mean
-            H_0 = H_0.sum(dim=2)
-            if reduction == 'mean':
-                H_0 = H_0.mean()
-            entropy += H_0
-            if components >= 2:
-                grad, ggrad = grads[0:2]
-                inv_mean_prob = (-log_p_mean).exp()
-                inv_sq_mean_prob = (-2 * log_p_mean).exp()
-                ggrad_log = -inv_sq_mean_prob * grad \
-                            + inv_mean_prob * ggrad
-                H_2 = - (ggrad_log * var) / 2
-                H_2 = H_2.sum(dim=2)
-                if reduction == 'mean':
-                    H_2 = H_2.mean()
-                entropy += H_2
-                if components >= 3:
-                    gggrad = grads[2]
-                    inv_cub_mean_prob = (-3 * log_p_mean).exp()
-                    gggrad_log: th.Tensor = 2 * inv_cub_mean_prob * grad \
-                                               - 2 * inv_sq_mean_prob * ggrad \
-                                               + inv_mean_prob * gggrad
-                    H_3: th.Tensor = - (gggrad_log * skew) / 6
-                    H_3 = H_3.sum(dim=2)
-                    if reduction == 'mean':
-                        H_3 = H_3.mean()
-                    entropy += H_3
-
-        return entropy, (H_0.detach_(), H_2.detach_(), H_3.detach_())
 
     def iterative_gmm_entropy_lb(self, reduction='mean'):
         """
