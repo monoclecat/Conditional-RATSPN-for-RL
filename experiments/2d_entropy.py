@@ -18,7 +18,7 @@ from tqdm import tqdm
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', '-name', type=str, default='vips_gmm_test',
+    parser.add_argument('--exp_name', '-name', type=str, default='test',
                         help='Experiment name. The results dir will contain it.')
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
     parser.add_argument('--steps', type=int, default=10000)
@@ -80,19 +80,19 @@ if __name__ == "__main__":
 
         n_steps = args.steps
         if args.huber:
-            exp_name = f"entmax_huberLB" \
+            exp_name = f"entmax_huberLB_{args.exp_name}" \
                        f"_seed{seed}" \
                        f"_{n_steps}steps" \
                        f"_{args.features}feat"
         elif args.montecarlo:
-            exp_name = f"entmax_MCapprox" \
+            exp_name = f"entmax_MCapprox_{args.exp_name}" \
                        f"_{args.ent_approx_sample_size}samples" \
                        f"{'_sampledwithgrad' if args.additional_grad else ''}" \
                        f"_seed{seed}" \
                        f"_{n_steps}steps" \
                        f"_{args.features}feat"
         else:
-            exp_name = f"entmax_VIapprox" \
+            exp_name = f"entmax_VIapprox_{args.exp_name}" \
                        f"{'_layerwise' if args.layerwise else ''}" \
                        f"_{args.ent_approx_sample_size}samples" \
                        f"{'_gradthruresp' if args.additional_grad else ''}" \
