@@ -205,9 +205,9 @@ class CSPN(RatSpn):
         output_activation = nn.Identity
 
         feature_dim = int(np.prod(self.feat_layers(th.ones((1, *feature_dim))).shape))
-        print(f"The feature extraction layer for the CSPN conditional reduce the {int(np.prod(feature_dim))} "
-              f"inputs (e.g. pixels in an image) down to {feature_dim} features. These are the inputs of the "
-              f"MLPs which set the sum and dist params.")
+        # print(f"The feature extraction layer for the CSPN conditional reduce the {int(np.prod(feature_dim))} "
+              # f"inputs (e.g. pixels in an image) down to {feature_dim} features. These are the inputs of the "
+              # f"MLPs which set the sum and dist params.")
         # sum_layer_sizes = [int(feature_dim * 10 ** (-i)) for i in range(1 + self.config.fc_sum_param_layers)]
         sum_layer_sizes = [feature_dim]
         if self.config.sum_param_layers:
@@ -224,14 +224,14 @@ class CSPN(RatSpn):
         for layer in self._inner_layers:
             if isinstance(layer, Sum):
                 self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], layer.weights.numel()))
-                print(f"Sum layer has {layer.weights.numel()} weights.")
+                # print(f"Sum layer has {layer.weights.numel()} weights.")
         self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self.root.weights.numel()))
-        print(f"Root sum layer has {self.root.weights.numel()} weights.")
+        # print(f"Root sum layer has {self.root.weights.numel()} weights.")
 
         if isinstance(self._leaf, GaussianMixture):
             self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self._leaf.sum.weights.numel()))
-            print(f"A param head was added for the sum layer of the GaussianMixture leaves, "
-                  f"having {self._leaf.sum.weights.numel()} weights.")
+            # print(f"A param head was added for the sum layer of the GaussianMixture leaves, "
+                  # f"having {self._leaf.sum.weights.numel()} weights.")
 
         # dist_layer_sizes = [int(feature_dim * 10 ** (-i)) for i in range(1 + self.config.fc_dist_param_layers)]
         dist_layer_sizes = [feature_dim]
@@ -247,8 +247,8 @@ class CSPN(RatSpn):
 
         self.dist_mean_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.mean_param.numel())
         self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.log_std_param.numel())
-        print(f"Dist layer has {self._leaf.base_leaf.mean_param.numel()} + "
-              f"{self._leaf.base_leaf.log_std_param.numel()} weights.")
+        # print(f"Dist layer has {self._leaf.base_leaf.mean_param.numel()} + "
+              # f"{self._leaf.base_leaf.log_std_param.numel()} weights.")
 
     def create_one_hot_in_channel_mapping(self):
         for lay in self._inner_layers:
