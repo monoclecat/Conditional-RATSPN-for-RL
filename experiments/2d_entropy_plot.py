@@ -7,6 +7,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import re
+from utils import non_existing_folder_name
 
 if __name__ == "__main__":
     matplotlib.use('Agg')
