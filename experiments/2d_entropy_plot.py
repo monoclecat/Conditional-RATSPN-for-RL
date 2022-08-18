@@ -64,6 +64,8 @@ if __name__ == "__main__":
     else:
         make_frame_every = 10  # 5000
 
+    frame_save_path = os.path.join(args.dir, non_existing_folder_name(args.dir, 'frames'))
+
     def pass_grid_to_model(grid):
         global model
         grid = grid.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # Add obligatory leaf output channel and repetition dims
