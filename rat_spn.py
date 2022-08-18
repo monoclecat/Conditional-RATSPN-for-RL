@@ -161,12 +161,12 @@ class RatSpn(nn.Module):
         self.permutation = nn.Parameter(th.stack(permutation, dim=-1), requires_grad=False)
         self.inv_permutation = nn.Parameter(th.stack(inv_permutation, dim=-1), requires_grad=False)
 
-    def _randomize(self, x: th.Tensor) -> th.Tensor:
+    def apply_permutation(self, x: th.Tensor) -> th.Tensor:
         """
         Randomize the input at each repetition according to `self.permutation`.
 
         Args:
-            x: Input.
+            x: th.Tensor, last three dims must have shape [F, *, 1 or self.config.R]. * = any size
 
         Returns:
             th.Tensor: Randomized input along feature axis. Each repetition has its own permutation.
@@ -207,7 +207,7 @@ class RatSpn(nn.Module):
 
         if x_needs_permutation:
             # Apply feature randomization for each repetition
-            x = self._randomize(x)
+            x = self.apply_permutation(x)
 
         # Apply leaf distributions
         x = self._leaf(x)
@@ -2025,7 +2025,7 @@ class RatSpn(nn.Module):
         return self.consolidated_vector_forward(moments, RatSpn.moment_kernel)
 
     def compute_gradients(self, x: th.Tensor, with_log_prob_x=False, order=3):
-        x = self._randomize(x)
+        x = self.apply_permutation(x)
         grads: List = self._leaf.gradient(x, order=order)
         if len(grads) < order:
             grads += [None] * (order - len(grads))
