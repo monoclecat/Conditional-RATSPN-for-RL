@@ -200,47 +200,6 @@ if __name__ == "__main__":
                                 g.node(f'dist_F{f}R{r}', nohtml(content))
                     elif isinstance(layer, Cross)
 
-                print(1)
-
-
-                g.node('node0', nohtml('<f0> |<f1> G|<f2>'))
-                g.node('node1', nohtml('<f0> |<f1> E|<f2>'))
-                g.node('node2', nohtml('<f0> |<f1> B|<f2>'))
-                g.node('node3', nohtml('<f0> |<f1> F|<f2>'))
-                g.node('node4', nohtml('<f0> |<f1> R|<f2>'))
-                g.node('node5', nohtml('<f0> |<f1> H|<f2>'))
-                g.node('node6', nohtml('<f0> |<f1> Y|<f2>'))
-                g.node('node7', nohtml('<f0> |<f1> A|<f2>'))
-                g.node('node8', nohtml('<f0> |<f1> C|<f2>'))
-
-                g.edge('node0:f2', 'node4:f1')
-                g.edge('node0:f0', 'node1:f1')
-                g.edge('node1:f0', 'node2:f1')
-                g.edge('node1:f2', 'node3:f1')
-                g.edge('node2:f2', 'node8:f1')
-                g.edge('node2:f0', 'node7:f1')
-                g.edge('node4:f2', 'node6:f1')
-                g.edge('node4:f0', 'node5:f1')
-
-                g.view()
-                g.render(os.path.join(results_dir, 'test.gv'), view=True, format='png')
-                cond = 0
-                w_set = None
-                first_sum_layer_features = None
-                for i in model.sum_layer_indices:
-                    layer = model.layer_index_to_obj(i)
-                    weights = layer.weights[cond].exp().detach().cpu().numpy()
-                    w = np.einsum('dior -> rdoi', weights)
-                    if w_set is None:
-                        first_sum_layer_features = w.shape[1]
-                        w = w.flatten()
-                        w_set = w
-                    else:
-                        w = np.repeat(w, first_sum_layer_features // w.shape[1], axis=-1)
-                        w = w.flatten()
-                        print(1)
-                    print(1)
-
                 loss.backward()
                 optimizers[m].step()
                 logger.add_to_avg_keys(
