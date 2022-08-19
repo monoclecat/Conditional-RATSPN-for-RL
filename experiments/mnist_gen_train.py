@@ -468,10 +468,10 @@ if __name__ == "__main__":
     epoch = 0
     if not args.no_eval_at_start:
         print("Evaluating model ...")
-        save_path = os.path.join(sample_dir, f"epoch-{epoch:03}_{args.exp_name}.png")
+        save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_{args.exp_name}.png")
         evaluate_sampling(model, save_path, device, img_size,
                           style='onehot' if args.sample_onehot else 'index')
-        save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:03}_{args.exp_name}.png")
+        save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:04}_{args.exp_name}.png")
         evaluate_sampling(model, save_path, device, img_size, mpe=True,
                           style='onehot' if args.sample_onehot else 'index')
         logger.reset(epoch)
@@ -547,14 +547,14 @@ if __name__ == "__main__":
         t_delta = np.around(time.time()-t_start, 2)
         if epoch % save_interval == (save_interval-1):
             print("Saving model ...")
-            model.save(os.path.join(model_dir, f"epoch-{epoch:03}_{args.exp_name}.pt"))
+            model.save(os.path.join(model_dir, f"epoch-{epoch:04}_{args.exp_name}.pt"))
 
         if epoch % sample_interval == (sample_interval-1):
             print("Evaluating model ...")
-            save_path = os.path.join(sample_dir, f"epoch-{epoch:03}_{args.exp_name}.png")
+            save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_{args.exp_name}.png")
             evaluate_sampling(model, save_path, device, img_size,
                               style='onehot' if args.sample_onehot else 'index')
-            save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:03}_{args.exp_name}.png")
+            save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:04}_{args.exp_name}.png")
             evaluate_sampling(model, save_path, device, img_size, mpe=True,
                               style='onehot' if args.sample_onehot else 'index')
             logger['mnist_test_ll'] = evaluate_model(model, device, test_loader, "MNIST test")
