@@ -222,8 +222,9 @@ def plot_samples(x: th.Tensor, path):
 
 
 class CsvLogger(dict):
-    def __init__(self, path):
+    def __init__(self, path, name='Model'):
         super().__init__()
+        self.name = name
         self.path = path
         self.other_keys = ['epoch', 'time']
         self.keys_to_avg = [
@@ -281,7 +282,7 @@ class CsvLogger(dict):
             return mean
 
     def __str__(self):
-        return_str = f"Train Epoch: {self['epoch']} took {time_delta(self['time'])}"
+        return_str = f"{self.name} Train Epoch: {self['epoch']} took {time_delta(self['time'])}"
         if self.no_log_dict['batch'] is not None:
             return_str += f" @ batch {self.no_log_dict['batch']}"
         if mean := self._valid('nll_loss'):
