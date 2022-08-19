@@ -21,8 +21,6 @@ from rat_spn import RatSpn, RatSpnConfig
 from experiments.train_mnist import count_params
 from utils import non_existing_folder_name
 from mnist_gen_train import *
-import graphviz
-from graphviz import nohtml
 
 if __name__ == "__main__":
     import argparse
@@ -176,29 +174,6 @@ if __name__ == "__main__":
                             if args.ent_loss_coef > 0.0:
                                 ent_loss = -args.ent_loss_coef * vi_ent_approx
                     loss = mse_loss + ll_loss + ent_loss
-
-                print(1)
-                g = graphviz.Digraph('g', filename='btree.gv', comment=f"SPN",
-                                     node_attr={'shape': 'record', 'height': '.1'})
-                cond = 0
-                for i in range(model.max_layer_index + 1):
-                    layer = model.layer_index_to_obj(i)
-                    if i == 0:
-                        # Leaf layer
-                        if False:
-                            means = model.means[cond].detach().cpu().numpy()  # [F, I, R]
-                            log_stds = model.log_stds[cond].detach().cpu().numpy()
-                            for r in range(means.shape[2]):
-                                for f in range(means.shape[0]):
-                                    content = '|'.join([f'<f{i}> ' for i in range(means.shape[1])])
-                                    g.node(f'dist_F{f}R{r}', nohtml(content))
-
-                        prod_features = model._leaf.prod._out_features
-                        for r in range(model.config.R):
-                            for f in range(prod_features):
-                                content = '|'.join([f'<f{i}> ' for i in range(model.config.I)])
-                                g.node(f'dist_F{f}R{r}', nohtml(content))
-                    elif isinstance(layer, Cross)
 
                 loss.backward()
                 optimizers[m].step()
