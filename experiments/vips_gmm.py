@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from rat_spn import RatSpn, RatSpnConfig
 from distributions import RatNormal
 from experiments.train_mnist import count_params
-from experiments.train_mnist_gen import time_delta
+from experiments.mnist_gen_train import time_delta
 from torch import optim
 import torch.distributions as dist
 import gif

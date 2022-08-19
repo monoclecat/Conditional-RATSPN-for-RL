@@ -19,7 +19,7 @@ from cspn import CSPN, CspnConfig
 from rat_spn import RatSpn, RatSpnConfig
 
 from train_mnist import count_params
-from train_mnist_gen import print_cspn_params, time_delta, get_mnist_loaders, eval_root_sum_override, plot_samples
+from mnist_gen_train import print_cspn_params, time_delta, get_mnist_loaders, eval_root_sum_override, plot_samples
 
 def evaluate_sampling(model, save_dir, device, img_size):
     model.eval()
