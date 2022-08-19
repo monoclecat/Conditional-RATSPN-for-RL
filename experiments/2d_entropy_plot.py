@@ -13,7 +13,7 @@ if __name__ == "__main__":
     matplotlib.use('Agg')
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dir', '-d', type=str, help='Directory with model files')
+    parser.add_argument('--dir', '-d', type=str, help='Directory with model files', required=True)
     parser.add_argument('--duration', type=int, default=30)
     parser.add_argument('--grid_points', type=int, default=501)
     parser.add_argument('--make_gif', '-gif', action='store_true', help="Create gif of plots")
