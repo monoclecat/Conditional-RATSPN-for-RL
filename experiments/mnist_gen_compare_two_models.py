@@ -42,7 +42,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_interval', '-save', type=int, default=10, help='Epoch interval to save model')
     parser.add_argument('--eval_interval', '-eval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')
-    parser.add_argument('--ent_approx', '-no_ent', action='store_true', help="Compute entropy")
+    parser.add_argument('--ent_approx', '-ent', action='store_true', help="Compute entropy")
     parser.add_argument('--sample_onehot', action='store_true', help="When evaluating model, sample onehot style.")
     parser.add_argument('--ent_approx__sample_size', type=int, default=5,
                         help='When approximating entropy, use this sample size. ')
@@ -130,21 +130,22 @@ if __name__ == "__main__":
         for m in ['model1', 'model2']:
             loggers[m].reset(epoch)
         for batch_index, (image, label) in enumerate(train_loader):
-            # Send data to correct device
+            means_clipped = {'model1': th.zeros_like(model1.means), 'model2': th.zeros_like(model2.means)}
+            log_stds_clipped = {'model1': th.zeros_like(model1.means), 'model2': th.zeros_like(model2.means)}
             label = F.one_hot(label, cond_size).float().to(device)
-            image = image.to(device)
             for m in ['model1', 'model2']:
+                data = image.clone().to(device)
                 model = models[m]
                 logger = loggers[m]
                 if model.config.tanh_squash:
-                    image.sub_(0.5).mul_(2).atanh_()
-                # plt.imshow(image[0].permute(1, 2, 0).cpu(), cmap='Greys')
+                    data.sub_(0.5).mul_(2).atanh_()
+                # plt.imshow(data[0].permute(1, 2, 0).cpu(), cmap='Greys')
                 # plt.imshow(sample[0, 0].view(*img_size).permute(1, 2, 0).cpu(), cmap='Greys')
                 # plt.show()
 
                 # Inference
                 optimizers[m].zero_grad()
-                data = image.reshape(image.shape[0], -1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                data = data.reshape(data.shape[0], -1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
                 mse_loss = ll_loss = ent_loss = loss_ce = vi_ent_approx = th.zeros(1).to(device)
                 def bookmark():
                     pass
