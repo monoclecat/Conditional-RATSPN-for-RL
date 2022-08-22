@@ -227,3 +227,4 @@ docs/cache
 results*
 /src/spn/experiments/data/
 /data/
+/cluster/
