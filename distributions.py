@@ -47,8 +47,6 @@ class RatNormal(Leaf):
 
         # Create gaussian means and stds
         self.mean_param = nn.Parameter(th.randn(1, in_features, out_channels, num_repetitions))
-        self.in_features = in_features
-        self.num_repetitions = num_repetitions
 
         self._tanh_squash = tanh_squash
         self._no_tanh_log_prob_correction = no_tanh_log_prob_correction
@@ -67,6 +65,10 @@ class RatNormal(Leaf):
         self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
 
         self._dist_params_are_bounded = False
+
+    @property
+    def device(self):
+        return self.marginalization_constant.device
 
     def bounded_means(self, means: th.Tensor = None):
         if means is None:
@@ -97,7 +99,7 @@ class RatNormal(Leaf):
         if isinstance(means, np.ndarray):
             means = th.as_tensor(means)
         means = self.bounded_means(means)
-        self.mean_param = nn.Parameter(th.as_tensor(means, dtype=th.float, device=self.mean_param.device))
+        self.mean_param = nn.Parameter(th.as_tensor(means, dtype=th.float, device=self.device))
 
     @property
     def log_stds(self):
@@ -111,7 +113,7 @@ class RatNormal(Leaf):
         if isinstance(log_stds, np.ndarray):
             log_stds = th.as_tensor(log_stds)
         log_stds = self.bounded_log_stds(log_stds)
-        self.log_std_param = nn.Parameter(th.as_tensor(log_stds, dtype=th.float, device=self.log_std_param.device))
+        self.log_std_param = nn.Parameter(th.as_tensor(log_stds, dtype=th.float, device=self.device))
 
     @property
     def stds(self):
