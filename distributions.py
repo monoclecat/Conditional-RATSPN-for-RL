@@ -82,9 +82,9 @@ class RatNormal(Leaf):
     def bounded_log_stds(self, log_stds: th.Tensor = None):
         if log_stds is None:
             log_stds = self.log_std_param
-        LOG_STD_MAX = 2
-        LOG_STD_MIN = -15
-        log_stds = th.clamp(log_stds, LOG_STD_MIN, LOG_STD_MAX)
+        LOG_STD_ABS_BOUND = 20
+        log_stds = th.tanh(log_stds / LOG_STD_ABS_BOUND) * LOG_STD_ABS_BOUND
+        # log_stds = th.clamp(log_stds, LOG_STD_MIN, LOG_STD_MAX)
         return log_stds
 
     @property
