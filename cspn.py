@@ -163,9 +163,9 @@ class CSPN(RatSpn):
 
         placeholder = th.zeros_like(self._leaf.base_leaf.mean_param)
         del self._leaf.base_leaf.mean_param
-        del self._leaf.base_leaf.log_std_param
+        del self._leaf.base_leaf.std_param
         self._leaf.base_leaf.mean_param = placeholder
-        self._leaf.base_leaf.log_std_param = placeholder
+        self._leaf.base_leaf.std_param = placeholder
 
     def create_feat_layers(self, feature_dim: tuple):
         assert len(feature_dim) == 3 or len(feature_dim) == 1, \
@@ -246,9 +246,9 @@ class CSPN(RatSpn):
         self.dist_layers = nn.Sequential(*dist_layers)
 
         self.dist_mean_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.mean_param.numel())
-        self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.log_std_param.numel())
+        self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.std_param.numel())
         # print(f"Dist layer has {self._leaf.base_leaf.mean_param.numel()} + "
-              # f"{self._leaf.base_leaf.log_std_param.numel()} weights.")
+              # f"{self._leaf.base_leaf.std_param.numel()} weights.")
 
     def create_one_hot_in_channel_mapping(self):
         for lay in self._inner_layers:
@@ -304,9 +304,10 @@ class CSPN(RatSpn):
         dist_param_shape = (num_conditionals, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         dist_weights_pre_output = self.dist_layers(features)
         dist_means = self.dist_mean_head(dist_weights_pre_output).view(dist_param_shape)
-        dist_log_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
+        dist_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
         self._leaf.base_leaf.mean_param = self._leaf.base_leaf.bounded_means(dist_means)
-        self._leaf.base_leaf.log_std_param = self._leaf.base_leaf.bounded_log_stds(dist_log_stds)
+        # depending on self._leaf.base_leaf_stds_are_in_lin_space, the stds are in log space or in linear space
+        self._leaf.base_leaf.std_param = self._leaf.base_leaf.bounded_stds(dist_stds)
 
     def clear_params(self):
         for layer in self._inner_layers:
@@ -333,7 +334,7 @@ class CSPN(RatSpn):
         # Set bounded weights of the Gaussian distributions in the leaves
         dist_param_shape = (0, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         self._leaf.base_leaf.mean_param = th.zeros(dist_param_shape)
-        self._leaf.base_leaf.log_std_param = th.zeros(dist_param_shape)
+        self._leaf.base_leaf.std_param = th.zeros(dist_param_shape)
 
     def save(self, *args, **kwargs):
         save_model = CSPN(self.config)

@@ -470,15 +470,17 @@ def mnist_gen_train(
         config.S = RATSPN_S
         config.dropout = RATSPN_dropout
         config.leaf_base_class = RatNormal
+        config.leaf_base_kwargs = {
+            'no_tanh_log_prob_correction': no_correction_term, 'stds_in_lin_space': sigmoid_std
+        }
         if not no_tanh:
             config.tanh_squash = True
-            config.leaf_base_kwargs = {'no_tanh_log_prob_correction': no_correction_term}
             # config.leaf_base_kwargs = {'min_mean': -5.0, 'max_mean': 5.0}
         else:
             config.leaf_base_kwargs = {'min_mean': 0.0, 'max_mean': 1.0}
-        if sigmoid_std:
-            config.leaf_base_kwargs['min_sigma'] = 0.1
-            config.leaf_base_kwargs['max_sigma'] = 1.0
+        # if sigmoid_std:
+            # config.leaf_base_kwargs['min_sigma'] = 0.1
+            # config.leaf_base_kwargs['max_sigma'] = 1.0
         if ratspn:
             model = RatSpn(config)
             count_params(model)
