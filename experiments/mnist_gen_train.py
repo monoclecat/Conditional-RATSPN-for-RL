@@ -4,6 +4,7 @@ import sys
 import time
 import csv
 
+import wandb
 import imageio
 import numpy as np
 import skimage
@@ -426,7 +427,6 @@ def mnist_gen_train(
             os.environ['WANDB_MODE'] = 'offline'
         else:
             os.environ['WANDB_MODE'] = 'online'
-        import wandb
         wandb.login(key=os.environ['WANDB_API_KEY'])
         wandb_run = wandb.init(
             dir=results_dir,
