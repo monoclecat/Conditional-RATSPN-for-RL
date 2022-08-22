@@ -74,9 +74,9 @@ def get_mnist_loaders(dataset_dir, use_cuda, device, batch_size, img_side_len, i
     return train_loader, test_loader
 
 
-def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True, style='index'):
+def evaluate_sampling(model, save_dir, device, img_size, wandb_run=None, mpe=False, eval_ll=True, style='index'):
     model.eval()
-    log_like = []
+    log_like = None
     label = th.as_tensor(np.arange(10)).to(device)
     samples_per_label = 10
     with th.no_grad():
@@ -85,7 +85,7 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
             samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).sample
             samples = th.einsum('o...r -> ...or', samples)
             if eval_ll:
-                log_like.append(model(x=samples.atanh(), condition=None).mean().tolist())
+                log_like = model(x=samples.atanh(), condition=None).mean().item()
         else:
             if model.config.C > 1:
                 samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample
@@ -94,92 +94,91 @@ def evaluate_sampling(model, save_dir, device, img_size, mpe=False, eval_ll=True
                 samples = model.sample(n=samples_per_label, mode=style, is_mpe=mpe).sample
                 samples = th.einsum('o...r -> ...or', samples)
             if eval_ll:
-                log_like.append(model(x=samples).mean().tolist())
+                log_like = model(x=samples).mean().item()
+        if wandb_run is not None and log_like is not None:
+            wandb.log({f"{'mpe_' if mpe else ''}sample_log_likelihood": log_like})
         if model.config.tanh_squash:
             samples.mul_(0.5).add_(0.5)
         samples = samples.view(-1, *img_size[1:])
         # plt.imshow(samples[0].cpu(), cmap='Greys')
         # plt.show()
-        plot_samples(samples, save_dir)
-        if False and not mpe:
-            # To test sampling with evidence
-            path_parts = save_dir.split('/')
-            base_path = os.path.join('/', *path_parts[:-1], path_parts[-1].split('.')[0])
-            for layer_nr in range(model.config.D * 2):
-                layer_nr_dir = os.path.join(base_path, f"layer{layer_nr}")
-                os.makedirs(layer_nr_dir, exist_ok=True)
-                samples = model.sample(mode='index', n=10, layer_index=layer_nr,
-                                       post_processing_kwargs={'split_by_scope': True}).sample
-                # samples [nr_nodes, scopes, n, w, f, r]
-                samples = th.einsum('isnwFR -> RisnwF', samples).unsqueeze(-1)
-                # samples [r, nr_nodes, scopes, n, w, f]
-                if samples.isnan().any():
-                    # evidence_samples = samples.reshape(np.prod(samples.shape[:4]), *samples.shape[4:])
-                    evidence_samples = samples
-                    if model.config.tanh_squash:
-                        evidence_samples = evidence_samples.atanh()
-                    if isinstance(model, CSPN):
-                        evidence_samples = model.sample(
-                            condition=label, mode='index', evidence=evidence_samples, n=(1,), is_mpe=mpe,
-                        ).sample
-                    else:
-                        evidence_samples = model.sample(
-                            class_index=label, mode='index', evidence=evidence_samples, n=(1,), is_mpe=mpe,
-                        ).sample
-                    if model.config.tanh_squash:
-                        evidence_samples.mul_(0.5).add_(0.5)
-                    evidence_samples = evidence_samples.view(*samples.shape)
-                    evidence_samples[~samples.isnan()] = 0.0
-                else:
-                    evidence_samples = th.zeros_like(samples)
+    return samples, log_like
+    if False and not mpe:
+        # To test sampling with evidence
+        path_parts = save_dir.split('/')
+        base_path = os.path.join('/', *path_parts[:-1], path_parts[-1].split('.')[0])
+        for layer_nr in range(model.config.D * 2):
+            layer_nr_dir = os.path.join(base_path, f"layer{layer_nr}")
+            os.makedirs(layer_nr_dir, exist_ok=True)
+            samples = model.sample(mode='index', n=10, layer_index=layer_nr,
+                                   post_processing_kwargs={'split_by_scope': True}).sample
+            # samples [nr_nodes, scopes, n, w, f, r]
+            samples = th.einsum('isnwFR -> RisnwF', samples).unsqueeze(-1)
+            # samples [r, nr_nodes, scopes, n, w, f]
+            if samples.isnan().any():
+                # evidence_samples = samples.reshape(np.prod(samples.shape[:4]), *samples.shape[4:])
+                evidence_samples = samples
                 if model.config.tanh_squash:
-                    samples.mul_(0.5).add_(0.5)
-                samples[samples.isnan()] = 0.0
-                samples = samples.view(*samples.shape[:5], 28, 28, 1)
-                evidence_samples = evidence_samples.view(*evidence_samples.shape[:5], 28, 28, 1)
-                tmp = th.cat([th.zeros_like(samples), samples, evidence_samples], dim=-1).cpu()
-                for rep in range(tmp.shape[0]):
-                    rep_dir = os.path.join(layer_nr_dir, f"rep{rep}")
-                    os.makedirs(rep_dir, exist_ok=True)
-                    for node in range(tmp.shape[1]):
-                        node_dir = os.path.join(rep_dir, f"node{node}")
-                        os.makedirs(node_dir, exist_ok=True)
-                        for scope in range(tmp.shape[2]):
-                            feat_dir = os.path.join(node_dir, f"layer{layer_nr}_rep{rep}_node{node}_scope{scope}.png")
-                            n = tmp.size(3)
-                            w = tmp.size(4)
-                            tmp_to_save = tmp[rep, node, scope].view(n*w, 28, 28, 3).permute(0, 3, 1, 2)
-
-                            arr = torchvision.utils.make_grid(tmp_to_save, nrow=10, padding=1).cpu()
-                            arr = skimage.img_as_ubyte(arr.permute(1, 2, 0).numpy())
-                            imageio.imwrite(feat_dir, arr)
-
-        if False:
-            # To test sampling with evidence
+                    evidence_samples = evidence_samples.atanh()
+                if isinstance(model, CSPN):
+                    evidence_samples = model.sample(
+                        condition=label, mode='index', evidence=evidence_samples, n=(1,), is_mpe=mpe,
+                    ).sample
+                else:
+                    evidence_samples = model.sample(
+                        class_index=label, mode='index', evidence=evidence_samples, n=(1,), is_mpe=mpe,
+                    ).sample
+                if model.config.tanh_squash:
+                    evidence_samples.mul_(0.5).add_(0.5)
+                evidence_samples = evidence_samples.view(*samples.shape)
+                evidence_samples[~samples.isnan()] = 0.0
+            else:
+                evidence_samples = th.zeros_like(samples)
             if model.config.tanh_squash:
-                samples.sub_(0.5).mul_(2).atanh_()
-            zero = samples[0]
-            zero[0, :10] = 0.0
-            zero[0, 18:] = 0.0
-            zero[zero == 0.0] = th.nan
-            zero = zero.flatten(start_dim=1).expand(10, -1)
-            path_parts = save_dir.split('/')
-            evidence_samples = model.sample(condition=label, mode='index', evidence=zero, n=None, is_mpe=mpe).sample
-            if model.config.tanh_squash:
-                evidence_samples.mul_(0.5).add_(0.5)
-            evidence_samples = evidence_samples.view(-1, *img_size[1:])
-            plot_samples(evidence_samples, os.path.join('/', *path_parts[:-1], f"{path_parts[-1].split('_')[0]}_slice_evidence_zero.png"))
-    result_str = f"{'MPE sample' if mpe else 'Sample'} average log-likelihood: {np.mean(log_like):.2f}"
-    print(result_str)
+                samples.mul_(0.5).add_(0.5)
+            samples[samples.isnan()] = 0.0
+            samples = samples.view(*samples.shape[:5], 28, 28, 1)
+            evidence_samples = evidence_samples.view(*evidence_samples.shape[:5], 28, 28, 1)
+            tmp = th.cat([th.zeros_like(samples), samples, evidence_samples], dim=-1).cpu()
+            for rep in range(tmp.shape[0]):
+                rep_dir = os.path.join(layer_nr_dir, f"rep{rep}")
+                os.makedirs(rep_dir, exist_ok=True)
+                for node in range(tmp.shape[1]):
+                    node_dir = os.path.join(rep_dir, f"node{node}")
+                    os.makedirs(node_dir, exist_ok=True)
+                    for scope in range(tmp.shape[2]):
+                        feat_dir = os.path.join(node_dir, f"layer{layer_nr}_rep{rep}_node{node}_scope{scope}.png")
+                        n = tmp.size(3)
+                        w = tmp.size(4)
+                        tmp_to_save = tmp[rep, node, scope].view(n*w, 28, 28, 3).permute(0, 3, 1, 2)
+
+                        arr = torchvision.utils.make_grid(tmp_to_save, nrow=10, padding=1).cpu()
+                        arr = skimage.img_as_ubyte(arr.permute(1, 2, 0).numpy())
+                        imageio.imwrite(feat_dir, arr)
+
+    if False:
+        # To test sampling with evidence
+        if model.config.tanh_squash:
+            samples.sub_(0.5).mul_(2).atanh_()
+        zero = samples[0]
+        zero[0, :10] = 0.0
+        zero[0, 18:] = 0.0
+        zero[zero == 0.0] = th.nan
+        zero = zero.flatten(start_dim=1).expand(10, -1)
+        path_parts = save_dir.split('/')
+        evidence_samples = model.sample(condition=label, mode='index', evidence=zero, n=None, is_mpe=mpe).sample
+        if model.config.tanh_squash:
+            evidence_samples.mul_(0.5).add_(0.5)
+        evidence_samples = evidence_samples.view(-1, *img_size[1:])
+        plot_samples(evidence_samples, os.path.join('/', *path_parts[:-1], f"{path_parts[-1].split('_')[0]}_slice_evidence_zero.png"))
 
 
-def evaluate_model(model, device, loader, tag):
+def evaluate_model(model, loader, tag):
     """
     Description for method evaluate_model.
 
     Args:
         model: PyTorch module or a list of modules, one for each image channel
-        device: Execution device.
         loader: Data loader.
         tag (str): Tag for information.
 
@@ -190,11 +189,11 @@ def evaluate_model(model, device, loader, tag):
     log_like = []
     with th.no_grad():
         for image, label in loader:
-            image = image.flatten(start_dim=1).to(device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            image = image.flatten(start_dim=1).to(model.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
             if model.config.tanh_squash:
                 image.sub_(0.5).mul_(2).atanh_()
             if isinstance(model, CSPN):
-                label = F.one_hot(label, 10).float().to(device)
+                label = F.one_hot(label, 10).float().to(model.device)
                 log_like.append(model(x=image, condition=label).mean().tolist())
             else:
                 log_like.append(model(x=image).mean().tolist())
@@ -203,7 +202,7 @@ def evaluate_model(model, device, loader, tag):
     return mean_ll
 
 
-def plot_samples(x: th.Tensor, path):
+def plot_samples(x: th.Tensor, path, wandb_run=None, caption="", is_mpe=False):
     """
     Plot a single sample with the target and prediction in the title.
 
@@ -216,6 +215,9 @@ def plot_samples(x: th.Tensor, path):
     x[x > 1.0] = 1.0
 
     tensors = torchvision.utils.make_grid(x, nrow=10, padding=1).cpu()
+    if wandb_run is not None:
+        wandb_img = wandb.Image(tensors, caption)
+        wandb.log({f"{'MPE samples' if is_mpe else 'Samples'}": wandb_img})
     arr = tensors.permute(1, 2, 0).numpy()
     arr = skimage.img_as_ubyte(arr)
     imageio.imwrite(path, arr)
@@ -333,6 +335,23 @@ class CsvLogger(dict):
             super().__setitem__(key, value)
 
 
+def eval_routine(args, epoch, test_loader, wandb_run, sample_save_dir):
+    print("Evaluating model ...")
+    for mpe in [False, True]:
+        save_path = os.path.join(sample_save_dir, f"{'mpe-' if mpe else ''}epoch-{epoch:04}_{args.run_name}.png")
+        samples, log_like = evaluate_sampling(model, save_path, device, img_size, mpe=mpe, wandb_run=wandb_run,
+                                              style='onehot' if args.sample_onehot else 'index')
+        caption = f"{'MPE Samples' if mpe else 'Samples'} at epoch {epoch:04}. Avg. LL: {np.mean(log_like):.2f}"
+        print(caption)
+        plot_samples(samples, save_path, is_mpe=mpe, wandb_run=wandb_run)
+
+    logger.reset(epoch)
+    mnist_test_ll = evaluate_model(model, test_loader, "MNIST test")
+    logger['mnist_test_ll'] = mnist_test_ll
+    if wandb_run is not None:
+        wandb.log({'MNIST test LL': mnist_test_ll})
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -349,8 +368,9 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str,
                         help='Path to the pretrained model. If it is given, '
                              'all other SPN config parameters are ignored.')
-    parser.add_argument('--exp_name', '-name', type=str, default='cspn_test',
-                        help='Experiment name. The results dir will contain it.')
+    parser.add_argument('--proj_name', '-proj', type=str, default='test_proj', help='Project name')
+    parser.add_argument('--run_name', '-name', type=str, default='test_run',
+                        help='Name of this run. "RATSPN" or "CSPN" will be prepended.')
     parser.add_argument('--repetitions', '-R', type=int, default=5, help='Number of repetitions in RatSPN. ')
     parser.add_argument('--cspn_depth', '-D', type=int, default=3, help='Depth of the SPN.')
     parser.add_argument('--num_dist', '-I', type=int, default=5, help='Number of Gauss dists per pixel.')
@@ -366,7 +386,7 @@ if __name__ == "__main__":
     parser.add_argument('--eval_interval', '-eval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')
     parser.add_argument('--ratspn', action='store_true', help='Use a RATSPN and not a CSPN')
-    parser.add_argument('--no_ent_approx', '-no_ent', action='store_true', help="Don't compute entropy")
+    parser.add_argument('--ent_approx', '-ent', action='store_true', help="Compute entropy")
     parser.add_argument('--sample_onehot', action='store_true', help="When evaluating model, sample onehot style.")
     parser.add_argument('--ent_approx__sample_size', type=int, default=5,
                         help='When approximating entropy, use this sample size. ')
@@ -379,6 +399,7 @@ if __name__ == "__main__":
     parser.add_argument('--learn_by_sampling__sample_size', type=int, default=10,
                         help='When learning by sampling, this arg sets the number of samples generated for each label.')
     parser.add_argument('--no_tanh', action='store_true', help='Don\'t apply tanh squashing to leaves.')
+    parser.add_argument('--no_wandb', action='store_true', help='Don\'t log with wandb.')
     parser.add_argument('--sigmoid_std', action='store_true', help='Use sigmoid to set std.')
     parser.add_argument('--no_correction_term', action='store_true', help='Don\'t apply tanh correction term to logprob')
     args = parser.parse_args()
@@ -386,12 +407,31 @@ if __name__ == "__main__":
     if args.model_path:
         assert os.path.exists(args.model_path), f"The model_path doesn't exist! {args.model_path}"
 
-    results_dir = os.path.join(args.results_dir, non_existing_folder_name(args.results_dir, f"results_{args.exp_name}"))
+    results_dir = os.path.join(args.results_dir, args.proj_name)
+    args.run_name = f"{'RATSPN' if args.ratspn else 'CSPN'}_{args.run_name}"
+    folder = non_existing_folder_name(results_dir, args.run_name)
+    results_dir = os.path.join(results_dir, folder)
     model_dir = os.path.join(results_dir, non_existing_folder_name(results_dir, "models"))
     sample_dir = os.path.join(results_dir, non_existing_folder_name(results_dir, "samples"))
     os.makedirs(args.dataset_dir, exist_ok=True)
 
-    with open(os.path.join(results_dir, f"args_{args.exp_name}.csv"), 'w') as f:
+    wandb_run = None
+    if not args.no_wandb:
+        if args.verbose:
+            os.environ['WANDB_MODE'] = 'offline'
+        else:
+            os.environ['WANDB_MODE'] = 'online'
+        import wandb
+        wandb.login(key=os.environ['WANDB_API_KEY'])
+        wandb_run = wandb.init(
+            dir=results_dir,
+            project=args.proj_name,
+            name=folder,
+            group=args.run_name,
+        )
+        wandb_run.config.update(vars(args))
+
+    with open(os.path.join(results_dir, f"args_{args.run_name}.csv"), 'w') as f:
         w = csv.DictWriter(f, vars(args).keys())
         w.writeheader()
         w.writerow(vars(args))
@@ -448,6 +488,8 @@ if __name__ == "__main__":
             model = CSPN(config)
             print_cspn_params(model)
         model = model.to(device)
+        if not args.no_wandb:
+            wandb_run.config.update({'SPN_config': config})
     else:
         print(f"Using pretrained model under {args.model_path}")
         model = th.load(args.model_path, map_location=device)
@@ -463,29 +505,21 @@ if __name__ == "__main__":
     sample_interval = 1 if args.verbose else args.eval_interval  # number of epochs
     save_interval = 1 if args.verbose else args.save_interval  # number of epochs
 
-    csv_log = os.path.join(results_dir, f"log_{args.exp_name}.csv")
+    csv_log = os.path.join(results_dir, f"log_{args.run_name}.csv")
     logger = CsvLogger(csv_log)
 
     epoch = 0
     if not args.no_eval_at_start:
-        print("Evaluating model ...")
-        save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_{args.exp_name}.png")
-        evaluate_sampling(model, save_path, device, img_size,
-                          style='onehot' if args.sample_onehot else 'index')
-        save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:04}_{args.exp_name}.png")
-        evaluate_sampling(model, save_path, device, img_size, mpe=True,
-                          style='onehot' if args.sample_onehot else 'index')
-        logger.reset(epoch)
-        logger['mnist_test_ll'] = evaluate_model(model, device, test_loader, "MNIST test")
+        eval_routine(args, epoch, test_loader, wandb_run, sample_dir)
         logger.average()
         logger.write()
-    for epoch in range(args.epochs):
+    for epoch in range(1, args.epochs+1):
         if epoch > 20:
             lmbda = 0.5
         t_start = time.time()
         logger.reset(epoch)
         for batch_index, (image, label) in enumerate(train_loader):
-            # Send data to correct device
+            log_dict = {}
             label = F.one_hot(label, cond_size).float().to(device)
             image = image.to(device)
             if model.config.tanh_squash:
@@ -507,32 +541,38 @@ if __name__ == "__main__":
                     loss_ce = F.binary_cross_entropy_with_logits(output, label)
                 ll_loss = -output.mean()
                 loss = (1 - lmbda) * ll_loss + lmbda * loss_ce
-                if not args.no_ent_approx:
+                log_dict['nll_loss'] = loss
+                log_dict['ce_loss'] = loss_ce
+                if args.ent_approx:
                     vi_ent_approx = model.vi_entropy_approx(sample_size=args.ent_approx__sample_size).mean()
+                    log_dict['vi_ent_approx'] = vi_ent_approx
             else:
                 if args.learn_by_sampling:
                     sample: th.Tensor = model.sample_onehot_style(condition=label, n=args.learn_by_sampling__sample_size)
                     if model.config.tanh_squash:
                         sample = sample.clamp(-0.99999, 0.99999).atanh()
-                    mse_loss: th.Tensor = ((data - sample) ** 2).mean()
+                    loss = ((data - sample) ** 2).mean()
+                    log_dict['mse_loss'] = loss
                 else:
                     output: th.Tensor = model(x=data, condition=label)
-                    ll_loss = -output.mean()
-                    if not args.no_ent_approx:
+                    loss = -output.mean()
+                    log_dict['nll_loss'] = loss
+                    if args.ent_approx:
                         vi_ent_approx, batch_ent_log = model.vi_entropy_approx(
                             sample_size=args.ent_approx__sample_size, condition=label, verbose=True,
                         )
                         vi_ent_approx = vi_ent_approx.mean()
+                        log_dict['vi_ent_approx'] = vi_ent_approx
                         if args.ent_loss_coef > 0.0:
                             ent_loss = -args.ent_loss_coef * vi_ent_approx
-                loss = mse_loss + ll_loss + ent_loss
-
+                            log_dict['ent_loss'] = ent_loss
+                            loss = loss + ent_loss
+            log_dict['loss'] = loss
             loss.backward()
             optimizer.step()
-            logger.add_to_avg_keys(
-                nll_loss=ll_loss, mse_loss=mse_loss, ce_loss=loss_ce, ent_loss=ent_loss, loss=loss,
-                vi_ent_approx=vi_ent_approx,
-            )
+            logger.add_to_avg_keys(**log_dict)
+            if wandb_run is not None:
+                wandb.log(log_dict)
             if False:
                 for lay_nr, lay_dict in batch_ent_log.items():
                     for key, val in lay_dict.items():
@@ -548,17 +588,10 @@ if __name__ == "__main__":
         t_delta = np.around(time.time()-t_start, 2)
         if epoch % save_interval == (save_interval-1):
             print("Saving model ...")
-            model.save(os.path.join(model_dir, f"epoch-{epoch:04}_{args.exp_name}.pt"))
+            model.save(os.path.join(model_dir, f"epoch-{epoch:04}_{args.run_name}.pt"))
 
         if epoch % sample_interval == (sample_interval-1):
-            print("Evaluating model ...")
-            save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_{args.exp_name}.png")
-            evaluate_sampling(model, save_path, device, img_size,
-                              style='onehot' if args.sample_onehot else 'index')
-            save_path = os.path.join(sample_dir, f"mpe-epoch-{epoch:04}_{args.exp_name}.png")
-            evaluate_sampling(model, save_path, device, img_size, mpe=True,
-                              style='onehot' if args.sample_onehot else 'index')
-            logger['mnist_test_ll'] = evaluate_model(model, device, test_loader, "MNIST test")
+            eval_routine(args, epoch, test_loader, wandb_run, sample_dir)
 
         logger.average()
         logger['time'] = t_delta
