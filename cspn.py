@@ -305,9 +305,15 @@ class CSPN(RatSpn):
         dist_weights_pre_output = self.dist_layers(features)
         dist_means = self.dist_mean_head(dist_weights_pre_output).view(dist_param_shape)
         dist_stds = self.dist_std_head(dist_weights_pre_output).view(dist_param_shape)
-        self._leaf.base_leaf.mean_param = self._leaf.base_leaf.bounded_means(dist_means)
+        dist_means = self._leaf.base_leaf.bounded_means(dist_means)
+        dist_stds = self._leaf.base_leaf.bounded_stds(dist_stds)
+        # if (dist_stds <= 0.0).any() or dist_stds.isnan().any():
+            # print(1)
+        # if (dist_stds ** 2 <= 0.0).any():
+            # print(2)
+        self._leaf.base_leaf.mean_param = dist_means
         # depending on self._leaf.base_leaf_stds_are_in_lin_space, the stds are in log space or in linear space
-        self._leaf.base_leaf.std_param = self._leaf.base_leaf.bounded_stds(dist_stds)
+        self._leaf.base_leaf.std_param = dist_stds
 
     def clear_params(self):
         for layer in self._inner_layers:
