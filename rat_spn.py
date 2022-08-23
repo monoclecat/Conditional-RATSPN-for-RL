@@ -176,7 +176,23 @@ class RatSpn(nn.Module):
             x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
         perm_indices = self.permutation.unsqueeze(-2).expand_as(x)
         x = th.gather(x, dim=-3, index=perm_indices)
+        return x
 
+    def apply_inv_permutation(self, x: th.Tensor) -> th.Tensor:
+        """
+        Apply the reverse permutation to the input.
+
+        Args:
+            x: th.Tensor, last three dims must have shape [F, *, 1 or self.config.R]. * = any size
+
+        Returns:
+            th.Tensor: Input with inverted permutation along feature axis. Each repetition has its own permutation.
+        """
+        assert x.size(-1) == 1 or x.size(-1) == self.config.R
+        if x.size(-1) == 1:
+            x = x.repeat(*([1] * (x.dim()-1)), self.config.R)
+        perm_indices = self.inv_permutation.unsqueeze(-2).expand_as(x)
+        x = th.gather(x, dim=-3, index=perm_indices)
         return x
 
     def forward(self, x: th.Tensor, layer_index: int = None, x_needs_permutation: bool = True) -> th.Tensor:
@@ -681,7 +697,7 @@ class RatSpn(nn.Module):
             samples = ctx.sample
             # We sampled all ic nodes of each repetition in the child layer
 
-            child_ll = self.forward(x=samples, layer_index=layer_index-1, x_needs_permutation=False)
+            child_ll = self.forward(x=samples.unsqueeze(-2), layer_index=layer_index-1, x_needs_permutation=False)
             child_ll = child_ll.mean(dim=1)
 
         ic, w, d, _, r = child_ll.shape
@@ -1796,7 +1812,8 @@ class RatSpn(nn.Module):
             with th.no_grad():
                 samples = self.sample(mode='index', **sample_args)
 
-        log_probs = self.forward(th.einsum('o...FR -> ...FoR', samples.sample), layer_index=layer_index)
+        sample = th.einsum('onwFR -> nwFoR', samples.sample.unsqueeze(-1))
+        log_probs = self.forward(sample, layer_index=layer_index)
         return -log_probs.mean()
 
     def huber_entropy_lb(self, layer_index: int = None, verbose=True):
@@ -1816,14 +1833,13 @@ class RatSpn(nn.Module):
             layer_index = self.max_layer_index
 
         # Distribution layer of leaf layer
-        leaf = self._leaf.base_leaf
-        means = leaf.inv_permutation_means
-        var = leaf.inv_permutation_log_stds.exp() ** 2
+        means = self.apply_inv_permutation(self.means)
+        var = self.apply_inv_permutation(self.var)
         var = var.unsqueeze(2).unsqueeze(-2) + var.unsqueeze(3).unsqueeze(-1)
         std = th.sqrt(var)
         gauss = dist.Normal(means.unsqueeze(2).unsqueeze(-2).expand_as(std), std)
         log_probs = gauss.log_prob(means.unsqueeze(3).unsqueeze(-1).expand_as(std))
-        permutation = leaf.permutation.unsqueeze(-2).unsqueeze(-2).expand_as(log_probs)
+        permutation = self.permutation.unsqueeze(-2).unsqueeze(-2).unsqueeze(-2).expand_as(log_probs)
         log_probs = th.gather(log_probs, dim=1, index=permutation)
 
         # Product layer of leaf layer
