@@ -35,6 +35,7 @@ class RatNormal(Leaf):
         max_mean: float = None,
         no_tanh_log_prob_correction: bool = False,
         stds_in_lin_space: bool = False,
+        stds_sigmoid_bound: bool = False,
     ):
         """Create a gaussian layer.
 
@@ -52,6 +53,7 @@ class RatNormal(Leaf):
         self._tanh_squash = tanh_squash
         self._no_tanh_log_prob_correction = no_tanh_log_prob_correction
         self._stds_in_lin_space = stds_in_lin_space
+        self._stds_sigmoid_bound = stds_sigmoid_bound
         self._ratspn = ratspn
 
         if min_sigma is not None and max_sigma is not None:
@@ -63,8 +65,14 @@ class RatNormal(Leaf):
 
         self.min_sigma = check_valid(min_sigma, float, 0.0, max_sigma, allow_none=True)
         self.max_sigma = check_valid(max_sigma, float, min_sigma, allow_none=True)
+        if self._stds_sigmoid_bound:
+            assert self.max_sigma is not None, "A max sigma must be provided if stds should be sigmoid-bounded."
+        else:
+            assert self.max_sigma is None, "If stds are bounded by softplus, max_sigma must be None!"
         self.min_mean = check_valid(min_mean, float, upper_bound=max_mean, allow_none=True)
         self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
+        self.min_log_sigma = math.log(self.min_sigma)
+        self.max_log_sigma = math.log(self.min_sigma)
 
         self._dist_params_are_bounded = False
 
@@ -85,10 +93,15 @@ class RatNormal(Leaf):
         if stds is None:
             stds = self.std_param
         if self._stds_in_lin_space:
-            stds = F.softplus(stds)
+            if self._stds_sigmoid_bound:
+                sigma_ratio = th.sigmoid(self.stds)
+                stds = self.min_sigma + (self.max_sigma - self.min_sigma) * sigma_ratio
+            else:
+                stds = F.softplus(stds) + self.min_sigma
         else:
-            LOG_STD_ABS_BOUND = 20
-            stds = th.tanh(stds / LOG_STD_ABS_BOUND) * LOG_STD_ABS_BOUND
+            stds = F.softplus(stds) + self.min_log_sigma
+            # LOG_STD_ABS_BOUND = 20
+            # stds = th.tanh(stds / LOG_STD_ABS_BOUND) * LOG_STD_ABS_BOUND
             # stds = th.clamp(stds, LOG_STD_MIN, LOG_STD_MAX)
         return stds
 
