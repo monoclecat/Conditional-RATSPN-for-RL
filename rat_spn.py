@@ -1078,11 +1078,11 @@ class RatSpn(nn.Module):
                         'weighted_child_ent': weighted_ch_ents.detach(),
                         'weighted_aux_resp': weighted_aux_resp.detach(),
                     }
-                    logging[layer_index] = self.log_dict_from_metric(metrics)
+                    logging = self.log_dict_from_metric(layer_index, metrics)
 
         return node_entropies, logging
 
-    def log_dict_from_metric(self, metrics: Dict, rep_dim=-1, batch_dim: Optional[int] = 0):
+    def log_dict_from_metric(self, layer_index: int, metrics: Dict, rep_dim=-1, batch_dim: Optional[int] = 0):
         log_dict = {}
         for rep in range(list(metrics.values())[0].size(rep_dim)):
             rep_key = f"rep{rep}"
@@ -1090,16 +1090,19 @@ class RatSpn(nn.Module):
             for key, metric in metrics.items():
                 if metric is None:
                     continue
+                key_base = f"{layer_index}/{rep_key}/{key}"
                 metric = metric.to(self.device)
                 log_dict.update({
-                    f"{rep_key}/{key}/min": metric.index_select(rep_dim, rep).min().item(),
-                    f"{rep_key}/{key}/max": metric.index_select(rep_dim, rep).max().item(),
-                    f"{rep_key}/{key}/mean": metric.index_select(rep_dim, rep).mean().item(),
+                    f"{key_base}/min": metric.index_select(rep_dim, rep).min().item(),
+                    f"{key_base}/max": metric.index_select(rep_dim, rep).max().item(),
+                    f"{key_base}/mean": metric.index_select(rep_dim, rep).mean().item(),
                 })
                 if batch_dim is not None:
-                    log_dict.update({
-                        f"{rep_key}/{key}/std": metric.index_select(rep_dim, rep).std(dim=batch_dim).mean().item(),
-                    })
+                    std = metric.index_select(rep_dim, rep).std(dim=batch_dim).mean().item()
+                    if not np.isnan(std):
+                        log_dict.update({
+                            f"{key_base}/std": std
+                        })
 
         return log_dict
 
@@ -1776,7 +1779,8 @@ class RatSpn(nn.Module):
                 sample_size=sample_size, grad_thru_resp=grad_thru_resp,
                 verbose=verbose,
             )
-            logging.update({layer_index: layer_log})
+            if layer_log != {}:
+                logging.update(layer_log)
         return child_entropies.flatten(), logging
 
     def monte_carlo_ent_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
@@ -1874,6 +1878,15 @@ class RatSpn(nn.Module):
                 if i < layer_index:
                     log_probs = log_probs.unsqueeze(-3) + weights.unsqueeze(-3).unsqueeze(-1)
                     log_probs = log_probs.logsumexp(2)
+
+                if verbose:
+                    weight_entropy = - th.sum(self.layer_index_to_obj(i).weights *
+                                              self.layer_index_to_obj(i).weights.exp(), dim=2).unsqueeze(0)
+                    metrics = {
+                        'weight_entropy': weight_entropy.detach(),
+                        'huber_entropy_LB': entropy_lb.detach(),
+                    }
+                    logging.update(self.log_dict_from_metric(i, metrics, batch_dim=None))
                 continue
                 log_probs = log_probs.unsqueeze(-2) + weights.unsqueeze(0)
                 log_probs = log_probs.logsumexp(-3)
