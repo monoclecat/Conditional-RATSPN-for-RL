@@ -94,7 +94,7 @@ class RatNormal(Leaf):
             stds = self.std_param
         if self._stds_in_lin_space:
             if self._stds_sigmoid_bound:
-                sigma_ratio = th.sigmoid(self.stds)
+                sigma_ratio = th.sigmoid(stds)
                 stds = self.min_sigma + (self.max_sigma - self.min_sigma) * sigma_ratio
             else:
                 stds = F.softplus(stds) + self.min_sigma
