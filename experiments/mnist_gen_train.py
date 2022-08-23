@@ -355,8 +355,10 @@ def mnist_gen_train(
         CSPN_sum_param_layers: list = None,
         CSPN_dist_param_layers: list = None,
         CSPN_feat_layers: list = None,
+        min_sigma: float = 1e-5,
         no_tanh: bool = False,
-        no_correction_term: bool = False, sigmoid_std: bool = False,
+        no_correction_term: bool = False,
+        lin_std: bool = False,
         verbose: bool = False,
         sample_onehot: bool = False,
         invert: float = 0.0,
@@ -401,7 +403,7 @@ def mnist_gen_train(
         learn_by_sampling__sample_size: When learning by sampling, this arg sets the number of samples generated for each label.
         no_tanh: Don't apply tanh squashing to leaves.
         no_wandb: Don't log with wandb.
-        sigmoid_std: Use sigmoid to set std.
+        lin_std: Learn stds in linear space instead of log space
         no_correction_term: Don't apply tanh correction term to logprob
     """
     if CSPN_sum_param_layers is None:
@@ -471,16 +473,14 @@ def mnist_gen_train(
         config.dropout = RATSPN_dropout
         config.leaf_base_class = RatNormal
         config.leaf_base_kwargs = {
-            'no_tanh_log_prob_correction': no_correction_term, 'stds_in_lin_space': sigmoid_std
+            'no_tanh_log_prob_correction': no_correction_term, 'stds_in_lin_space': lin_std
         }
         if not no_tanh:
             config.tanh_squash = True
             # config.leaf_base_kwargs = {'min_mean': -5.0, 'max_mean': 5.0}
         else:
             config.leaf_base_kwargs = {'min_mean': 0.0, 'max_mean': 1.0}
-        # if sigmoid_std:
-            # config.leaf_base_kwargs['min_sigma'] = 0.1
-            # config.leaf_base_kwargs['max_sigma'] = 1.0
+        config.leaf_base_kwargs['min_sigma'] = min_sigma
         if ratspn:
             model = RatSpn(config)
             count_params(model)
@@ -502,8 +502,6 @@ def mnist_gen_train(
     print(f"Optimizer: {optimizer}")
 
     lmbda = 1.0
-    sample_interval = 1 if verbose else eval_interval  # number of epochs
-    save_interval = 1 if verbose else save_interval  # number of epochs
 
     csv_log = os.path.join(results_dir, f"log_{run_name}.csv")
     logger = CsvLogger(csv_log)
@@ -529,7 +527,7 @@ def mnist_gen_train(
         eval_routine(epoch)
         logger.average()
         logger.write()
-    for epoch in range(1, epochs+1):
+    for epoch in range(epochs):
         if epoch > 20:
             lmbda = 0.5
         t_start = time.time()
@@ -602,11 +600,11 @@ def mnist_gen_train(
                 # print(logger, end="\r")
 
         t_delta = np.around(time.time()-t_start, 2)
-        if epoch % save_interval == (save_interval-1):
+        if epoch % save_interval == 0 and epoch > 0:
             print("Saving model ...")
             model.save(os.path.join(model_dir, f"epoch-{epoch:04}_{run_name}.pt"))
 
-        if epoch % sample_interval == (sample_interval-1):
+        if epoch % eval_interval == 0 and epoch > 0:
             eval_routine(epoch)
 
         logger.average()
@@ -661,9 +659,10 @@ if __name__ == "__main__":
     parser.add_argument('--learn_by_sampling', action='store_true', help='Learn in sampling mode.')
     parser.add_argument('--learn_by_sampling__sample_size', type=int, default=10,
                         help='When learning by sampling, this arg sets the number of samples generated for each label.')
+    parser.add_argument('--min_sigma', type=float, default=1e-5, help='Minimum standard deviation')
     parser.add_argument('--no_tanh', action='store_true', help='Don\'t apply tanh squashing to leaves.')
     parser.add_argument('--no_wandb', action='store_true', help='Don\'t log with wandb.')
-    parser.add_argument('--sigmoid_std', action='store_true', help='Use sigmoid to set std.')
+    parser.add_argument('--lin_std', action='store_true', help='Stds are learned in linear space instead of log-space. ')
     parser.add_argument('--no_correction_term', action='store_true', help='Don\'t apply tanh correction term to logprob')
     args = parser.parse_args()
     mnist_gen_train(**vars(args))
