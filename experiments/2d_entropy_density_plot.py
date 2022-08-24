@@ -156,12 +156,6 @@ if __name__ == "__main__":
     def scale_to_grid(t: np.ndarray):
         return (t - min_x) / (max_x - min_x) * grid_points
 
-    def dist_imshow(handle, probs, apply_exp_view=True, **kwargs):
-        # handle is either an axis or plt
-        if apply_exp_view:
-            probs = grid_view(probs).exp()
-        handle.imshow(probs, extent=[min_x, max_x, max_x, min_x], **kwargs)
-
     def plot_dist(probs, huber_ent, vi_ent, mc_ent, mpe, step, train_mode: str):
         fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
         norm = mpl.colors.Normalize(vmin=args.vmin, vmax=args.vmax, clip=True)
