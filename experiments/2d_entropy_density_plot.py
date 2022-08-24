@@ -26,10 +26,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     device = th.device('cpu')
 
-    assert args.vmin < args.vmax, "vmin must be lower than vmax!"
-    if args.plot_in_log_space:
-        assert args.vmin <= 0.0 and args.vmax <= 0.0, "When plotting in log space, vmin and vmax must be <= 0.0!"
-
     config = None
     probs = None
     steps = None
@@ -140,6 +136,9 @@ if __name__ == "__main__":
         print(f"vmin was left empty and has been set to {args.vmin}")
     else:
         print(f"vmin is {args.vmin} ({'log space' if args.plot_in_log_space else 'linear space'}).")
+    assert args.vmin < args.vmax, "vmin must be lower than vmax!"
+    if args.plot_in_log_space:
+        assert args.vmin <= 0.0 and args.vmax <= 0.0, "When plotting in log space, vmin and vmax must be <= 0.0!"
 
     wandb_run = None
     if args.wandb:
@@ -151,7 +150,7 @@ if __name__ == "__main__":
             dir=args.dir,
         )
 
-    frame_save_path = f"{'log' if args.plot_in_log_space else 'lin'}probplots_{dir_name}"
+    frame_save_path = f"{'log' if args.plot_in_log_space else 'lin'}prob_vmin{args.vmin:.2f}_vmax{args.vmax:.2f}_{dir_name}"
     frame_save_path = os.path.join(args.dir, non_existing_folder_name(args.dir, frame_save_path))
 
     def scale_to_grid(t: np.ndarray):
@@ -204,11 +203,8 @@ if __name__ == "__main__":
         ax1.set_title(' - '.join([huber_ent_txt, vi_ent_txt, mc_ent_txt]))
         return fig
 
-    def plot_voronoi(probs, huber_ent, vi_ent, mc_ent, mpe, step, train_mode: str):
-        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
-
     if not args.plot_in_log_space:
-        probs = probs.exp()
+        probs = np.exp(probs)
     for i in tqdm(range(len(steps)), desc=f"Creating frames of the {'log ' if args.plot_in_log_space else ''}density"):
         if (num_over := (probs > args.vmax).sum()) > 0:
             print(f"{num_over} probabilities in step {steps[i]} are over {args.vmax}. Max is {probs[i].max():.4f}")
