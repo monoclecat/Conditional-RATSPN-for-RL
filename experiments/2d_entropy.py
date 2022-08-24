@@ -33,9 +33,8 @@ if __name__ == "__main__":
                         help="If True, additional gradients are used (different for each method).")
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
     parser.add_argument('--max_abs_mean', type=int, default=50)
-    parser.add_argument('--vi', action='store_true', help="Approximate with VI")
-    parser.add_argument('--huber', action='store_true', help="Use Huber lower bound")
-    parser.add_argument('--montecarlo', action='store_true', help="Approximate entropy with samples of the root")
+    parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
+                        choices=['vi', 'huber', 'mc'])
     parser.add_argument('--RATSPN_F', '-F', type=int, default=4, help='Number of features in the SPN leaf layer. ')
     parser.add_argument('--RATSPN_R', '-R', type=int, default=3, help='Number of repetitions in RatSPN. ')
     parser.add_argument('--RATSPN_D', '-D', type=int, default=3, help='Depth of the SPN.')
@@ -48,11 +47,6 @@ if __name__ == "__main__":
     parser.add_argument('--stds_sigmoid_bound', action='store_true',
                         help='Bound stds with a sigmoid instead of softplus. ')
     args = parser.parse_args()
-    assert args.huber + args.montecarlo + args.vi == 1
-
-    for d in [args.results_dir]:
-        if not os.path.exists(d):
-            os.makedirs(d)
 
     min_x = -args.max_abs_mean
     max_x = -min_x
@@ -84,10 +78,10 @@ if __name__ == "__main__":
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
         n_steps = args.steps
-        if args.huber:
+        if args.objective == 'huber':
             exp_name = f"entmax_huberLB_{args.run_name}" \
                        f"_seed{seed}"
-        elif args.montecarlo:
+        elif args.objective == 'mc':
             exp_name = f"entmax_MCapprox_{args.run_name}" \
                        f"_{args.mc_sample_size}samples" \
                        f"{'_sampledwithgrad' if args.additional_grad else ''}" \
@@ -97,6 +91,9 @@ if __name__ == "__main__":
                        f"_{args.vi_sample_size}samples" \
                        f"{'_gradthruresp' if args.additional_grad else ''}" \
                        f"_seed{seed}"
+
+        args.results_dir = os.path.join(args.results_dir, args.proj_name)
+        os.makedirs(args.results_dir, exist_ok=True)
         file_name_base = non_existing_folder_name(args.results_dir, exp_name)
         save_path = os.path.join(args.results_dir, file_name_base)
         model_save_path = os.path.join(save_path, "models")
@@ -135,20 +132,27 @@ if __name__ == "__main__":
             w.writerow(vars(args))
 
         npz_log = {}
-        for step in tqdm(range(int(n_steps)), desc='Progress'):
+        for step in tqdm(range(int(n_steps)+1), desc='Progress'):
             if step % args.log_interval == 0:
                 th.save(model, os.path.join(model_save_path, f"{file_name_base}_step{step:06d}.pt"))
                 if npz_log != {}:
                     np.savez(os.path.join(save_path, f"metrics_{exp_name}.npz"), npz_log)
+            if step == int(n_steps):
+                continue
 
             vi_ent, vi_log = model.vi_entropy_approx_layerwise(
-                sample_size=args.vi_sample_size, grad_thru_resp=args.vi and args.additional_grad, verbose=True,
+                sample_size=args.vi_sample_size, grad_thru_resp=args.objective == 'vi' and args.additional_grad, verbose=True,
             )
             huber_ent, huber_log = model.huber_entropy_lb(verbose=True)
             mc_ent = model.monte_carlo_ent_approx(
-                sample_size=args.mc_sample_size, sample_with_grad=args.montecarlo and args.additional_grad,
+                sample_size=args.mc_sample_size, sample_with_grad=args.objective == 'mc' and args.additional_grad,
             )
             combined_log = {**vi_log, **huber_log}
+            combined_log.update({
+                'VI_ent_approx': vi_ent.detach().mean().item(),
+                'huber_entropy_LB': huber_ent.detach().mean().item(),
+                'MC_root_entropy': mc_ent.detach().mean().item(),
+            })
             for key, curr_val in combined_log.items():
                 curr_val = np.expand_dims(np.asarray(curr_val, dtype='f2'), 0)
                 past_vals = npz_log.get(key)
@@ -160,20 +164,15 @@ if __name__ == "__main__":
                 else:
                     npz_log[key] = np.concatenate((past_vals, curr_val), 0)
 
-            if args.vi:
+            if args.objective == 'vi':
                 loss = -vi_ent.mean()
-            elif args.huber:
+            elif args.objective == 'huber':
                 loss = -huber_ent.mean()
-            elif args.montecarlo:
-                loss = -mc_ent.mean()
             else:
-                raise Exception("No entropy calculation mode was selected!")
-                # ent, log = model.vi_entropy_approx(**ent_args)
+                loss = -mc_ent.mean()
+
             if args.wandb:
                 wandb.log({
-                    'layerwise_VI_ent_approx': vi_ent.detach().mean().item(),
-                    'huber_entropy_LB': huber_ent.detach().mean().item(),
-                    'MC_root_node_entropy': mc_ent.detach().mean().item(),
                     **combined_log,
                 }, step=step)
             losses.append(loss.item())
