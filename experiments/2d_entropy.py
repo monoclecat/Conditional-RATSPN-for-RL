@@ -134,44 +134,52 @@ if __name__ == "__main__":
             w.writeheader()
             w.writerow(vars(args))
 
-        with open(os.path.join(save_path, f"metrics_{exp_name}.csv"), 'w') as f:
-            for step in tqdm(range(int(n_steps)), desc='Progress'):
-                if step % args.log_interval == 0:
-                    th.save(model, os.path.join(model_save_path, f"{file_name_base}_step{step:06d}.pt"))
+        npz_log = {}
+        for step in tqdm(range(int(n_steps)), desc='Progress'):
+            if step % args.log_interval == 0:
+                th.save(model, os.path.join(model_save_path, f"{file_name_base}_step{step:06d}.pt"))
+                if npz_log != {}:
+                    np.savez(os.path.join(save_path, f"metrics_{exp_name}.npz"), npz_log)
 
-                vi_ent, vi_log = model.vi_entropy_approx_layerwise(
-                    sample_size=args.vi_sample_size, grad_thru_resp=args.vi and args.additional_grad, verbose=True,
-                )
-                huber_ent, huber_log = model.huber_entropy_lb(verbose=True)
-                mc_ent = model.monte_carlo_ent_approx(
-                    sample_size=args.mc_sample_size, sample_with_grad=args.montecarlo and args.additional_grad,
-                )
-                combined_log = {**vi_log, **huber_log}
-                if step == 0:
-                    w = csv.DictWriter(f, combined_log.keys())
-                    w.writeheader()
-                w.writerow(combined_log)
-
-                if args.vi:
-                    loss = -vi_ent.mean()
-                elif args.huber:
-                    loss = -huber_ent.mean()
-                elif args.montecarlo:
-                    loss = -mc_ent.mean()
+            vi_ent, vi_log = model.vi_entropy_approx_layerwise(
+                sample_size=args.vi_sample_size, grad_thru_resp=args.vi and args.additional_grad, verbose=True,
+            )
+            huber_ent, huber_log = model.huber_entropy_lb(verbose=True)
+            mc_ent = model.monte_carlo_ent_approx(
+                sample_size=args.mc_sample_size, sample_with_grad=args.montecarlo and args.additional_grad,
+            )
+            combined_log = {**vi_log, **huber_log}
+            for key, curr_val in combined_log.items():
+                curr_val = np.expand_dims(np.asarray(curr_val, dtype='f2'), 0)
+                past_vals = npz_log.get(key)
+                if past_vals is None:
+                    if step > 0:
+                        npz_log[key] = np.concatenate((np.zeros((step-1)), curr_val), 0)
+                    else:
+                        npz_log[key] = curr_val
                 else:
-                    raise Exception("No entropy calculation mode was selected!")
-                    # ent, log = model.vi_entropy_approx(**ent_args)
-                if args.wandb:
-                    wandb.log({
-                        'layerwise_VI_ent_approx': vi_ent.detach().mean().item(),
-                        'huber_entropy_LB': huber_ent.detach().mean().item(),
-                        'MC_root_node_entropy': mc_ent.detach().mean().item(),
-                        **combined_log,
-                    }, step=step)
-                losses.append(loss.item())
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    npz_log[key] = np.concatenate((past_vals, curr_val), 0)
+
+            if args.vi:
+                loss = -vi_ent.mean()
+            elif args.huber:
+                loss = -huber_ent.mean()
+            elif args.montecarlo:
+                loss = -mc_ent.mean()
+            else:
+                raise Exception("No entropy calculation mode was selected!")
+                # ent, log = model.vi_entropy_approx(**ent_args)
+            if args.wandb:
+                wandb.log({
+                    'layerwise_VI_ent_approx': vi_ent.detach().mean().item(),
+                    'huber_entropy_LB': huber_ent.detach().mean().item(),
+                    'MC_root_node_entropy': mc_ent.detach().mean().item(),
+                    **combined_log,
+                }, step=step)
+            losses.append(loss.item())
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
         print(f"Finished with seed {seed}.")
 
