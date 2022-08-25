@@ -16,6 +16,20 @@ from utils import *
 from tqdm import tqdm
 import wandb
 
+def get_ents_from_metrics(metrics, step):
+    ents = []
+    for m_name in ['VI_ent_approx', 'huber_entropy_LB', 'MC_root_entropy']:
+        try:
+            ents.append(metrics.get(m_name)[step])
+        except IndexError:
+            try:
+                ents.append(metrics.get(m_name)[step-1])
+            except IndexError:
+                ents.append(None)
+                print(f"metric {m_name} didn't exist for step {step} or {step - 1}")
+    return ents
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()

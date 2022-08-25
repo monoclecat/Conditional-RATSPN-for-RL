@@ -22,6 +22,7 @@ if __name__ == "__main__":
     config = None
     probs = None
     steps = None
+    metrics = None
     cwd = os.path.realpath(args.dir)
     print(f"Reading from {cwd}")
     dir_name = os.path.split(cwd)[1]
@@ -89,9 +90,9 @@ if __name__ == "__main__":
             else:
                 steps = np.concatenate((steps, curr_step), 0)
         np.savez(os.path.join(cwd, 'root_children_log_probs.npz'), probs=probs, steps=steps)
-        model_log_probs = np.load(os.path.join(cwd, 'root_children_log_probs.npz'))
-        probs = model_log_probs['probs']
-        steps = model_log_probs['steps']
+        root_children_log_probs = np.load(os.path.join(cwd, 'root_children_log_probs.npz'))
+        probs = root_children_log_probs['probs']
+        steps = root_children_log_probs['steps']
 
     wandb_run = None
     if args.wandb:
@@ -150,29 +151,24 @@ if __name__ == "__main__":
         ax1.set_title(' - '.join([huber_ent_txt, vi_ent_txt, mc_ent_txt]))
         return fig
 
-    if not args.plot_in_log_space:
-        probs = np.exp(probs)
     for i in tqdm(range(len(steps)), desc=f"Creating frames of the {'log ' if args.plot_in_log_space else ''}density"):
         if (num_over := (probs > args.vmax).sum()) > 0:
             print(f"{num_over} probabilities in step {steps[i]} are over {args.vmax}. Max is {probs[i].max():.4f}")
         if False and (num_under := (probs < args.vmin).sum()) > 0:
             print(f"{num_under} probabilities in step {steps[i]:06} are under {args.vmin}. Min is {probs[i].min():.4f}")
         mpe = None
-        try:
-            vi_ent = metrics.get(f"VI_ent_approx")[steps[i]]
-        except IndexError:
-            vi_ent = None
-            print(f"metric for vi_ent didn't exist for step {steps[i]}")
-        try:
-            huber_ent = metrics.get(f"huber_entropy_LB")[steps[i]]
-        except IndexError:
-            huber_ent = None
-            print(f"metric for huber_ent didn't exist for step {steps[i]}")
-        try:
-            mc_ent = metrics.get(f"MC_root_entropy")[steps[i]]
-        except IndexError:
-            mc_ent = None
-            print(f"metric for mc_ent didn't exist for step {steps[i]}")
+
+        ents = []
+        for m_name in ['VI_ent_approx', 'huber_entropy_LB', 'MC_root_entropy']:
+            try:
+                ents.append(metrics.get(m_name)[steps[i]])
+            except IndexError:
+                try:
+                    ents.append(metrics.get(m_name)[steps[i]-1])
+                except IndexError:
+                    ents.append(None)
+                    print(f"metric {m_name} didn't exist for step {steps[i]} or {steps[i]-1}")
+        vi_ent, huber_ent, mc_ent = ents
 
         plot_args = {
             'probs': probs[i], 'mpe': mpe, 'step': steps[i], 'train_mode': train_mode,
