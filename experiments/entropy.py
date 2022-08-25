@@ -29,8 +29,6 @@ if __name__ == "__main__":
     parser.add_argument('--device', '-d', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--vi_sample_size', '-vi_samples', type=int, default=5)
     parser.add_argument('--mc_sample_size', '-mc_samples', type=int, default=50)
-    parser.add_argument('--additional_grad', action='store_true',
-                        help="If True, additional gradients are used (different for each method).")
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
     parser.add_argument('--max_abs_mean', type=int, default=50)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
@@ -44,8 +42,6 @@ if __name__ == "__main__":
     parser.add_argument('--max_sigma', type=float, default=2.0, help='Maximum standard deviation')
     parser.add_argument('--wandb', action='store_true', help='Log with wandb.')
     parser.add_argument('--offline', action='store_true', help='Set wandb to offline mode.')
-    parser.add_argument('--stds_sigmoid_bound', action='store_true',
-                        help='Bound stds with a sigmoid instead of softplus. ')
     args = parser.parse_args()
 
     min_x = -args.max_abs_mean
@@ -53,6 +49,7 @@ if __name__ == "__main__":
 
     for seed in args.seed:
         th.manual_seed(seed)
+        np.random.seed(seed)
 
         load_path = None
         if load_path is None:
@@ -67,8 +64,8 @@ if __name__ == "__main__":
             config.leaf_base_class = RatNormal
             config.leaf_base_kwargs = {
                 'min_mean': float(min_x+1), 'max_mean': float(max_x-1),
-                'min_sigma': args.min_sigma, 'max_sigma': args.max_sigma if args.stds_sigmoid_bound else None,
-                'stds_in_lin_space': True, 'stds_sigmoid_bound': args.stds_sigmoid_bound,
+                'min_sigma': args.min_sigma, 'max_sigma': args.max_sigma,
+                'stds_in_lin_space': True, 'stds_sigmoid_bound': True,
             }
             model = RatSpn(config).to(args.device)
             count_params(model)
@@ -79,17 +76,15 @@ if __name__ == "__main__":
 
         n_steps = args.steps
         if args.objective == 'huber':
-            exp_name = f"entmax_huberLB_{args.run_name}" \
+            exp_name = f"huber_{args.run_name}" \
                        f"_seed{seed}"
         elif args.objective == 'mc':
-            exp_name = f"entmax_MCapprox_{args.run_name}" \
+            exp_name = f"MC_{args.run_name}" \
                        f"_{args.mc_sample_size}samples" \
-                       f"{'_sampledwithgrad' if args.additional_grad else ''}" \
                        f"_seed{seed}"
         else:
-            exp_name = f"entmax_VIapprox_{args.run_name}" \
+            exp_name = f"VI_{args.run_name}" \
                        f"_{args.vi_sample_size}samples" \
-                       f"{'_gradthruresp' if args.additional_grad else ''}" \
                        f"_seed{seed}"
 
         args.results_dir = os.path.join(args.results_dir, args.proj_name)
@@ -141,11 +136,11 @@ if __name__ == "__main__":
                 continue
 
             vi_ent, vi_log = model.vi_entropy_approx_layerwise(
-                sample_size=args.vi_sample_size, grad_thru_resp=args.objective == 'vi' and args.additional_grad, verbose=True,
+                sample_size=args.vi_sample_size, grad_thru_resp=args.objective == 'vi', verbose=True,
             )
             huber_ent, huber_log = model.huber_entropy_lb(verbose=True)
             mc_ent = model.monte_carlo_ent_approx(
-                sample_size=args.mc_sample_size, sample_with_grad=args.objective == 'mc' and args.additional_grad,
+                sample_size=args.mc_sample_size, sample_with_grad=args.objective == 'mc'
             )
             combined_log = {**vi_log, **huber_log}
             combined_log.update({
