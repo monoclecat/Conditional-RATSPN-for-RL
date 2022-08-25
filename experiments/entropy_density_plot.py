@@ -9,6 +9,32 @@ import re
 from utils import non_existing_folder_name
 import wandb
 
+
+def get_ents_from_metrics(metrics, step):
+    ents = []
+    for m_name in ['VI_ent_approx', 'huber_entropy_LB', 'MC_root_entropy']:
+        try:
+            ents.append(metrics.get(m_name)[step])
+        except IndexError:
+            try:
+                ents.append(metrics.get(m_name)[step-1])
+            except IndexError:
+                ents.append(None)
+                print(f"metric {m_name} didn't exist for step {step} or {step - 1}")
+    return ents
+
+
+def set_axis_ticks_and_labels(ax, grid_points, num_ticks, min_x, max_x, num_feat):
+    ax_ticks = np.linspace(0.0, grid_points, num_ticks)
+    ax_ticklabels = np.asarray(np.around(ax_ticks * ((max_x - min_x) / grid_points) + min_x, decimals=1), dtype='str')
+    ax.set_xticks(ax_ticks)
+    ax.set_yticks(ax_ticks)
+    ax.set_xticklabels(ax_ticklabels)
+    ax.set_yticklabels(ax_ticklabels)
+    ax.set_xlabel(f"x (feature no. 0 of {num_feat})")
+    ax.set_ylabel(f"y (feature no. 1 of {num_feat})")
+
+
 if __name__ == "__main__":
     mpl.use('Agg')
     import argparse
@@ -161,15 +187,8 @@ if __name__ == "__main__":
         norm = mpl.colors.Normalize(vmin=args.vmin, vmax=args.vmax, clip=True)
         cmap = mpl.cm.get_cmap('viridis')
         ax1.imshow(grid_view(probs), norm=norm, cmap=cmap)
-        num_ticks = 6
-        ax1_ticks = np.linspace(0.0, grid_points, num_ticks)
-        ax1_ticklabels = np.asarray(np.around(ax1_ticks * ((max_x - min_x) / grid_points) + min_x, decimals=1), dtype='str')
-        ax1.set_xticks(ax1_ticks)
-        ax1.set_yticks(ax1_ticks)
-        ax1.set_xticklabels(ax1_ticklabels)
-        ax1.set_yticklabels(ax1_ticklabels)
-        ax1.set_xlabel(f"x (feature no. 0 of {config['RATSPN_F']})")
-        ax1.set_ylabel(f"y (feature no. 1 of {config['RATSPN_F']})")
+        set_axis_ticks_and_labels(ax=ax1, grid_points=grid_points, num_ticks=6,
+                                  min_x=min_x, max_x=max_x, num_feat=config['RATSPN_F'])
 
         cbar = fig.colorbar(mappable=mpl.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax1)
         cbar.ax.get_yaxis().labelpad = 15
@@ -205,21 +224,8 @@ if __name__ == "__main__":
         if False and (num_under := (probs < args.vmin).sum()) > 0:
             print(f"{num_under} probabilities in step {steps[i]:06} are under {args.vmin}. Min is {probs[i].min():.4f}")
         mpe = None
-        try:
-            vi_ent = metrics.get(f"VI_ent_approx")[steps[i]]
-        except IndexError:
-            vi_ent = None
-            print(f"metric for vi_ent didn't exist for step {steps[i]}")
-        try:
-            huber_ent = metrics.get(f"huber_entropy_LB")[steps[i]]
-        except IndexError:
-            huber_ent = None
-            print(f"metric for huber_ent didn't exist for step {steps[i]}")
-        try:
-            mc_ent = metrics.get(f"MC_root_entropy")[steps[i]]
-        except IndexError:
-            mc_ent = None
-            print(f"metric for mc_ent didn't exist for step {steps[i]}")
+
+        vi_ent, huber_ent, mc_ent = get_ents_from_metrics(metrics=metrics, step=steps[i])
 
         plot_args = {
             'probs': probs[i], 'mpe': mpe, 'step': steps[i], 'train_mode': train_mode,

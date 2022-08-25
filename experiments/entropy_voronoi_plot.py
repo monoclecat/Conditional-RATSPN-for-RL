@@ -1,5 +1,7 @@
 import os
 import csv
+from typing import Optional
+
 import numpy as np
 import torch as th
 import matplotlib as mpl
@@ -8,9 +10,10 @@ from tqdm import tqdm
 import re
 from utils import non_existing_folder_name
 import wandb
+from experiments.entropy_density_plot import get_ents_from_metrics, set_axis_ticks_and_labels
 
 if __name__ == "__main__":
-    mpl.use('Agg')
+    # mpl.use('Agg')
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', '-d', type=str, help='Directory with model files', required=True)
@@ -20,8 +23,8 @@ if __name__ == "__main__":
     device = th.device('cpu')
 
     config = None
-    probs = None
-    steps = None
+    root_children_log_probs = None
+    root_children_log_probs__dir_name = 'root_children_log_probs'
     metrics = None
     cwd = os.path.realpath(args.dir)
     print(f"Reading from {cwd}")
@@ -37,10 +40,11 @@ if __name__ == "__main__":
             keys = [i for i in metrics]
             assert len(keys) == 1, f"There should only be one key, but there were {len(keys)}"
             metrics = metrics[keys[0]].tolist()
-        if False and filename.endswith('.npz') and filename.startswith('root_children_log_probs'):
-            root_children_log_probs = np.load(os.path.join(cwd, filename))
-            probs = root_children_log_probs['probs']
-            steps = root_children_log_probs['steps']
+        if filename.startswith(root_children_log_probs__dir_name):
+            if os.path.isdir(os.path.join(cwd, filename)):  # if we want to save each step separately
+                root_children_log_probs = os.listdir(os.path.join(cwd, filename))
+            else:
+                raise Exception(f"{root_children_log_probs__dir_name} isn't a directory!")
 
     assert config is not None, f"No config file was found in directory {args.dir}."
     train_mode = config['objective']
@@ -51,10 +55,11 @@ if __name__ == "__main__":
 
     min_x = -float(config['max_abs_mean'])
     max_x = -min_x
-    if probs is not None:
-        print(f"Found saved probs, ignoring args.grid_points.")
-        grid_points = probs.shape[-1]
-    else:
+    if root_children_log_probs is None:
+        os.makedirs(os.path.join(cwd, root_children_log_probs__dir_name))
+        steps = None
+        probs = None
+
         grid_points = args.grid_points
         x = th.linspace(min_x, max_x, grid_points)
         grid = th.stack(th.meshgrid((x, x), indexing='ij'), dim=-1)
@@ -74,25 +79,16 @@ if __name__ == "__main__":
                 grid = grid.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
                 curr_probs = model.forward(x=grid, layer_index=model.max_layer_index-1).squeeze(1).squeeze(1)
                 curr_probs = curr_probs.view(grid_points, grid_points, *curr_probs.shape[1:])
-                curr_probs = th.einsum('xyor -> yxor', curr_probs)
-            curr_probs = np.expand_dims(np.asarray(curr_probs, dtype='f2'), 0)
-            if probs is None:
-                probs = curr_probs
-            else:
-                probs = np.concatenate((probs, curr_probs), 0)
+                curr_probs = th.einsum('yxor -> xyor', curr_probs)
 
+            curr_probs = np.asarray(curr_probs, dtype='f4')
             curr_step = step_pattern.search(filename)
             assert curr_step is not None, f"The model file name {filename} didn't contain a 'step[0-9]+' sequence!"
             curr_step = int(curr_step.groups()[0])
-            curr_step = np.expand_dims(np.asarray(curr_step, dtype='i4'), 0)
-            if steps is None:
-                steps = curr_step
-            else:
-                steps = np.concatenate((steps, curr_step), 0)
-        np.savez(os.path.join(cwd, 'root_children_log_probs.npz'), probs=probs, steps=steps)
-        root_children_log_probs = np.load(os.path.join(cwd, 'root_children_log_probs.npz'))
-        probs = root_children_log_probs['probs']
-        steps = root_children_log_probs['steps']
+            curr_step = np.asarray(curr_step, dtype='i4')
+            np.savez(os.path.join(cwd, root_children_log_probs__dir_name, f'root_ch_log_probs__step{curr_step.item():06}'),
+                     probs=curr_probs, steps=curr_step)
+        root_children_log_probs = os.listdir(os.path.join(cwd, root_children_log_probs__dir_name))
 
     wandb_run = None
     if args.wandb:
@@ -111,23 +107,49 @@ if __name__ == "__main__":
         return (t - min_x) / (max_x - min_x) * grid_points
 
     def plot_dist(probs, huber_ent, vi_ent, mc_ent, mpe, step, train_mode: str):
-        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
-        norm = mpl.colors.Normalize(vmin=args.vmin, vmax=args.vmax, clip=True)
-        cmap = mpl.cm.get_cmap('viridis')
-        ax1.imshow(grid_view(probs), norm=norm, cmap=cmap)
-        num_ticks = 6
-        ax1_ticks = np.linspace(0.0, grid_points, num_ticks)
-        ax1_ticklabels = np.asarray(np.around(ax1_ticks * ((max_x - min_x) / grid_points) + min_x, decimals=1), dtype='str')
-        ax1.set_xticks(ax1_ticks)
-        ax1.set_yticks(ax1_ticks)
-        ax1.set_xticklabels(ax1_ticklabels)
-        ax1.set_yticklabels(ax1_ticklabels)
-        ax1.set_xlabel(f"x (feature no. 0 of {config['RATSPN_F']})")
-        ax1.set_ylabel(f"y (feature no. 1 of {config['RATSPN_F']})")
+        max_vals = np.amax(probs, axis=(-1, -2), keepdims=True).squeeze(-1)
+        probs = probs.reshape(*probs.shape[:2], -1)
+        max_nodes_mask = probs == max_vals
+        max_node_names = [node_names[max_nodes_mask[ind]] for ind in np.ndindex(probs.shape[:2])]
 
-        cbar = fig.colorbar(mappable=mpl.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax1)
-        cbar.ax.get_yaxis().labelpad = 15
-        cbar.ax.set_ylabel(f"Probability density [{'log scale' if args.plot_in_log_space else 'linear scale'}]", rotation=270)
+        cmap: Optional[mpl.cm.colors.ListedColormap] = None
+        # cmap = mpl.cm.get_cmap('Set3')
+        labels = []
+        label_list = []
+
+        if cmap is not None:
+            cmap = mpl.cm.colors.ListedColormap(((0.0, 0.0, 0.0), *cmap.colors))  # black for the 'more than x' label
+            label_len_thres = len(cmap.colors)
+        else:
+            label_len_thres = 15
+        for enum_thres in range(5, 0, -1):
+            labels = [', '.join(i) if len(i) <= enum_thres else f'more than {enum_thres}' for i in max_node_names]
+            label_list = list(set(labels))
+            if len(label_list) <= label_len_thres:
+                break
+
+        label_list.sort(key=lambda x: -len(x))
+        node_labels = label_list[1:]
+        node_labels.sort(key=lambda x: (int(x[-2:]), int(x[1:3])))
+        label_list = [label_list[0]] + node_labels
+        label_indexes = np.arange(len(label_list))
+        label_dict = {i: j for i, j in zip(label_list, label_indexes)}
+        label_vals = np.asarray([label_dict[i] for i in labels]).reshape(*probs.shape[:2])
+
+        fig, (ax1) = plt.subplots(1, figsize=(10, 10), dpi=200)
+        norm = mpl.colors.Normalize(vmin=0, vmax=len(label_dict))
+        if cmap is None:
+            cmap = mpl.cm.get_cmap('rainbow', len(label_dict)+1)
+        ax_cont = ax1.contourf(label_vals, norm=norm, cmap=cmap, levels=len(label_dict))
+
+        set_axis_ticks_and_labels(ax=ax1, grid_points=probs.shape[0], num_ticks=6,
+                                  min_x=min_x, max_x=max_x, num_feat=config['RATSPN_F'])
+
+        cbar = fig.colorbar(ax_cont)
+        cbar_y = cbar.ax.get_yaxis()
+        cbar_y.set_ticks(np.arange(len(label_dict)), list(label_dict.keys()))
+        cbar_y.labelpad = 15
+        cbar.ax.set_ylabel(f"Nodes with max prob", rotation=270)
         if mpe is not None:
             mpe = mpe.reshape(-1, *mpe.shape[-2:])
             mpe = scale_to_grid(mpe)
@@ -151,31 +173,28 @@ if __name__ == "__main__":
         ax1.set_title(' - '.join([huber_ent_txt, vi_ent_txt, mc_ent_txt]))
         return fig
 
-    for i in tqdm(range(len(steps)), desc=f"Creating frames of the {'log ' if args.plot_in_log_space else ''}density"):
-        if (num_over := (probs > args.vmax).sum()) > 0:
-            print(f"{num_over} probabilities in step {steps[i]} are over {args.vmax}. Max is {probs[i].max():.4f}")
-        if False and (num_under := (probs < args.vmin).sum()) > 0:
-            print(f"{num_under} probabilities in step {steps[i]:06} are under {args.vmin}. Min is {probs[i].min():.4f}")
+    node_names = None
+    for filename in tqdm(sorted(root_children_log_probs), desc="Reading root_children_log_prob files"):
         mpe = None
+        root_children_log_probs = np.load(os.path.join(cwd, root_children_log_probs__dir_name, filename))
+        probs = root_children_log_probs['probs']
+        steps = root_children_log_probs['steps']
 
-        ents = []
-        for m_name in ['VI_ent_approx', 'huber_entropy_LB', 'MC_root_entropy']:
-            try:
-                ents.append(metrics.get(m_name)[steps[i]])
-            except IndexError:
-                try:
-                    ents.append(metrics.get(m_name)[steps[i]-1])
-                except IndexError:
-                    ents.append(None)
-                    print(f"metric {m_name} didn't exist for step {steps[i]} or {steps[i]-1}")
-        vi_ent, huber_ent, mc_ent = ents
+        vi_ent, huber_ent, mc_ent = get_ents_from_metrics(metrics=metrics, step=steps)
 
+        if node_names is None:
+            num_ch, num_rep = probs.shape[2:]
+            node_names = []
+            for o in range(num_ch):
+                for r in range(num_rep):
+                    node_names.append(f"n{o:02}r{r:02}")
+            node_names = np.asarray(node_names)
         plot_args = {
-            'probs': probs[i], 'mpe': mpe, 'step': steps[i], 'train_mode': train_mode,
+            'probs': probs, 'mpe': mpe, 'step': steps, 'train_mode': train_mode,
             'huber_ent': huber_ent, 'vi_ent': vi_ent, 'mc_ent': mc_ent,
         }
         fig = plot_dist(**plot_args)
         if not os.path.exists(frame_save_path):
             os.makedirs(frame_save_path)
-        fig.savefig(os.path.join(frame_save_path, f"plot_{dir_name}__step{steps[i]:06}.jpg"))
+        fig.savefig(os.path.join(frame_save_path, f"plot_{dir_name}__step{steps:06}.jpg"))
         plt.close(fig)
