@@ -661,7 +661,7 @@ class RatSpn(nn.Module):
         return responsibilities
 
     def layer_responsibilities(self, layer_index, sample_size: int = 5, child_ll: th.Tensor = None,
-                                return_sample_ctx: bool = False, with_grad=False) \
+                               return_sample_ctx: bool = False) \
             -> Tuple[th.Tensor, Optional[Sample]]:
         """
         Approximate the responsibilities of a Sum layer in the Spn.
@@ -676,7 +676,6 @@ class RatSpn(nn.Module):
                 with_grad must be False. Shape [ic, w, d, ic, r] (mean already taken over sample dim).
             return_sample_ctx: If True, the sample context including the samples are returned. No post-processing is
                 applied to these.
-            with_grad: If True, sampling is done in a differentiable way.
 
         Returns: Tuple of
             responsibilities: th.Tensor of shape [w, d, oc of child layer, oc, r of child layer].
@@ -684,14 +683,15 @@ class RatSpn(nn.Module):
                 (w is the number of weight sets = the number of conditionals, f = self.config.F)
 
         """
-        assert child_ll is None or (not return_sample_ctx and not with_grad), \
-            "If child_ll is provided, return_sample_ctx and with_grad must both be False."
+        assert child_ll is None or (not return_sample_ctx), \
+            "If child_ll is provided, return_sample_ctx must be False."
         layer = self.layer_index_to_obj(layer_index)
         assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
         ctx = None
         if child_ll is None:
             ctx = self.sample(
-                mode='onehot' if with_grad else 'index', n=sample_size, layer_index=layer_index-1, is_mpe=False,
+                mode='onehot' if th.is_grad_enabled() else 'index',
+                n=sample_size, layer_index=layer_index-1, is_mpe=False,
                 do_sample_postprocessing=False,
             )
             samples = ctx.sample
