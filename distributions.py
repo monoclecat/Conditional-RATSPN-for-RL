@@ -29,13 +29,13 @@ class RatNormal(Leaf):
         num_repetitions: int,
         dropout: float = 0.0,
         tanh_squash: bool = False,
-        min_sigma: float = None,
-        max_sigma: float = None,
+        min_sigma: float = 0.0,
+        max_sigma: float = 1.0,
         min_mean: float = None,
         max_mean: float = None,
         no_tanh_log_prob_correction: bool = False,
-        stds_in_lin_space: bool = False,
-        stds_sigmoid_bound: bool = False,
+        stds_in_lin_space: bool = True,
+        stds_sigmoid_bound: bool = True,
     ):
         """Create a gaussian layer.
 
@@ -63,16 +63,12 @@ class RatNormal(Leaf):
             # Init uniform between 0 and 1
             self.std_param = nn.Parameter(th.rand(1, in_features, out_channels, num_repetitions))
 
-        self.min_sigma = check_valid(min_sigma, float, 0.0, max_sigma, allow_none=True)
-        self.max_sigma = check_valid(max_sigma, float, min_sigma, allow_none=True)
-        if self._stds_sigmoid_bound:
-            assert self.max_sigma is not None, "A max sigma must be provided if stds should be sigmoid-bounded."
-        else:
-            assert self.max_sigma is None, "If stds are bounded by softplus, max_sigma must be None!"
+        self.min_sigma = check_valid(min_sigma, float, 0.0, max_sigma, allow_none=False)
+        self.max_sigma = check_valid(max_sigma, float, min_sigma, allow_none=False)
         self.min_mean = check_valid(min_mean, float, upper_bound=max_mean, allow_none=True)
         self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
-        self.min_log_sigma = math.log(self.min_sigma)
-        self.max_log_sigma = math.log(self.min_sigma)
+        self.min_log_sigma = math.log(self.min_sigma + 1e-8)
+        self.max_log_sigma = math.log(self.max_sigma + 1e-8)
 
         self._dist_params_are_bounded = False
 
