@@ -1051,8 +1051,7 @@ class RatSpn(nn.Module):
         assert child_entropies is not None or layer_index == 0, \
             "When sampling from a layer other than the leaf layer, child entropies must be provided!"
         logging = {}
-        ctx = None
-        aux_responsibility = None
+        metrics = {}
 
         if layer_index == 0:
             if child_ll is None:
@@ -1075,26 +1074,30 @@ class RatSpn(nn.Module):
                 node_entropies = layer(child_entropies)
             else:
                 with th.set_grad_enabled(grad_thru_resp and th.is_grad_enabled()):
-                    aux_responsibility, ctx = self.layer_responsibilities(
-                        layer_index=layer_index, sample_size=sample_size, with_grad=grad_thru_resp,
+                    responsibility, ctx = self.layer_responsibilities(
+                        layer_index=layer_index, sample_size=sample_size,
                         child_ll=child_ll
                     )
                     # aux_responsibility [w, d, ic, oc, r]
 
                 [weighted_ch_ents, weighted_aux_resp], weight_entropy = self.weigh_tensors(
                     layer_index=layer_index,
-                    tensors=[child_entropies.unsqueeze(3), aux_responsibility],
+                    tensors=[child_entropies.unsqueeze(3), responsibility],
                     return_weight_ent=True
                 )
                 node_entropies = weight_entropy + weighted_ch_ents + weighted_aux_resp
 
                 if verbose:
-                    metrics = {
-                        'weight_entropy': weight_entropy.detach(),
-                        'weighted_child_ent': weighted_ch_ents.detach(),
-                        'weighted_aux_resp': weighted_aux_resp.detach(),
-                    }
-                    logging = self.log_dict_from_metric(layer_index, metrics)
+                    metrics.update({
+                        'weight_ent': weight_entropy.detach(),
+                        'responsib': responsibility.detach(),
+                    })
+
+        if verbose:
+            metrics = {
+                'node_ent': node_entropies.detach()
+            }
+            logging = self.log_dict_from_metric(layer_index, metrics)
 
         return node_entropies, logging
 
