@@ -1094,9 +1094,9 @@ class RatSpn(nn.Module):
                     })
 
         if verbose:
-            metrics = {
+            metrics.update({
                 'node_ent': node_entropies.detach()
-            }
+            })
             logging = self.log_dict_from_metric(layer_index, metrics)
 
         return node_entropies, logging
