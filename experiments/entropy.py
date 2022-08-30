@@ -47,6 +47,9 @@ if __name__ == "__main__":
     min_x = -args.max_abs_mean
     max_x = -min_x
 
+    args.results_dir = os.path.join(args.results_dir, args.proj_name)
+    os.makedirs(args.results_dir, exist_ok=True)
+
     for seed in args.seed:
         th.manual_seed(seed)
         np.random.seed(seed)
@@ -87,8 +90,6 @@ if __name__ == "__main__":
                        f"_{args.vi_sample_size}samples" \
                        f"_seed{seed}"
 
-        args.results_dir = os.path.join(args.results_dir, args.proj_name)
-        os.makedirs(args.results_dir, exist_ok=True)
         file_name_base = non_existing_folder_name(args.results_dir, exp_name)
         save_path = os.path.join(args.results_dir, file_name_base)
         model_save_path = os.path.join(save_path, "models")
