@@ -165,6 +165,9 @@ if __name__ == "__main__":
     assert args.vmin < args.vmax, "vmin must be lower than vmax!"
     if args.plot_in_log_space:
         assert args.vmin <= 0.0 and args.vmax <= 0.0, "When plotting in log space, vmin and vmax must be <= 0.0!"
+        args.vmax = 0.0 if args.vmax > 0.0 else args.vmax
+    else:
+        args.vmin = 0.0 if args.vmin < 0.0 else args.vmin
 
     wandb_run = None
     if args.wandb:
@@ -176,7 +179,7 @@ if __name__ == "__main__":
             dir=args.dir,
         )
 
-    frame_save_path = f"{'log' if args.plot_in_log_space else 'lin'}prob_vmin{args.vmin:.2f}_vmax{args.vmax:.2f}_{dir_name}"
+    frame_save_path = f"{'log' if args.plot_in_log_space else 'lin'}prob_vmin{args.vmin:.4f}_vmax{args.vmax:.4f}_{dir_name}"
     frame_save_path = os.path.join(args.dir, non_existing_folder_name(args.dir, frame_save_path))
 
     def scale_to_grid(t: np.ndarray):
@@ -219,7 +222,7 @@ if __name__ == "__main__":
     if not args.plot_in_log_space:
         probs = np.exp(probs)
     for i in tqdm(range(len(steps)), desc=f"Creating frames of the {'log ' if args.plot_in_log_space else ''}density"):
-        if (num_over := (probs > args.vmax).sum()) > 0:
+        if False and (num_over := (probs > args.vmax).sum()) > 0:
             print(f"{num_over} probabilities in step {steps[i]} are over {args.vmax}. Max is {probs[i].max():.4f}")
         if False and (num_under := (probs < args.vmin).sum()) > 0:
             print(f"{num_under} probabilities in step {steps[i]:06} are under {args.vmin}. Min is {probs[i].min():.4f}")
