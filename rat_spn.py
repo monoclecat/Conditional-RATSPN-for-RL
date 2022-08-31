@@ -1877,6 +1877,7 @@ class RatSpn(nn.Module):
             else:
                 # Add log weights to log probs and sum in linear space
                 layer = self.layer_index_to_obj(i)
+                weight_entropy = - th.sum(layer.weights * layer.weights.exp(), dim=2)
                 if i < self.max_layer_index:
                     weights = layer.weights
                 elif i == self.max_layer_index:
@@ -1892,6 +1893,11 @@ class RatSpn(nn.Module):
                 log_probs = log_probs.unsqueeze(-3) + weights.unsqueeze(2).unsqueeze(-2)
                 # We don't logsumexp over the unsqueezed dims
                 log_probs = log_probs.logsumexp(3)
+
+                if i < layer_index and add_sub_weight_ent:
+                    we_term = weight_entropy.unsqueeze(2).unsqueeze(-1)
+                    log_probs = log_probs - we_term + we_term.detach()
+
                 if i == self.max_layer_index:
                     log_probs = log_probs.logsumexp(-1)
 
@@ -1907,10 +1913,6 @@ class RatSpn(nn.Module):
                     log_probs = log_probs.unsqueeze(-3) + weights.unsqueeze(-3).unsqueeze(-1)
                     log_probs = log_probs.logsumexp(2)
 
-                weight_entropy = - th.sum(layer.weights * layer.weights.exp(), dim=2)
-                if i < layer_index and add_sub_weight_ent:
-                    we_term = weight_entropy.unsqueeze(3).unsqueeze(-1)
-                    log_probs = log_probs - we_term + we_term.detach()
                 if verbose:
                     metrics = {
                         'weight_entropy': weight_entropy.detach(),
