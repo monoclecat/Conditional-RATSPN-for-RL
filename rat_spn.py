@@ -1894,7 +1894,7 @@ class RatSpn(nn.Module):
                 # We don't logsumexp over the unsqueezed dims
                 log_probs = log_probs.logsumexp(3)
 
-                if i < layer_index and add_sub_weight_ent:
+                if i <= self.max_layer_index and add_sub_weight_ent:
                     we_term = weight_entropy.unsqueeze(2).unsqueeze(-1)
                     log_probs = log_probs - we_term + we_term.detach()
 
