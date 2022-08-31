@@ -32,7 +32,7 @@ if __name__ == "__main__":
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
     parser.add_argument('--max_abs_mean', type=int, default=50)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
-                        choices=['vi_aux_no_grad', 'vi', 'huber', 'mc'])
+                        choices=['vi_aux_no_grad', 'vi', 'huber', 'huber_hack', 'mc'])
     parser.add_argument('--RATSPN_F', '-F', type=int, default=4, help='Number of features in the SPN leaf layer. ')
     parser.add_argument('--RATSPN_R', '-R', type=int, default=3, help='Number of repetitions in RatSPN. ')
     parser.add_argument('--RATSPN_D', '-D', type=int, default=3, help='Depth of the SPN.')
@@ -80,6 +80,9 @@ if __name__ == "__main__":
         n_steps = args.steps
         if args.objective == 'huber':
             exp_name = f"huber_{args.run_name}" \
+                       f"_seed{seed}"
+        elif args.objective == 'huber_hack':
+            exp_name = f"huber_hack_{args.run_name}" \
                        f"_seed{seed}"
         elif args.objective == 'mc':
             exp_name = f"MC_{args.run_name}" \
@@ -145,7 +148,8 @@ if __name__ == "__main__":
             vi_ent, vi_log = model.vi_entropy_approx_layerwise(
                 sample_size=args.vi_sample_size, aux_with_grad=args.objective == 'vi', verbose=True,
             )
-            huber_ent, huber_log = model.huber_entropy_lb(verbose=True)
+            huber_ent, huber_log = model.huber_entropy_lb(verbose=True, detach_weights=args.objective == 'huber_hack',
+                                                          add_sub_weight_ent=args.objective == 'huber_hack')
             mc_ent = model.monte_carlo_ent_approx(
                 sample_size=args.mc_sample_size, sample_with_grad=args.objective == 'mc'
             )
@@ -168,7 +172,7 @@ if __name__ == "__main__":
 
             if args.objective == 'vi' or args.objective == 'vi_aux_no_grad':
                 loss = -vi_ent.mean()
-            elif args.objective == 'huber':
+            elif args.objective == 'huber' or args.objective == 'huber_hack':
                 loss = -huber_ent.mean()
             elif args.objective == 'mc':
                 loss = -mc_ent.mean()

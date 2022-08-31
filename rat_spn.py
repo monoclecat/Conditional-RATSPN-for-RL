@@ -1821,15 +1821,19 @@ class RatSpn(nn.Module):
         log_probs = self.forward(sample, layer_index=layer_index)
         return -log_probs.mean()
 
-    def huber_entropy_lb(self, layer_index: int = None, verbose=True):
+    def huber_entropy_lb(self, layer_index: int = None, verbose=True,
+                         detach_weights: bool = False, add_sub_weight_ent: bool = False):
         """
         Calculate the entropy lower bound of the SPN as in Huber '08.
 
         Args:
             layer_index: Compute the entropy LB for this layer. Can take values from 1 to self.max_layer_index+1.
                 self.max_layer_index+1 is the sampling root.
-
+            detach_weights: If True, the sum weights are detached for computing the entropy lower bound.
+            add_sub_weight_ent: If True, the weight entropies are added and subtracted to the lower bound to
+                introduce a grad that keeps weight entropies of intermediate layers up
         Returns:
+            Tuple of entropy lower bound and logging dict
 
         """
         logging = {}
@@ -1872,12 +1876,15 @@ class RatSpn(nn.Module):
                     log_probs = log_probs.view(w, d, o**2, o**2, R, R)
             else:
                 # Add log weights to log probs and sum in linear space
+                layer = self.layer_index_to_obj(i)
                 if i < self.max_layer_index:
-                    weights = self.layer_index_to_obj(i).weights
+                    weights = layer.weights
                 elif i == self.max_layer_index:
                     weights = self.root_weights_split_by_rep
                 else:
                     weights = self._sampling_root.weights
+                if detach_weights or i > self.max_layer_index:
+                    weights = weights.detach()
 
                 # weights = weights.unsqueeze(2).unsqueeze(-3).unsqueeze(-2) + weights.unsqueeze(3).unsqueeze(-2).unsqueeze(-1)
                 # log_probs = log_probs.unsqueeze(-3).unsqueeze(-3) + weights
@@ -1900,9 +1907,11 @@ class RatSpn(nn.Module):
                     log_probs = log_probs.unsqueeze(-3) + weights.unsqueeze(-3).unsqueeze(-1)
                     log_probs = log_probs.logsumexp(2)
 
+                weight_entropy = - th.sum(layer.weights * layer.weights.exp(), dim=2)
+                if i < layer_index and add_sub_weight_ent:
+                    we_term = weight_entropy.unsqueeze(3).unsqueeze(-1)
+                    log_probs = log_probs - we_term + we_term.detach()
                 if verbose:
-                    weight_entropy = - th.sum(self.layer_index_to_obj(i).weights *
-                                              self.layer_index_to_obj(i).weights.exp(), dim=2).unsqueeze(0)
                     metrics = {
                         'weight_entropy': weight_entropy.detach(),
                         'huber_entropy_LB': entropy_lb.detach(),
