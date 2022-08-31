@@ -32,7 +32,7 @@ if __name__ == "__main__":
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
     parser.add_argument('--max_abs_mean', type=int, default=50)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
-                        choices=['vi', 'huber', 'mc'])
+                        choices=['vi_aux_no_grad', 'vi', 'huber', 'mc'])
     parser.add_argument('--RATSPN_F', '-F', type=int, default=4, help='Number of features in the SPN leaf layer. ')
     parser.add_argument('--RATSPN_R', '-R', type=int, default=3, help='Number of repetitions in RatSPN. ')
     parser.add_argument('--RATSPN_D', '-D', type=int, default=3, help='Depth of the SPN.')
@@ -85,10 +85,16 @@ if __name__ == "__main__":
             exp_name = f"MC_{args.run_name}" \
                        f"_{args.mc_sample_size}samples" \
                        f"_seed{seed}"
-        else:
+        elif args.objective == 'vi':
             exp_name = f"VI_{args.run_name}" \
                        f"_{args.vi_sample_size}samples" \
                        f"_seed{seed}"
+        elif args.objective == 'vi_aux_no_grad':
+            exp_name = f"VI_aux_no_grad_{args.run_name}" \
+                       f"_{args.vi_sample_size}samples" \
+                       f"_seed{seed}"
+        else:
+            raise Exception()
 
         file_name_base = non_existing_folder_name(args.results_dir, exp_name)
         save_path = os.path.join(args.results_dir, file_name_base)
@@ -137,7 +143,7 @@ if __name__ == "__main__":
                 continue
 
             vi_ent, vi_log = model.vi_entropy_approx_layerwise(
-                sample_size=args.vi_sample_size, grad_thru_resp=args.objective == 'vi', verbose=True,
+                sample_size=args.vi_sample_size, aux_with_grad=args.objective == 'vi', verbose=True,
             )
             huber_ent, huber_log = model.huber_entropy_lb(verbose=True)
             mc_ent = model.monte_carlo_ent_approx(
@@ -160,12 +166,14 @@ if __name__ == "__main__":
                 else:
                     npz_log[key] = np.concatenate((past_vals, curr_val), 0)
 
-            if args.objective == 'vi':
+            if args.objective == 'vi' or args.objective == 'vi_aux_no_grad':
                 loss = -vi_ent.mean()
             elif args.objective == 'huber':
                 loss = -huber_ent.mean()
-            else:
+            elif args.objective == 'mc':
                 loss = -mc_ent.mean()
+            else:
+                raise Exception()
 
             if args.wandb:
                 wandb.log({
