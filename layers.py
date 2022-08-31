@@ -108,7 +108,7 @@ class Sum(AbstractLayer):
         else:
             return self.weight_param
 
-    def forward(self, x: th.Tensor):
+    def forward(self, x: th.Tensor, detach_params: bool = False):
         """
         Sum layer forward pass.
 
@@ -132,7 +132,7 @@ class Sum(AbstractLayer):
         w, d, c, r = x.shape[-4:]
         batch_dims = x.shape[:-4]
         x = x.unsqueeze(-2)  # Shape: [*batch_dims, w, d, ic, 1, r]
-        weights: th.Tensor = self.weights
+        weights: th.Tensor = self.weights.detach() if detach_params else self.weights
 
         # Weights is of shape [w, d, ic, oc, r]
         oc = weights.size(3)
@@ -345,7 +345,7 @@ class Product(AbstractLayer):
         # """Hack to obtain the current device, this layer lives on."""
         # return self._conv_weights.device
 
-    def forward(self, x: th.Tensor, reduction = 'sum'):
+    def forward(self, x: th.Tensor, reduction = 'sum', **kwargs):
         """
         Product layer forward pass.
 
@@ -511,7 +511,7 @@ class CrossProduct(AbstractLayer):
         """Hack to obtain the current device, this layer lives on."""
         return self.unraveled_channel_indices.device
 
-    def forward(self, x: th.Tensor):
+    def forward(self, x: th.Tensor, **kwargs):
         """
         Product layer forward pass.
 

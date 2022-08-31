@@ -142,7 +142,7 @@ class RatNormal(Leaf):
     def set_no_tanh_log_prob_correction(self):
         self._no_tanh_log_prob_correction = False
 
-    def forward(self, x):
+    def forward(self, x, detach_params: bool = False):
         """
         Forward pass through the leaf layer.
 
@@ -154,6 +154,7 @@ class RatNormal(Leaf):
                     weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
                     output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
             layer_index: Evaluate log-likelihood of x at layer
+            detach_params: If True, all leaf parameters involved in calculating the log_probs are detached
         Returns:
             th.Tensor: Log-likelihood of the input.
         """
@@ -165,10 +166,11 @@ class RatNormal(Leaf):
             # This correction term assumes the input to be squashed already
             # correction = th.log(1 - x**2 + 1e-6)
 
+        means = self.means.detach() if detach_params else self.means
+        stds = self.stds.detach() if detach_params else self.stds
         if x.isnan().any():
-            means = self.means
-            log_std = self.log_stds
-            var = self.var
+            log_std = stds.log()
+            var = stds ** 2
             repeat = np.asarray(means.shape[-2:]) // np.asarray(x.shape[-2:])
             x = x.repeat(*([1] * (x.dim()-2)), *repeat)
             mask = ~x.isnan()
@@ -177,7 +179,7 @@ class RatNormal(Leaf):
             var = var.expand_as(x)
             x[mask] = -((x[mask] - means[mask]) ** 2) / (2 * var[mask]) - log_std[mask] - math.log(math.sqrt(2 * math.pi))
         else:
-            d = dist.Normal(self.means, self.stds)
+            d = dist.Normal(means, stds)
             x = d.log_prob(x)  # Shape: [n, w, d, oc, r]
 
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
@@ -321,9 +323,9 @@ class IndependentMultivariate(Leaf):
     def pad(self):
         return self._pad
 
-    def forward(self, x: th.Tensor, reduction='sum'):
+    def forward(self, x: th.Tensor, reduction='sum', detach_params: bool = False):
         # Pass through base leaf
-        x = self.base_leaf(x)
+        x = self.base_leaf(x, detach_params=detach_params)
         x = self.pad_input(x)
 
         # Pass through product layer

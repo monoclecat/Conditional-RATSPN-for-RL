@@ -195,7 +195,8 @@ class RatSpn(nn.Module):
         x = th.gather(x, dim=-3, index=perm_indices)
         return x
 
-    def forward(self, x: th.Tensor, layer_index: int = None, x_needs_permutation: bool = True) -> th.Tensor:
+    def forward(self, x: th.Tensor, layer_index: int = None, x_needs_permutation: bool = True,
+                detach_params: bool = False) -> th.Tensor:
         """
         Forward pass through RatSpn.
 
@@ -209,6 +210,7 @@ class RatSpn(nn.Module):
             layer_index: Evaluate log-likelihood of x at layer
             x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
                 permuted in the forward pass.
+            detach_params: If True, all SPN parameters involved in the forward pass are detached.
         Returns:
             th.Tensor: Log-likelihood of the input.
         """
@@ -226,11 +228,11 @@ class RatSpn(nn.Module):
             x = self.apply_permutation(x)
 
         # Apply leaf distributions
-        x = self._leaf(x)
+        x = self._leaf(x, detach_params=detach_params)
 
         # Forward to inner product and sum layers
         for layer in self._inner_layers[:layer_index]:
-            x = layer(x)
+            x = layer(x, detach_params=detach_params)
 
         if layer_index == self.max_layer_index:
             # Merge results from the different repetitions into the channel dimension
@@ -238,7 +240,7 @@ class RatSpn(nn.Module):
             x = x.flatten(-2, -1).unsqueeze(-1)
 
             # Apply C sum node outputs
-            x = self.root(x)
+            x = self.root(x, detach_params=detach_params)
 
             # Remove repetition dimension
             # x = x.squeeze(-1)
@@ -661,7 +663,7 @@ class RatSpn(nn.Module):
         return responsibilities
 
     def layer_responsibilities(self, layer_index, sample_size: int = 5, child_ll: th.Tensor = None,
-                               return_sample_ctx: bool = False) \
+                               aux_with_grad: bool = False, return_sample_ctx: bool = False) \
             -> Tuple[th.Tensor, Optional[Sample]]:
         """
         Approximate the responsibilities of a Sum layer in the Spn.
@@ -674,6 +676,9 @@ class RatSpn(nn.Module):
             child_ll: th.Tensor of child log-likelihoods. If child_ll is None, the children of the layer are sampled
                 and the log-likelihoods are computed from these samples. If child_ll is given, return_sample_ctx and
                 with_grad must be False. Shape [ic, w, d, ic, r] (mean already taken over sample dim).
+            aux_with_grad: The samples are always drawn with the reparametrization trick applied. If
+                calc_aux_with_grad is True, then the SPN parameters also receive the grad from calculating the
+                auxiliary responsibility from the samples.
             return_sample_ctx: If True, the sample context including the samples are returned. No post-processing is
                 applied to these.
 
@@ -697,7 +702,8 @@ class RatSpn(nn.Module):
             samples = ctx.sample
             # We sampled all ic nodes of each repetition in the child layer
 
-            child_ll = self.forward(x=samples.unsqueeze(-2), layer_index=layer_index-1, x_needs_permutation=False)
+            child_ll = self.forward(x=samples.unsqueeze(-2), layer_index=layer_index-1, x_needs_permutation=False,
+                                    detach_params=not aux_with_grad)
             child_ll = child_ll.mean(dim=1)
 
         ic, w, d, _, r = child_ll.shape
@@ -709,16 +715,13 @@ class RatSpn(nn.Module):
             # repetitions, so we reshape the weights to make the repetition dimension explicit again.
             # This is equivalent to splitting up the root sum node into one sum node per repetition,
             # with another sum node sitting on top.
-            w, _, ic, oc, _ = layer.weights.shape
-            r = self.config.R
-            root_weights_over_rep = layer.weights.view(w, 1, r, ic // r, oc)
-            log_weights = th.einsum('wdrio -> wdior', root_weights_over_rep)
+            log_weights = self.root_weights_split_by_rep if aux_with_grad else self.root_weights_split_by_rep.detach()
             # log_weights = th.log_softmax(root_weights_over_rep, dim=2)
             ll = child_ll.unsqueeze(-2) + log_weights
             ll = th.logsumexp(ll, dim=-3)
         else:
-            ll = layer(child_ll)
-            log_weights = layer.weights
+            ll = layer.forward(child_ll, detach_params=not aux_with_grad)
+            log_weights = layer.weights if aux_with_grad else layer.weights.detach()
 
             # We have the log-likelihood of the current sum layer w.r.t. the samples from its children.
         ll = th.einsum('iwdoR -> wdioR', ll)
@@ -1032,7 +1035,7 @@ class RatSpn(nn.Module):
 
     def layer_entropy_approx(
             self, layer_index=0, child_entropies: th.Tensor = None, child_ll: th.Tensor = None,
-            sample_size=5, grad_thru_resp=False, verbose=False,
+            sample_size=5, aux_with_grad=False, verbose=False,
     ) -> Tuple[th.Tensor, Optional[Dict]]:
         """
 
@@ -1041,7 +1044,7 @@ class RatSpn(nn.Module):
             child_entropies: th.Tensor of shape [w, d, oc of child layer == ic of this layer, r]
             child_ll: If provided, children don't need to be sampled. Shape [n, w, d, i, r]
             sample_size:
-            grad_thru_resp: If False, the approximation of the responsibility is done without grad.
+            aux_with_grad: If False, the approximation of the responsibility is done without grad.
             verbose: If True, return dict of entropy metrics
 
         Returns: Tuple of
@@ -1073,12 +1076,11 @@ class RatSpn(nn.Module):
             if isinstance(layer, CrossProduct):
                 node_entropies = layer(child_entropies)
             else:
-                with th.set_grad_enabled(grad_thru_resp and th.is_grad_enabled()):
-                    responsibility, ctx = self.layer_responsibilities(
-                        layer_index=layer_index, sample_size=sample_size,
-                        child_ll=child_ll
-                    )
-                    # aux_responsibility [w, d, ic, oc, r]
+                responsibility, ctx = self.layer_responsibilities(
+                    layer_index=layer_index, sample_size=sample_size,
+                    child_ll=child_ll, aux_with_grad=aux_with_grad,
+                )
+                # responsibility [w, d, ic, oc, r]
 
                 [weighted_ch_ents, weighted_aux_resp], weight_entropy = self.weigh_tensors(
                     layer_index=layer_index,
@@ -1089,13 +1091,13 @@ class RatSpn(nn.Module):
 
                 if verbose:
                     metrics.update({
-                        'weight_ent': weight_entropy.detach(),
-                        'responsib': responsibility.detach(),
+                        'weight_entropy': weight_entropy.detach(),
+                        'responsibility': responsibility.detach(),
                     })
 
         if verbose:
             metrics.update({
-                'node_ent': node_entropies.detach()
+                'node_entropy': node_entropies.detach()
             })
             logging = self.log_dict_from_metric(layer_index, metrics)
 
@@ -1779,7 +1781,7 @@ class RatSpn(nn.Module):
                 step_callback(step)
         return vips_logging
 
-    def vi_entropy_approx_layerwise(self, sample_size=10, grad_thru_resp: bool = False, verbose=False) \
+    def vi_entropy_approx_layerwise(self, sample_size=10, aux_with_grad: bool = False, verbose=False) \
             -> Tuple[th.Tensor, Optional[Dict]]:
         """
         Approximate the entropy of the root sum node via variational inference,
@@ -1787,7 +1789,7 @@ class RatSpn(nn.Module):
 
         Args:
             sample_size: Number of samples to approximate the expected entropy of the responsibility with.
-            grad_thru_resp: If False, the approximation of the responsibility is done without grad.
+            aux_with_grad: If False, the approximation of the responsibility is done without grad.
             verbose: Return logging data
         """
         logging = {}
@@ -1795,7 +1797,7 @@ class RatSpn(nn.Module):
         for layer_index in range(self.num_layers):
             child_entropies, layer_log = self.layer_entropy_approx(
                 layer_index=layer_index, child_entropies=child_entropies,
-                sample_size=sample_size, grad_thru_resp=grad_thru_resp,
+                sample_size=sample_size, aux_with_grad=aux_with_grad,
                 verbose=verbose,
             )
             if layer_log != {}:
