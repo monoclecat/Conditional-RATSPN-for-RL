@@ -167,7 +167,7 @@ if __name__ == "__main__":
         assert args.vmin <= 0.0 and args.vmax <= 0.0, "When plotting in log space, vmin and vmax must be <= 0.0!"
         args.vmax = 0.0 if args.vmax > 0.0 else args.vmax
     else:
-        args.vmin = 0.0 if args.vmin < 0.0 else args.vmin
+        args.vmin = abs(0.0 if args.vmin < 0.0 else args.vmin)
 
     wandb_run = None
     if args.wandb:
