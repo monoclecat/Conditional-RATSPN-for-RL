@@ -1783,11 +1783,10 @@ class RatSpn(nn.Module):
                 step_callback(step)
         return vips_logging
 
-    def vi_entropy_approx_layerwise(self, sample_size=10, aux_with_grad: bool = False, verbose=False) \
+    def recursive_entropy_approx(self, sample_size=10, aux_with_grad: bool = False, verbose=False) \
             -> Tuple[th.Tensor, Optional[Dict]]:
         """
-        Approximate the entropy of the root sum node via variational inference,
-        as done in the Variational Inference by Policy Search paper.
+        Approximate the entropy of the root sum node in a recursive manner.
 
         Args:
             sample_size: Number of samples to approximate the expected entropy of the responsibility with.
@@ -1806,7 +1805,7 @@ class RatSpn(nn.Module):
                 logging.update(layer_log)
         return child_entropies.flatten(), logging
 
-    def monte_carlo_ent_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
+    def naive_ent_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
         if layer_index is None:
             layer_index = self.max_layer_index
 

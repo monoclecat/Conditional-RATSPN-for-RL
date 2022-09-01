@@ -27,12 +27,14 @@ if __name__ == "__main__":
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
     parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--device', '-d', type=str, default='cuda', help='cuda or cpu')
-    parser.add_argument('--vi_sample_size', '-vi_samples', type=int, default=5)
-    parser.add_argument('--mc_sample_size', '-mc_samples', type=int, default=50)
+    parser.add_argument('--recursive_sample_size', '-recur_samples', type=int, default=5)
+    parser.add_argument('--naive_sample_size', '-naive_samples', type=int, default=50)
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
     parser.add_argument('--max_abs_mean', type=int, default=50)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
-                        choices=['vi_aux_no_grad', 'vi', 'huber', 'huber_hack', 'huber_hack_reverse', 'mc'])
+                        choices=['recursive_aux_no_grad', 'recursive',
+                                 'huber', 'huber_hack', 'huber_hack_reverse',
+                                 'naive'])
     parser.add_argument('--model_path', '-model', type=str,
                         help='Path to the pretrained model. If it is given, '
                              'all other SPN config parameters are ignored.')
@@ -91,17 +93,17 @@ if __name__ == "__main__":
         elif args.objective == 'huber_hack_reverse':
             exp_name = f"huber_hack_reverse_{args.run_name}" \
                        f"_seed{seed}"
-        elif args.objective == 'mc':
-            exp_name = f"MC_{args.run_name}" \
-                       f"_{args.mc_sample_size}samples" \
+        elif args.objective == 'naive':
+            exp_name = f"naive_{args.run_name}" \
+                       f"_{args.naive_sample_size}samples" \
                        f"_seed{seed}"
-        elif args.objective == 'vi':
-            exp_name = f"VI_{args.run_name}" \
-                       f"_{args.vi_sample_size}samples" \
+        elif args.objective == 'recursive':
+            exp_name = f"recursive_{args.run_name}" \
+                       f"_{args.recursive_sample_size}samples" \
                        f"_seed{seed}"
-        elif args.objective == 'vi_aux_no_grad':
-            exp_name = f"VI_aux_no_grad_{args.run_name}" \
-                       f"_{args.vi_sample_size}samples" \
+        elif args.objective == 'recursive_aux_no_grad':
+            exp_name = f"recursive_aux_no_grad_{args.run_name}" \
+                       f"_{args.recursive_sample_size}samples" \
                        f"_seed{seed}"
         else:
             raise Exception()
@@ -152,8 +154,8 @@ if __name__ == "__main__":
             if step == int(n_steps):
                 continue
 
-            vi_ent, vi_log = model.vi_entropy_approx_layerwise(
-                sample_size=args.vi_sample_size, aux_with_grad=args.objective == 'vi', verbose=True,
+            recursive_ent, recursive_log = model.recursive_entropy_approx(
+                sample_size=args.recursive_sample_size, aux_with_grad=args.objective == 'recursive', verbose=True,
             )
             huber_ent, huber_log = model.huber_entropy_lb(
                 verbose=True,
@@ -161,14 +163,14 @@ if __name__ == "__main__":
                 add_sub_weight_ent=args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse',
                 detach_weight_ent_subtraction=args.objective == 'huber_hack_reverse'
             )
-            mc_ent = model.monte_carlo_ent_approx(
-                sample_size=args.mc_sample_size, sample_with_grad=args.objective == 'mc'
+            naive_ent = model.naive_ent_approx(
+                sample_size=args.naive_sample_size, sample_with_grad=args.objective == 'naive'
             )
-            combined_log = {**vi_log, **huber_log}
+            combined_log = {**recursive_log, **huber_log}
             combined_log.update({
-                'VI_ent_approx': vi_ent.detach().mean().item(),
+                'recursive_ent_approx': recursive_ent.detach().mean().item(),
                 'huber_entropy_LB': huber_ent.detach().mean().item(),
-                'MC_root_entropy': mc_ent.detach().mean().item(),
+                'naive_root_entropy': naive_ent.detach().mean().item(),
             })
             for key, curr_val in combined_log.items():
                 curr_val = np.expand_dims(np.asarray(curr_val, dtype='f2'), 0)
@@ -181,12 +183,12 @@ if __name__ == "__main__":
                 else:
                     npz_log[key] = np.concatenate((past_vals, curr_val), 0)
 
-            if args.objective == 'vi' or args.objective == 'vi_aux_no_grad':
-                loss = -vi_ent.mean()
+            if args.objective == 'recursive' or args.objective == 'recursive_aux_no_grad':
+                loss = -recursive_ent.mean()
             elif args.objective == 'huber' or args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse':
                 loss = -huber_ent.mean()
-            elif args.objective == 'mc':
-                loss = -mc_ent.mean()
+            elif args.objective == 'naive':
+                loss = -naive_ent.mean()
             else:
                 raise Exception()
 

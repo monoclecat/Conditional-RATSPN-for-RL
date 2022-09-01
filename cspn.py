@@ -1,11 +1,11 @@
 import logging
-from typing import Dict, Type
+from typing import Dict, Type, Tuple, Optional
 
 import numpy as np
 import torch as th
 import torch.nn.functional as F
 from dataclasses import dataclass
-from torch import nn
+from torch import nn, Tensor
 
 from layers import CrossProduct, Sum
 from distributions import GaussianMixture
@@ -101,10 +101,10 @@ class CSPN(RatSpn):
 
         return super().forward(x, **kwargs)
 
-    def vi_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> th.Tensor:
+    def recursive_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> Tuple[Tensor, Optional[dict]]:
         if condition is not None:
             self.set_params(condition)
-        return super().vi_entropy_approx(**kwargs)
+        return super().recursive_entropy_approx(**kwargs)
 
     def sum_node_entropies(self, condition=None, reduction='mean'):
         """
