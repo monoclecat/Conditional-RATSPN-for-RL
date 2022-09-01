@@ -30,7 +30,7 @@ if __name__ == "__main__":
     parser.add_argument('--recursive_sample_size', '-recur_samples', type=int, default=5)
     parser.add_argument('--naive_sample_size', '-naive_samples', type=int, default=50)
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
-    parser.add_argument('--max_abs_mean', type=int, default=50)
+    parser.add_argument('--max_abs_mean', '-mean', type=int, default=20)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
                         choices=['recursive_aux_no_grad', 'recursive',
                                  'huber', 'huber_hack', 'huber_hack_reverse',
