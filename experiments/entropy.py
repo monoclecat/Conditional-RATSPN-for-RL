@@ -32,7 +32,7 @@ if __name__ == "__main__":
     parser.add_argument('--log_interval', '-log', type=int, default=1000)
     parser.add_argument('--max_abs_mean', type=int, default=50)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
-                        choices=['vi_aux_no_grad', 'vi', 'huber', 'huber_hack', 'mc'])
+                        choices=['vi_aux_no_grad', 'vi', 'huber', 'huber_hack', 'huber_hack_reverse', 'mc'])
     parser.add_argument('--model_path', '-model', type=str,
                         help='Path to the pretrained model. If it is given, '
                              'all other SPN config parameters are ignored.')
@@ -87,6 +87,9 @@ if __name__ == "__main__":
                        f"_seed{seed}"
         elif args.objective == 'huber_hack':
             exp_name = f"huber_hack_{args.run_name}" \
+                       f"_seed{seed}"
+        elif args.objective == 'huber_hack_reverse':
+            exp_name = f"huber_hack_reverse_{args.run_name}" \
                        f"_seed{seed}"
         elif args.objective == 'mc':
             exp_name = f"MC_{args.run_name}" \
@@ -152,8 +155,12 @@ if __name__ == "__main__":
             vi_ent, vi_log = model.vi_entropy_approx_layerwise(
                 sample_size=args.vi_sample_size, aux_with_grad=args.objective == 'vi', verbose=True,
             )
-            huber_ent, huber_log = model.huber_entropy_lb(verbose=True, detach_weights=args.objective == 'huber_hack',
-                                                          add_sub_weight_ent=args.objective == 'huber_hack')
+            huber_ent, huber_log = model.huber_entropy_lb(
+                verbose=True,
+                detach_weights=args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse',
+                add_sub_weight_ent=args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse',
+                detach_weight_ent_subtraction=args.objective == 'huber_hack_reverse'
+            )
             mc_ent = model.monte_carlo_ent_approx(
                 sample_size=args.mc_sample_size, sample_with_grad=args.objective == 'mc'
             )
@@ -176,7 +183,7 @@ if __name__ == "__main__":
 
             if args.objective == 'vi' or args.objective == 'vi_aux_no_grad':
                 loss = -vi_ent.mean()
-            elif args.objective == 'huber' or args.objective == 'huber_hack':
+            elif args.objective == 'huber' or args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse':
                 loss = -huber_ent.mean()
             elif args.objective == 'mc':
                 loss = -mc_ent.mean()
