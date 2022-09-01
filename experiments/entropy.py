@@ -33,6 +33,9 @@ if __name__ == "__main__":
     parser.add_argument('--max_abs_mean', type=int, default=50)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
                         choices=['vi_aux_no_grad', 'vi', 'huber', 'huber_hack', 'mc'])
+    parser.add_argument('--model_path', '-model', type=str,
+                        help='Path to the pretrained model. If it is given, '
+                             'all other SPN config parameters are ignored.')
     parser.add_argument('--RATSPN_F', '-F', type=int, default=4, help='Number of features in the SPN leaf layer. ')
     parser.add_argument('--RATSPN_R', '-R', type=int, default=3, help='Number of repetitions in RatSPN. ')
     parser.add_argument('--RATSPN_D', '-D', type=int, default=3, help='Depth of the SPN.')
@@ -50,11 +53,11 @@ if __name__ == "__main__":
     args.results_dir = os.path.join(args.results_dir, args.proj_name)
     os.makedirs(args.results_dir, exist_ok=True)
 
+    load_path = args.model_path
     for seed in args.seed:
         th.manual_seed(seed)
         np.random.seed(seed)
 
-        load_path = None
         if load_path is None:
             config = RatSpnConfig()
             config.C = 1
@@ -73,6 +76,7 @@ if __name__ == "__main__":
             model = RatSpn(config).to(args.device)
             count_params(model)
         else:
+            print(f"Using pretrained model {load_path}")
             model = th.load(load_path, map_location=args.device)
 
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
