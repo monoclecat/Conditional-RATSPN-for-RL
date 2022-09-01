@@ -208,7 +208,7 @@ class Sum(AbstractLayer):
                 weights = weights * ctx.parent_indices.unsqueeze(-3)
                 # [nr_nodes, *sample_shape, w, d, ic, oc, r]
                 weights = weights.sum(-2)
-                clear_weights_mask = weights == 0.0
+                clear_weights_mask = (ctx.parent_indices.sum(-2, keepdim=True) == 0.0).expand_as(weights)
 
         # If evidence is given, adjust the weights with the likelihoods of the observed paths
         if self._is_input_cache_enabled and self._input_cache is not None:

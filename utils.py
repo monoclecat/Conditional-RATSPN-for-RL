@@ -125,3 +125,19 @@ class Sample:
     @property
     def is_root(self):
         return self.parent_indices == None and self.repetition_indices == None
+
+    def assert_correct_indices(self):
+        if self.sampling_mode == 'onehot':
+            assert self.repetition_indices is None, "Onehot sampling: Repetition indices cannot exist!"
+            if self.parent_indices is not None:
+                if self.has_rep_dim:
+                    assert (self.parent_indices.detach().sum(-2) == 1.0).all(), \
+                        "Onehot sampling, sampling context has repetition dim: " \
+                        "In the features of each repetition, not just one output channel " \
+                        "of the layer below was selected."
+                else:
+                    assert (self.parent_indices.detach().sum(-2).sum(-1) == 1.0).all(), \
+                        "Onehot sampling, sampling context has NO repetition dim: " \
+                        "In each feature, not just one output channel " \
+                        "of the layer below was selected."
+

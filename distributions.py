@@ -228,7 +228,6 @@ class RatNormal(Leaf):
             # ctx.parent_indices shape [nr_nodes, *batch_dims, w, f, oc, r]
             # means shape [w, f, oc, r]
             selected_means = means * ctx.parent_indices
-            assert ctx.parent_indices.detach().sum(-2).max().item() == 1.0
             selected_means = selected_means.sum(-2)
             if not ctx.has_rep_dim:
                 # Only one repetition is selected, remove repetition dim of parameters

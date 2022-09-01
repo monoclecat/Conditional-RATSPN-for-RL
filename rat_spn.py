@@ -485,6 +485,7 @@ class RatSpn(nn.Module):
                     ctx.parent_indices = th.einsum('...ri -> ...ir', ctx.parent_indices)
                     # ctx.parent_indices [nr_nodes, *sample_shape, w, d, ic, r]
                 ctx.has_rep_dim = False  # The final sample will be of one repetition only
+            ctx.assert_correct_indices()
 
             # Continue at layers
             # Sample inner layers in reverse order (starting from topmost)
@@ -496,6 +497,7 @@ class RatSpn(nn.Module):
                     else:
                         ctx.scopes = layer.in_features // layer.cardinality
                 ctx = layer.sample(ctx=ctx, mode=mode)
+                ctx.assert_correct_indices()
 
             # Sample leaf
             if ctx.scopes is None:
