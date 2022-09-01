@@ -62,15 +62,18 @@ class RatNormal(Leaf):
         else:
             # Init uniform between 0 and 1
             self.std_param = nn.Parameter(th.rand(1, in_features, out_channels, num_repetitions))
-
         self.min_sigma = check_valid(min_sigma, float, 0.0, max_sigma, allow_none=False)
         self.max_sigma = check_valid(max_sigma, float, min_sigma, allow_none=False)
-        self.min_mean = check_valid(min_mean, float, upper_bound=max_mean, allow_none=True)
-        self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
         self.min_log_sigma = math.log(self.min_sigma + 1e-8)
         self.max_log_sigma = math.log(self.max_sigma + 1e-8)
 
-        self._dist_params_are_bounded = False
+        if self._tanh_squash:
+            assert self.min_mean is None and self.max_mean is None, \
+                "When leaves are tanh-squashed, the min_mean and max_mean values are predefined and cannot be set."
+            min_mean = -6.0
+            max_mean = 6.0
+        self.min_mean = check_valid(min_mean, float, upper_bound=max_mean, allow_none=True)
+        self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
 
     @property
     def device(self):
@@ -79,10 +82,9 @@ class RatNormal(Leaf):
     def bounded_means(self, means: th.Tensor = None):
         if means is None:
             means = self.mean_param
-        if self._tanh_squash:
-            means = th.clamp(means, -6.0, 6.0)
-        elif self.min_mean is not None or self.max_mean is not None:
-            means = th.clamp(means, self.min_mean, self.max_mean)
+        if self.min_mean is not None or self.max_mean is not None:
+            mean_ratio = th.sigmoid(means)
+            means = self.min_mean + (self.max_mean - self.min_mean) * mean_ratio
         return means
 
     def bounded_stds(self, stds: th.Tensor = None):
@@ -96,9 +98,7 @@ class RatNormal(Leaf):
                 stds = F.softplus(stds) + self.min_sigma
         else:
             stds = F.softplus(stds) + self.min_log_sigma
-            # LOG_STD_ABS_BOUND = 20
-            # stds = th.tanh(stds / LOG_STD_ABS_BOUND) * LOG_STD_ABS_BOUND
-            # stds = th.clamp(stds, LOG_STD_MIN, LOG_STD_MAX)
+            # stds = th.clamp(stds, self.min_log_sigma, self.max_log_sigma)
         return stds
 
     @property
