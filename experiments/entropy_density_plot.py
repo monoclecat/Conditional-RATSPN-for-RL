@@ -12,7 +12,7 @@ import wandb
 
 def get_ents_from_metrics(metrics, step):
     ents = []
-    for m_name in ['VI_ent_approx', 'huber_entropy_LB', 'MC_root_entropy']:
+    for m_name in ['recursive_ent_approx', 'huber_entropy_LB', 'naive_root_entropy']:
         try:
             ents.append(metrics.get(m_name)[step])
         except IndexError:
