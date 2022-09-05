@@ -9,6 +9,8 @@ import collections
 import os
 from typing import Optional
 
+import gym
+from gym import spaces
 import cv2
 import numpy as np
 import pygame
@@ -16,28 +18,56 @@ import pymunk
 import pymunk.pygame_util
 from pymunk.vec2d import Vec2d
 from envs.pymunk_helpers import DrawOptions
+import matplotlib.pyplot as plt
 
 os.environ['SDL_VIDEODRIVER'] = 'dummy'
 
 
-class PushEnv():
+class PushEnv(gym.Env):
+    metadata = {'render.modes': ['human']}
 
     def __init__(self, num_agents):
+        super(PushEnv, self).__init__()
 
+        # define state and action spaces
+        self.success_threshold = None
+        self.max_score = None
+        self.goal_pose = None
+        self.goal_color = None
+        self.block = None
+        self.cache_video = None
+        self.teleop = None
+        self.agents = None
+        self.space = None
+
+        self.__side_len = 512
+        self.__num_agents = num_agents
+        self.__screen_size = (self.__side_len, self.__side_len)
+        self.__action_shape = (self.__num_agents, 2)
+        self.action_space = spaces.Box(low=0, high=self.__side_len, shape=self.__action_shape)
+        self.__obs_mask = 'image'
+        if self.__obs_mask == 'image':
+            self.observation_space = spaces.Box(low=0, high=255, shape=(3, *self.__screen_size), dtype=np.uint8)
+        else:
+            raise NotImplemented("Currently, only the observation mask 'image' is supported. ")
+
+        self.__agent_color = pygame.Color('RoyalBlue')
         # Start PyGame for visualization.
-        self.__screen_size = (512, 512)
-        self.screen = pygame.display.set_mode((self.__screen_size[1], self.__screen_size[0]), flags=pygame.HIDDEN)
+        self.screen = pygame.display.set_mode(self.__screen_size, flags=pygame.HIDDEN)
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("Roboto", 16)
         self.control_hz = 10
-        self.__num_agents = num_agents
 
         # Start PyMunk for physics.
-        self.draw_options = DrawOptions(self.screen)
+        self.draw_options = DrawOptions(self.screen, agent_color=self.__agent_color)
         self.sim_hz = 100
 
         # Local controller params.
         self.k_p, self.k_v = 100, 20  # PD control.
+
+    @property
+    def action_shape(self):
+        return self.__action_shape
 
     @property
     def num_agents(self):
@@ -50,6 +80,32 @@ class PushEnv():
     @property
     def screen_center(self):
         return self.__screen_size[0] * 0.5, self.__screen_size[1] * 0.5
+
+    def mask_obs(self, obs):
+        if self.__obs_mask == 'image':
+            return obs['image']
+        else:
+            raise NotImplemented("Currently, only the observation mask 'image' is supported. ")
+
+    def get_screen_img(self, hide_agents=False, goal_only=False):
+        self.screen = self.draw_space(hide_agents=hide_agents, goal_only=goal_only)
+        no_agent_img = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
+        return no_agent_img
+
+    def observation(self):
+        # Get observation.
+        image = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
+        obs = {
+            'image': cv2.resize(image, dsize=(96, 96)),
+            'pos_agent': [a.position for a in self.agents],
+            'vel_agent': [a.velocity for a in self.agents],
+            'block_pose': (self.block.position, self.block.angle),
+            'goal_pose': self.goal_pose
+        }
+        diff_angle = (obs['block_pose'][1] - obs['goal_pose'][1]) % np.pi
+        diff_angle = min(diff_angle, np.pi - diff_angle)
+        obs['diff_angle'] = diff_angle
+        return obs
 
     def reset(self, seed=0):
         self.space = pymunk.Space()
@@ -69,7 +125,7 @@ class PushEnv():
         np.random.seed(seed)
 
         # Add agents, block, and goal zone.
-        self.agents = [self.add_circle((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
+        self.agents = [self.add_agent((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
                        for _ in range(self.__num_agents)]
         # self.agent = self.agents[0]
         # self.agent = self.add_circle((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
@@ -78,13 +134,25 @@ class PushEnv():
         self.goal_color = pygame.Color('LightGreen')
         self.goal_pose = ((256, 256), np.pi / 4)  # x, y, theta (in radians)
 
-        self.max_score = 50 * 100
-        self.success_threshold = 0.95  # 95% coverage.
+        self.goal_area = self.num_pixels_with_goal_color(self.get_screen_img(goal_only=True))
+        self.max_score = 1000.0
+        self.success_threshold = 0.95
         self.screen = self.render()
-        return self.step()
+        return self.mask_obs(self.observation())
 
-    def render(self):
+    def num_pixels_with_goal_color(self, img):
+        goal_color_match = (np.sum(img == np.uint8(self.goal_color)[:3], axis=2) == 3)
+        return goal_color_match.sum()
 
+    def reward_from_visible_goal_area(self, visible_goal_pixels):
+        diff = self.goal_area - visible_goal_pixels
+        ratio = diff / self.goal_area
+        assert 0.0 <= ratio <= 1.0
+        reward = ratio * self.max_score
+        done = reward > self.max_score * self.success_threshold
+        return reward, done
+
+    def draw_space(self, hide_agents: bool = False, goal_only: bool = False):
         # Clear screen.
         self.screen.fill(pygame.Color("white"))
 
@@ -99,8 +167,15 @@ class PushEnv():
             goal_points += [goal_points[0]]
             pygame.draw.polygon(self.draw_options.surface, self.goal_color, goal_points)
 
-        # Draw agent and block.
-        self.space.debug_draw(self.draw_options)
+        assert not goal_only or not hide_agents
+        if not goal_only:
+            # Draw agent and block.
+            with self.draw_options.draw_agent_ctx(hide=hide_agents):
+                self.space.debug_draw(self.draw_options)
+        return self.screen
+
+    def render(self, mode='human'):
+        self.draw_space()
 
         # Info and flip screen.
         # self.screen.blit(self.font.render(f'FPS: {self.clock.get_fps():.1f}', True, pygame.Color('darkgrey')), (10, 10))
@@ -111,51 +186,42 @@ class PushEnv():
             cv2.resize(np.uint8(pygame.surfarray.array3d(self.screen).transpose(1, 0, 2)), dsize=(96, 96)))
         return self.screen
 
-    def step(self, act: Optional[np.ndarray] = None):
-        if act is not None:
-            assert act.shape == (self.__num_agents, 2), f"Action must have shape (num_agents={self.__num_agents}, 2)"
-            act = [pymunk.Vec2d(act[i, 0], act[i, 1]) for i in range(self.__num_agents)]
-            dt = 1.0 / self.sim_hz
-            for _ in range(self.sim_hz // self.control_hz):
+    def step(self, act: np.ndarray = None):
+        # TODO clip actions either here or in agent
+        assert act.shape == (self.__num_agents, 2), f"Action must have shape (num_agents={self.__num_agents}, 2)"
+        act = [pymunk.Vec2d(act[i, 0], act[i, 1]) for i in range(self.__num_agents)]
+        dt = 1.0 / self.sim_hz
+        for _ in range(self.sim_hz // self.control_hz):
 
-                # Step PD control.
-                # self.agent.velocity = self.k_p * (act - self.agent.position)  # P control works too.
-                for i in range(self.__num_agents):
-                    agent = self.agents[i]
-                    acceleration = self.k_p * (act[i] - agent.position) + self.k_v * (Vec2d(0, 0) - agent.velocity)
-                    agent.velocity += acceleration * dt
+            # Step PD control.
+            # self.agent.velocity = self.k_p * (act - self.agent.position)  # P control works too.
+            for i in range(self.__num_agents):
+                agent = self.agents[i]
+                acceleration = self.k_p * (act[i] - agent.position) + self.k_v * (Vec2d(0, 0) - agent.velocity)
+                agent.velocity += acceleration * dt
 
-                # Step physics.
-                self.space.step(dt)
-                if self.teleop:
-                    self.clock.tick(self.sim_hz)  # Limit framerate.
+            # Step physics.
+            self.space.step(dt)
+            if self.teleop:
+                self.clock.tick(self.sim_hz)  # Limit framerate.
 
-                # Render screen.
-                self.screen = self.render()
+            # Render screen.
+            self.screen = self.render()
+        obs = self.observation()
 
-        # Get observation.
-        image = np.uint8(pygame.surfarray.array3d(self.screen).transpose(1, 0, 2))
-        obs = {'image': cv2.resize(image, dsize=(96, 96)),
-               'pos_agent': self.agent.position,
-               'vel_agent': self.agent.velocity,
-               'block_pose': (self.block.position, self.block.angle),
-               'goal_pose': self.goal_pose}
-        diff_angle = (obs['block_pose'][1] - obs['goal_pose'][1]) % np.pi
-        diff_angle = min(diff_angle, np.pi - diff_angle)
-        obs['diff_angle'] = diff_angle
-
-        # Get score (reward).
-        score = (self.max_score - np.sum(
-            np.mean(np.float32(image == np.uint8(self.goal_color)[:3]), axis=2) > 0)) / self.max_score
-        obs['score'] = np.clip(score / self.success_threshold, 0, 1)
+        # Get score (reward). Hide agents so their overlapping of the goal isn't counted
+        visible_goal_pixels = self.num_pixels_with_goal_color(self.get_screen_img(hide_agents=True))
+        reward, done = self.reward_from_visible_goal_area(visible_goal_pixels)
 
         # Done?
-        done = obs['score'] > self.success_threshold
         for event in pygame.event.get():
             if (event.type == pygame.QUIT or event.type == pygame.KEYDOWN and (
                     event.key in [pygame.K_ESCAPE, pygame.K_q])):
                 done = True
-        return obs, 0, done, {}
+        return self.mask_obs(obs), reward, done, {}
+
+    def close(self):
+        super(PushEnv, self).close()
 
     def teleop_agent(self):
         TeleopAgent = collections.namedtuple('TeleopAgent', ['act'])
@@ -175,12 +241,23 @@ class PushEnv():
         shape.color = pygame.Color('LightGray')  # https://htmlcolorcodes.com/color-names
         return shape
 
-    def add_circle(self, position, radius):
+    def add_agent(self, position, radius):
         body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         body.position = position
         body.friction = 1
         shape = pymunk.Circle(body, radius)
-        shape.color = pygame.Color('RoyalBlue')
+        shape.color = self.__agent_color
+        self.space.add(body, shape)
+        return body
+
+    def add_circle(self, position, radius):
+        raise NotImplemented
+        body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
+        body.position = position
+        body.friction = 1
+        shape = pymunk.Circle(body, radius)
+        shape.color = pygame.Color('LightGray')
+        assert shape.color != self.__agent_color
         self.space.add(body, shape)
         return body
 

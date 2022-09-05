@@ -53,6 +53,8 @@ import pymunk
 from pymunk.space_debug_draw_options import SpaceDebugColor
 from pymunk.vec2d import Vec2d
 
+from contextlib import contextmanager
+
 positive_y_is_up: bool = False
 """Make increasing values of y point upwards.
 
@@ -80,7 +82,7 @@ When False::
 
 
 class DrawOptions(pymunk.SpaceDebugDrawOptions):
-    def __init__(self, surface: pygame.Surface) -> None:
+    def __init__(self, surface: pygame.Surface, agent_color) -> None:
         """Draw a pymunk.Space on a pygame.Surface object.
 
         Typical usage::
@@ -128,6 +130,16 @@ class DrawOptions(pymunk.SpaceDebugDrawOptions):
         """
         self.surface = surface
         super(DrawOptions, self).__init__()
+        self._hide_agents = False
+        self._agent_color = agent_color
+
+    @contextmanager
+    def draw_agent_ctx(self, hide: bool = True):
+        self._hide_agents = hide
+        try:
+            yield
+        finally:
+            self._hide_agents = False
 
     def draw_circle(
             self,
@@ -137,6 +149,8 @@ class DrawOptions(pymunk.SpaceDebugDrawOptions):
             outline_color: SpaceDebugColor,
             fill_color: SpaceDebugColor,
     ) -> None:
+        if self._hide_agents and fill_color == self._agent_color:
+            return
         p = to_pygame(pos, self.surface)
 
         pygame.draw.circle(self.surface, fill_color.as_int(), p, round(radius), 0)

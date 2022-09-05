@@ -14,27 +14,32 @@ if __name__ == "__main__":
     parser.add_argument('--num_agents', '-ag', type=int, default=4)
     args = parser.parse_args()
 
-    steps = 20000
+    steps = 2000
 
     # Initialize environments.
     seed = 0
     env = PushEnv(num_agents=args.num_agents)
 
     def vis(obs):
-        plt.imshow(obs['image'])
+        plt.imshow(obs)
         plt.show()
 
     # Reset environments.
-    obs, reward, done, info = env.reset(seed=seed)
+    obs = env.reset(seed=seed)
     vis(obs)
 
-    score = 0
+    max_rew = 0
     for step in range(1, steps + 1):
         if False:
-            act = np.random.rand(args.num_agents, 2) * 2 - 1
+            # center
+            act = np.broadcast_to(np.expand_dims(env.screen_center, 0), env.action_shape)
+        elif False:
+            # top right
+            act = np.broadcast_to(np.expand_dims(env.screen_size * np.asarray([1, 0]), 0), env.action_shape)
         else:
-
-            act = np.zeros((args.num_agents, 2))
+            # bottom left right
+            act = np.broadcast_to(np.expand_dims(env.screen_size * np.asarray([0, 1]), 0), env.action_shape)
         obs, reward, done, info = env.step(act)
-        score = max(score, obs['score'])
+        print(reward)
         vis(obs)
+        max_rew = max(max_rew, reward)
