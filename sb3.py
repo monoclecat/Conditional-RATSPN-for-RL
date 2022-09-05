@@ -3,7 +3,7 @@ import gym
 from stable_baselines3.sac.policies import SACPolicy
 from stable_baselines3.sac.sac import SAC
 from stable_baselines3.common.utils import polyak_update
-from stable_baselines3.common.policies import BasePolicy, register_policy, ContinuousCritic, BaseModel
+from stable_baselines3.common.policies import BasePolicy, ContinuousCritic, BaseModel
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import (
@@ -73,6 +73,8 @@ class CspnActor(BasePolicy):
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
             vi_ent_approx_sample_size: int = 5,
             squash_output: bool = True,
+            min_std: float = 0.001,
+            max_std: float = 1.0,
             **kwargs
     ):
         super(CspnActor, self).__init__(
@@ -104,10 +106,10 @@ class CspnActor(BasePolicy):
         config.leaf_base_class = RatNormal
         config.tanh_squash = squash_output
         config.cond_layers_inner_act = cond_layers_inner_act
-        # config.leaf_base_kwargs = {'min_mean': 0.0, 'max_mean': 1.0}
-        if False:
-            config.leaf_base_kwargs['min_sigma'] = 0.1
-            config.leaf_base_kwargs['max_sigma'] = 1.0
+        config.leaf_base_kwargs = {
+            'min_sigma': min_std,
+            'max_sigma': max_std,
+        }
         self.config = config
         self.cspn = CSPN(config)
 
@@ -147,134 +149,6 @@ class CspnActor(BasePolicy):
         return self(observation, deterministic)
 
 
-class CspnCritic(BaseModel):
-    """
-    Critic network(s) for DDPG/SAC/TD3.
-    It represents the action-state value function (Q-value function).
-    Compared to A2C/PPO critics, this one represents the Q-value
-    and takes the continuous action as input. It is concatenated with the state
-    and then fed to the network which outputs a single value: Q(s, a).
-    For more recent algorithms like SAC/TD3, multiple networks
-    are created to give different estimates.
-
-    By default, it creates two critic networks used to reduce overestimation
-    thanks to clipped Q-learning (cf TD3 paper).
-
-    :param observation_space: Obervation space
-    :param action_space: Action space
-    :param net_arch: Network architecture
-    :param features_extractor: Network to extract features
-        (a CNN when using images, a nn.Flatten() layer otherwise)
-    :param features_dim: Number of features
-    :param activation_fn: Activation function
-    :param normalize_images: Whether to normalize images or not,
-         dividing by 255.0 (True by default)
-    :param n_critics: Number of critic networks to create.
-    :param share_features_extractor: Whether the features extractor is shared or not
-        between the actor and the critic (this saves computation time)
-    """
-
-    def __init__(
-            self,
-            observation_space: gym.spaces.Space,
-            action_space: gym.spaces.Space,
-            features_extractor: nn.Module,
-            features_dim: int,
-            R: int,
-            D: int,
-            I: int,
-            S: int,
-            dropout: float,
-            feat_layers: int,
-            sum_param_layers: int,
-            dist_param_layers: int,
-            cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
-            vi_ent_approx_sample_size: int = 5,
-            normalize_images: bool = True,
-            n_critics: int = 2,
-            share_features_extractor: bool = True,
-            squash_output: bool = True,
-            **kwargs,
-    ):
-        super().__init__(
-            observation_space,
-            action_space,
-            features_extractor=features_extractor,
-            normalize_images=normalize_images,
-        )
-
-        action_dim = get_action_dim(self.action_space)
-
-        self._feat_cache = None
-
-        self.share_features_extractor = share_features_extractor
-        self.vi_ent_approx_sample_size = vi_ent_approx_sample_size
-        self.n_critics = n_critics
-        self.q_networks = []
-        for idx in range(n_critics):
-            config = CspnConfig()
-            config.F_cond = (features_dim,)
-            config.C = 1
-            config.feat_layers = feat_layers
-            config.sum_param_layers = sum_param_layers
-            config.dist_param_layers = dist_param_layers
-            config.F = action_dim
-            config.R = R
-            config.D = D if D is not None else int(np.log2(action_dim))
-            config.I = I
-            config.S = S
-            config.dropout = dropout
-            config.leaf_base_class = RatNormal
-            config.tanh_squash = squash_output
-            config.cond_layers_inner_act = cond_layers_inner_act
-            self.config = config
-            q_net = CSPN(config)
-            self.add_module(f"qf{idx}", q_net)
-            self.q_networks.append(q_net)
-
-    def forward(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, ...]:
-        # Learn the features extractor using the policy loss only
-        # when the features_extractor is shared with the actor
-        with th.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(obs)
-        if self._feat_cache is None or (self._feat_cache != features).any().item():
-            self._feat_cache = features
-        else:
-            # If features haven't changed since the last time the params were set, then the CSPN can skip this step.
-            features = None
-        return tuple(q_net(actions, condition=features).squeeze(0) for q_net in self.q_networks)
-
-    def q1_forward(self, obs: th.Tensor, actions: th.Tensor) -> th.Tensor:
-        """
-        Only predict the Q-value using the first network.
-        This allows to reduce computation when all the estimates are not needed
-        (e.g. when updating the policy in TD3).
-        """
-        with th.no_grad():
-            features = self.extract_features(obs)
-        if self._feat_cache is None or (self._feat_cache != features).any().item():
-            self._feat_cache = features
-        else:
-            # If features haven't changed since the last time the params were set, then the CSPN can skip this step.
-            features = None
-        return self.q_networks[0](actions, condition=features)
-
-    def entropy(self, obs: th.Tensor):
-        with th.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(obs)
-        if self._feat_cache is None or (self._feat_cache != features).any().item():
-            self._feat_cache = features
-        else:
-            # If features haven't changed since the last time the params were set, then the CSPN can skip this step.
-            features = None
-        return tuple(q_net.vi_entropy_approx(
-            condition=features, verbose=True,
-            sample_size=self.vi_ent_approx_sample_size,
-        ) for q_net in self.q_networks)
-
-
-
-
 class CspnPolicy(SACPolicy):
     """
     Policy class (with a CSPN actor and an MLP critic) for SAC.
@@ -305,7 +179,6 @@ class CspnPolicy(SACPolicy):
             action_space: gym.spaces.Space,
             lr_schedule: Schedule,
             actor_cspn_args: dict,
-            critic_cspn_args: Optional[Dict],
             net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
             critic_activation_fn: Type[nn.Module] = nn.ReLU,
             log_std_init: float = -3,
@@ -347,7 +220,6 @@ class CspnPolicy(SACPolicy):
         self.actor_kwargs.update(actor_cspn_args)
 
         self.critic_kwargs = self.net_args.copy()
-        self.cspn_critic = critic_cspn_args is not None
         _, critic_arch = get_actor_critic_arch(net_arch)
         self.critic_arch = critic_arch
         self.critic_activation_fn = critic_activation_fn
@@ -360,8 +232,6 @@ class CspnPolicy(SACPolicy):
                 "share_features_extractor": share_features_extractor,
             }
         )
-        if self.cspn_critic:
-            self.critic_kwargs.update(critic_cspn_args)
 
         self.actor, self.actor_target = None, None
         self.critic, self.critic_target = None, None
@@ -373,17 +243,6 @@ class CspnPolicy(SACPolicy):
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         actor_kwargs['squash_output'] = self.squash_output
         return CspnActor(**actor_kwargs).to(self.device)
-
-    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) \
-            -> Union[CspnCritic, ContinuousCritic]:
-        critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        if self.cspn_critic:
-            return CspnCritic(**critic_kwargs).to(self.device)
-        else:
-            return ContinuousCritic(**critic_kwargs).to(self.device)
-
-
-register_policy("CspnPolicy", CspnPolicy)
 
 
 class CspnSAC(SAC):
@@ -411,8 +270,6 @@ class CspnSAC(SAC):
         actor_losses, critic_losses, critic_values, = [], [], []
         actor_ent_log = []
         vi_ent_log = None
-        if self.policy.cspn_critic:
-            critic_ent_log = [[] for _ in range(self.critic.n_critics)]
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
@@ -464,11 +321,6 @@ class CspnSAC(SAC):
             q_values = th.cat(current_q_values, dim=1)
             q_values, _ = th.min(q_values, dim=1, keepdim=True)
             critic_values.append(q_values.mean().item())
-            if self.policy.cspn_critic:
-                critic_entropies = self.critic.entropy(replay_data.observations)
-                for i in range(self.critic.n_critics):
-                    critic_ent_log[i].append(critic_entropies[i][0].mean().item())
-
 
             # Compute critic loss
             critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
@@ -523,9 +375,6 @@ class CspnSAC(SAC):
         self.logger.record("train/critic_values", np.mean(critic_values))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-        if self.policy.cspn_critic:
-            for i in range(self.critic.n_critics):
-                self.logger.record(f"train/critic_qf{i}_entropy", np.mean(critic_ent_log[i]))
         if vi_ent_log is not None:
             for layer_id, layer_dict in vi_ent_log.items():
                 for key, val in layer_dict.items():

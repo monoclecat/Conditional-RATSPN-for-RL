@@ -9,9 +9,11 @@ import torch.nn as nn
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
+from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
 
 from cspn import CSPN, print_cspn_params
-from sb3 import CspnActor, CspnSAC, EntropyLoggingSAC
+from sb3 import CspnActor, CspnSAC, EntropyLoggingSAC, CspnPolicy
+from envs.pushenv import PushEnv
 
 
 if __name__ == "__main__":
@@ -20,7 +22,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
     parser.add_argument('--mlp_actor', action='store_true', help='Use a MLP actor')
-    parser.add_argument('--cspn_critic', action='store_true', help='Use a CSPN critic')
     parser.add_argument('--num_envs', type=int, default=1, help='Number of parallel environments to run.')
     parser.add_argument('--timesteps', type=int, default=int(1e6), help='Total timesteps to train model.')
     parser.add_argument('--save_interval', type=int, help='Save model and a video every save_interval timesteps.')
@@ -63,6 +64,9 @@ if __name__ == "__main__":
     # VI entropy arguments
     parser.add_argument('--vi_ent_sample_size', '-ent_sample_size', type=int, default=5,
                         help='Number of samples to approximate entropy with. ')
+    # PushEnv arguments
+    parser.add_argument('--num_agents', type=int, default=4,
+                        help='Number of agents to use in PushEnv. Is ignored if PushEnv is not selected.')
 
     args = parser.parse_args()
     th.autograd.set_detect_anomaly(args.detect_autograd_anomaly)
@@ -110,13 +114,16 @@ if __name__ == "__main__":
                 settings=wandb.Settings(start_method="fork"),
             )
 
-        env = make_vec_env(
-            env_id=args.env_name,
-            n_envs=args.num_envs,
-            monitor_dir=monitor_path,
-            # vec_env_cls=SubprocVecEnv,
-            # vec_env_kwargs={'start_method': 'fork'},
-        )
+        if args.env_name == 'PushEnv':
+            env = PushEnv(num_agents=args.num_agents)
+        else:
+            env = make_vec_env(
+                env_id=args.env_name,
+                n_envs=args.num_envs,
+                monitor_dir=monitor_path,
+                # vec_env_cls=SubprocVecEnv,
+                # vec_env_kwargs={'start_method': 'fork'},
+            )
         if not args.no_video:
             # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
             env = VecVideoRecorder(env, video_folder=video_path,
@@ -161,6 +168,7 @@ if __name__ == "__main__":
                 'learning_starts': args.learning_starts,
                 'device': args.device,
                 'learning_rate': args.learning_rate,
+                'buffer_size': 400_000 if len(env.observation_space.shape) > 1 else 1_000_000,
             }
             if args.mlp_actor:
                 model = EntropyLoggingSAC("MlpPolicy", **sac_kwargs)
@@ -179,9 +187,9 @@ if __name__ == "__main__":
                 }
                 sac_kwargs['policy_kwargs'] = {
                     'actor_cspn_args': cspn_args,
-                    'critic_cspn_args': cspn_args if args.cspn_critic else None,
+                    'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
                 }
-                model = CspnSAC(policy="CspnPolicy", **sac_kwargs)
+                model = CspnSAC(policy=CspnPolicy, **sac_kwargs)
             # model_name = f"sac_{'mlp' if args.mlp_actor else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
 
         if not args.no_wandb:

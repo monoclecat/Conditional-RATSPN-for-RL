@@ -6,6 +6,7 @@ import pymunk
 import matplotlib.pyplot as plt
 from moviepy.editor import ImageSequenceClip
 from envs.pushenv import PushEnv
+from stable_baselines3.common.env_checker import check_env
 
 
 if __name__ == "__main__":
@@ -26,19 +27,20 @@ if __name__ == "__main__":
 
     # Reset environments.
     obs = env.reset(seed=seed)
+    check_env(env)
     vis(obs)
 
     max_rew = 0
     for step in range(1, steps + 1):
-        if False:
+        if True:
             # center
-            act = np.broadcast_to(np.expand_dims(env.screen_center, 0), env.action_shape)
+            act = np.zeros(env.action_shape)
         elif False:
             # top right
-            act = np.broadcast_to(np.expand_dims(env.screen_size * np.asarray([1, 0]), 0), env.action_shape)
+            act = np.ones(env.action_shape) * np.asarray([1, -1])
         else:
             # bottom left right
-            act = np.broadcast_to(np.expand_dims(env.screen_size * np.asarray([0, 1]), 0), env.action_shape)
+            act = np.ones(env.action_shape) * np.asarray([-1, 1])
         obs, reward, done, info = env.step(act)
         print(reward)
         vis(obs)

@@ -40,26 +40,30 @@ class PushEnv(gym.Env):
         self.agents = None
         self.space = None
 
-        self.__side_len = 512
-        self.__num_agents = num_agents
-        self.__screen_size = (self.__side_len, self.__side_len)
-        self.__action_shape = (self.__num_agents, 2)
-        self.action_space = spaces.Box(low=0, high=self.__side_len, shape=self.__action_shape)
-        self.__obs_mask = 'image'
-        if self.__obs_mask == 'image':
-            self.observation_space = spaces.Box(low=0, high=255, shape=(3, *self.__screen_size), dtype=np.uint8)
+        self._side_len = 512
+        self._num_agents = num_agents
+        self._screen_size = (self._side_len, self._side_len)
+        self.screen_center = self._screen_size[0] * 0.5, self._screen_size[1] * 0.5
+
+        self._action_shape = (self._num_agents, 2)
+        self._action_space = spaces.Box(low=-1.0, high=1.0, shape=self._action_shape)
+
+        self._obs_mask = 'image'
+        if self._obs_mask == 'image':
+            self._observation_shape = (96, 96, 3)
+            self._observation_space = spaces.Box(low=0, high=255, shape=self._observation_shape, dtype=np.uint8)
         else:
             raise NotImplemented("Currently, only the observation mask 'image' is supported. ")
 
-        self.__agent_color = pygame.Color('RoyalBlue')
+        self._agent_color = pygame.Color('RoyalBlue')
         # Start PyGame for visualization.
-        self.screen = pygame.display.set_mode(self.__screen_size, flags=pygame.HIDDEN)
+        self.screen = pygame.display.set_mode(self._screen_size, flags=pygame.HIDDEN)
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("Roboto", 16)
+        # self.font = pygame.font.SysFont("Roboto", 16)
         self.control_hz = 10
 
         # Start PyMunk for physics.
-        self.draw_options = DrawOptions(self.screen, agent_color=self.__agent_color)
+        self.draw_options = DrawOptions(self.screen, agent_color=self._agent_color)
         self.sim_hz = 100
 
         # Local controller params.
@@ -67,22 +71,30 @@ class PushEnv(gym.Env):
 
     @property
     def action_shape(self):
-        return self.__action_shape
+        return self._action_shape
+
+    @property
+    def action_space(self):
+        return self._action_space
+
+    @property
+    def observation_shape(self):
+        return self._observation_shape
+
+    @property
+    def observation_space(self):
+        return self._observation_space
 
     @property
     def num_agents(self):
-        return self.__num_agents
+        return self._num_agents
 
     @property
     def screen_size(self):
-        return self.__screen_size
-
-    @property
-    def screen_center(self):
-        return self.__screen_size[0] * 0.5, self.__screen_size[1] * 0.5
+        return self._screen_size
 
     def mask_obs(self, obs):
-        if self.__obs_mask == 'image':
+        if self._obs_mask == 'image':
             return obs['image']
         else:
             raise NotImplemented("Currently, only the observation mask 'image' is supported. ")
@@ -96,7 +108,7 @@ class PushEnv(gym.Env):
         # Get observation.
         image = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
         obs = {
-            'image': cv2.resize(image, dsize=(96, 96)),
+            'image': cv2.resize(image, dsize=self._observation_shape[:2]),
             'pos_agent': [a.position for a in self.agents],
             'vel_agent': [a.velocity for a in self.agents],
             'block_pose': (self.block.position, self.block.angle),
@@ -126,7 +138,7 @@ class PushEnv(gym.Env):
 
         # Add agents, block, and goal zone.
         self.agents = [self.add_agent((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
-                       for _ in range(self.__num_agents)]
+                       for _ in range(self._num_agents)]
         # self.agent = self.agents[0]
         # self.agent = self.add_circle((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
         self.block = self.add_tee((np.random.randint(100, 400), np.random.randint(100, 400)),
@@ -149,7 +161,7 @@ class PushEnv(gym.Env):
         ratio = diff / self.goal_area
         assert 0.0 <= ratio <= 1.0
         reward = ratio * self.max_score
-        done = reward > self.max_score * self.success_threshold
+        done = bool(reward > self.max_score * self.success_threshold)
         return reward, done
 
     def draw_space(self, hide_agents: bool = False, goal_only: bool = False):
@@ -179,23 +191,26 @@ class PushEnv(gym.Env):
 
         # Info and flip screen.
         # self.screen.blit(self.font.render(f'FPS: {self.clock.get_fps():.1f}', True, pygame.Color('darkgrey')), (10, 10))
-        # self.screen.blit(self.font.render('Push the gray block to the green target pose.', True, pygame.Color('darkgrey')), (10, self.__screen_size[0] - 35))
-        # self.screen.blit(self.font.render('Press ESC or Q to quit.', True, pygame.Color('darkgrey')), (10, self.__screen_size[0] - 20))
+        # self.screen.blit(self.font.render('Push the gray block to the green target pose.', True, pygame.Color('darkgrey')), (10, self._screen_size[0] - 35))
+        # self.screen.blit(self.font.render('Press ESC or Q to quit.', True, pygame.Color('darkgrey')), (10, self._screen_size[0] - 20))
         pygame.display.flip()
         self.cache_video.append(
-            cv2.resize(np.uint8(pygame.surfarray.array3d(self.screen).transpose(1, 0, 2)), dsize=(96, 96)))
+            cv2.resize(np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2))),
+                       dsize=self._observation_shape[:2]))
         return self.screen
 
     def step(self, act: np.ndarray = None):
         # TODO clip actions either here or in agent
-        assert act.shape == (self.__num_agents, 2), f"Action must have shape (num_agents={self.__num_agents}, 2)"
-        act = [pymunk.Vec2d(act[i, 0], act[i, 1]) for i in range(self.__num_agents)]
+        assert act.shape == (self._num_agents, 2), f"Action must have shape (num_agents={self._num_agents}, 2)"
+        assert act.min() >= -1.0 and act.max() <= 1.0
+        act = (act/2 + 0.5) * self._side_len
+        act = [pymunk.Vec2d(act[i, 0], act[i, 1]) for i in range(self._num_agents)]
         dt = 1.0 / self.sim_hz
         for _ in range(self.sim_hz // self.control_hz):
 
             # Step PD control.
             # self.agent.velocity = self.k_p * (act - self.agent.position)  # P control works too.
-            for i in range(self.__num_agents):
+            for i in range(self._num_agents):
                 agent = self.agents[i]
                 acceleration = self.k_p * (act[i] - agent.position) + self.k_v * (Vec2d(0, 0) - agent.velocity)
                 agent.velocity += acceleration * dt
@@ -246,7 +261,7 @@ class PushEnv(gym.Env):
         body.position = position
         body.friction = 1
         shape = pymunk.Circle(body, radius)
-        shape.color = self.__agent_color
+        shape.color = self._agent_color
         self.space.add(body, shape)
         return body
 
@@ -257,7 +272,7 @@ class PushEnv(gym.Env):
         body.friction = 1
         shape = pymunk.Circle(body, radius)
         shape.color = pygame.Color('LightGray')
-        assert shape.color != self.__agent_color
+        assert shape.color != self._agent_color
         self.space.add(body, shape)
         return body
 
