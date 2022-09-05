@@ -68,7 +68,7 @@ class RatNormal(Leaf):
         self.max_log_sigma = math.log(self.max_sigma + 1e-8)
 
         if self._tanh_squash:
-            assert self.min_mean is None and self.max_mean is None, \
+            assert min_mean is None and max_mean is None, \
                 "When leaves are tanh-squashed, the min_mean and max_mean values are predefined and cannot be set."
             min_mean = -6.0
             max_mean = 6.0
