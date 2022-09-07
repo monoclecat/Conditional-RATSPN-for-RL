@@ -116,6 +116,7 @@ if __name__ == "__main__":
 
         if args.env_name == 'PushEnv':
             env = PushEnv(num_agents=args.num_agents)
+            env = gym.wrappers.TimeLimit(env, max_episode_steps=100)
         else:
             env = make_vec_env(
                 env_id=args.env_name,
