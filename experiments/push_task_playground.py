@@ -6,6 +6,7 @@ import pymunk
 import matplotlib.pyplot as plt
 from moviepy.editor import ImageSequenceClip
 from envs.pushenv import PushEnv
+from tqdm import tqdm
 from stable_baselines3.common.env_checker import check_env
 
 
@@ -15,7 +16,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_agents', '-ag', type=int, default=4)
     args = parser.parse_args()
 
-    steps = 2000
+    steps = 100
 
     # Initialize environments.
     seed = 0
@@ -27,21 +28,35 @@ if __name__ == "__main__":
 
     # Reset environments.
     obs = env.reset(seed=seed)
-    check_env(env)
+    # check_env(env)
     vis(obs)
 
     max_rew = 0
-    for step in range(1, steps + 1):
-        if True:
+    goal = -1
+    for step in tqdm(range(1, steps + 1)):
+        if goal == -1:
+            act = np.random.random(env.action_shape) * 2 - 1
+        elif goal == 0:
             # center
             act = np.zeros(env.action_shape)
-        elif False:
+        elif goal == 1:
             # top right
-            act = np.ones(env.action_shape) * np.asarray([1, -1])
+            act = np.tile(np.asarray([1, -1]), env.action_shape[0] // 2)
+        elif goal == 2:
+            # top left
+            act = np.tile(np.asarray([-1, -1]), env.action_shape[0] // 2)
+        elif goal == 3:
+            # bottom left
+            act = np.tile(np.asarray([-1, 1]), env.action_shape[0] // 2)
+        elif goal == 4:
+            # bottom right
+            act = np.tile(np.asarray([1, 1]), env.action_shape[0] // 2)
         else:
-            # bottom left right
-            act = np.ones(env.action_shape) * np.asarray([-1, 1])
+            raise ValueError
         obs, reward, done, info = env.step(act)
-        print(reward)
-        vis(obs)
-        max_rew = max(max_rew, reward)
+        # print(reward)
+        # vis(obs)
+        if reward > max_rew:
+            max_rew = reward
+            print(f"New max reward {max_rew}")
+    print(f"Max reward: {max_rew}")
