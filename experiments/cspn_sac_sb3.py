@@ -6,7 +6,8 @@ import platform
 import torch as th
 import torch.nn as nn
 
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder, DummyVecEnv
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
@@ -14,6 +15,7 @@ from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
 from cspn import CSPN, print_cspn_params
 from sb3 import CspnActor, CspnSAC, EntropyLoggingSAC, CspnPolicy
 from envs.pushenv import PushEnv
+from utils import non_existing_folder_name
 
 
 if __name__ == "__main__":
@@ -35,7 +37,6 @@ if __name__ == "__main__":
                         help='Directory to save logs to.')
     parser.add_argument('--model_path', type=str,
                         help='Path to the pretrained model.')
-    parser.add_argument('--detect_autograd_anomaly', action='store_true', help="Enable autograd anomaly detection")
     parser.add_argument('--no_wandb', action='store_true', help="Don't log this run in WandB")
     parser.add_argument('--no_video', action='store_true',
                         help="Don't record videos of the agent. NOTE: This requires "
@@ -45,6 +46,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--learning_starts', type=int, default=1000,
                         help='Nr. of steps to act randomly in the beginning.')
+    parser.add_argument('--buffer_size', type=int, default=300_000, help='replay buffer size')
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,
@@ -70,9 +72,12 @@ if __name__ == "__main__":
     # PushEnv arguments
     parser.add_argument('--num_agents', type=int, default=4,
                         help='Number of agents to use in PushEnv. Is ignored if PushEnv is not selected.')
-
+    parser.add_argument('--max_ep_len', type=int, default=200, help='Maximum episode length in steps.')
+    parser.add_argument('--agent_spawn_max_wall_dist', '-ag_wall', type=int, default=30,
+                        help='When agents spawn they must be maximum this far away from the walls.')
+    parser.add_argument('--object_spawn_min_wall_dist', '-obj_wall', type=int, default=100,
+                        help='When objects spawn they must be minimum this far away from the walls.')
     args = parser.parse_args()
-    th.autograd.set_detect_anomaly(args.detect_autograd_anomaly)
 
     if not args.save_interval:
         args.save_interval = args.timesteps
@@ -96,8 +101,12 @@ if __name__ == "__main__":
 
     for seed in args.seed:
         print(f"Seed: {seed}")
+        np.random.seed(seed)
+        th.manual_seed(seed)
+
         run_name_seed = f"{args.run_name}_s{seed}"
-        log_path = os.path.join(args.log_dir, args.proj_name, run_name_seed)
+        log_path = os.path.join(args.log_dir, args.proj_name)
+        log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
         monitor_path = os.path.join(log_path, "monitor")
         model_path = os.path.join(log_path, "models")
         video_path = os.path.join(log_path, "video")
@@ -118,8 +127,24 @@ if __name__ == "__main__":
             )
 
         if args.env_name == 'PushEnv':
-            env = PushEnv(num_agents=args.num_agents)
-            env = gym.wrappers.TimeLimit(env, max_episode_steps=100)
+            # def time_lim_push_env():
+                # env = PushEnv(num_agents=args.num_agents)
+                # env = gym.wrappers.TimeLimit(env, max_episode_steps=100)
+                # return env
+            # env = DummyVecEnv([time_lim_push_env])
+            env = make_vec_env(
+                env_id=PushEnv,
+                env_kwargs={
+                    'num_agents': args.num_agents,
+                    'max_episode_len': args.max_ep_len,
+                    'agent_spawn_max_wall_dist': args.agent_spawn_max_wall_dist,
+                    'object_spawn_min_wall_dist': args.object_spawn_min_wall_dist,
+                },
+                n_envs=args.num_envs,
+                monitor_dir=monitor_path,
+                # vec_env_cls=SubprocVecEnv,
+                # vec_env_kwargs={'start_method': 'fork'},
+            )
         else:
             env = make_vec_env(
                 env_id=args.env_name,
@@ -131,7 +156,8 @@ if __name__ == "__main__":
         if not args.no_video:
             # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
             env = VecVideoRecorder(env, video_folder=video_path,
-                                   record_video_trigger=lambda x: x % args.save_interval == 0, video_length=200)
+                                   record_video_trigger=lambda x: x % args.save_interval == 0,
+                                   video_length=200)
 
         if args.model_path:
             model = CspnSAC.load(args.model_path, env)
@@ -172,7 +198,7 @@ if __name__ == "__main__":
                 'learning_starts': args.learning_starts,
                 'device': args.device,
                 'learning_rate': args.learning_rate,
-                'buffer_size': 400_000 if len(env.observation_space.shape) > 1 else 1_000_000,
+                'buffer_size': args.buffer_size,
             }
             if args.mlp_actor:
                 model = EntropyLoggingSAC("MlpPolicy", **sac_kwargs)

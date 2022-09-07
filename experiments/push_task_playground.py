@@ -20,7 +20,12 @@ if __name__ == "__main__":
 
     # Initialize environments.
     seed = 0
-    env = PushEnv(num_agents=args.num_agents)
+    env = PushEnv(
+        num_agents=args.num_agents,
+        max_episode_len=1,
+        agent_spawn_max_wall_dist=30,
+        object_spawn_min_wall_dist=100
+    )
 
     def vis(obs):
         plt.imshow(obs)
@@ -59,4 +64,6 @@ if __name__ == "__main__":
         if reward > max_rew:
             max_rew = reward
             print(f"New max reward {max_rew}")
+        if done:
+            env.reset()
     print(f"Max reward: {max_rew}")

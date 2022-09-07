@@ -24,12 +24,24 @@ os.environ['SDL_VIDEODRIVER'] = 'dummy'
 
 
 class PushEnv(gym.Env):
-    metadata = {'render.modes': ['human']}
+    metadata = {'render.modes': ['human', 'rgb_array']}
 
-    def __init__(self, num_agents):
+    def __init__(
+            self,
+            num_agents,
+            max_episode_len,
+            agent_spawn_max_wall_dist,
+            object_spawn_min_wall_dist,
+    ):
         super(PushEnv, self).__init__()
+        self._side_len = 512
+        assert 0 < agent_spawn_max_wall_dist < self._side_len / 2
+        self.agent_spawn_max_wall_dist = agent_spawn_max_wall_dist
+        assert 0 < object_spawn_min_wall_dist < self._side_len / 2
+        self.object_spawn_min_wall_dist = object_spawn_min_wall_dist
 
-        # define state and action spaces
+        self._steps = None
+        self.__max_steps = max_episode_len
         self.success_threshold = None
         self.max_score = None
         self.goal_pose = None
@@ -40,7 +52,6 @@ class PushEnv(gym.Env):
         self.agents = None
         self.space = None
 
-        self._side_len = 512
         self._num_agents = num_agents
         self._screen_size = (self._side_len, self._side_len)
         self.screen_center = self._screen_size[0] * 0.5, self._screen_size[1] * 0.5
@@ -60,7 +71,7 @@ class PushEnv(gym.Env):
         self.screen = pygame.display.set_mode(self._screen_size, flags=pygame.HIDDEN)
         self.clock = pygame.time.Clock()
         # self.font = pygame.font.SysFont("Roboto", 16)
-        self.control_hz = 10
+        self.control_hz = 100
 
         # Start PyMunk for physics.
         self.draw_options = DrawOptions(self.screen, agent_color=self._agent_color)
@@ -68,6 +79,10 @@ class PushEnv(gym.Env):
 
         # Local controller params.
         self.k_p, self.k_v = 100, 20  # PD control.
+
+    @property
+    def max_steps(self):
+        return self.__max_steps
 
     @property
     def action_shape(self):
@@ -100,6 +115,7 @@ class PushEnv(gym.Env):
             raise NotImplemented("Currently, only the observation mask 'image' is supported. ")
 
     def get_screen_img(self, in_observation_shape: bool = True):
+        # pygame.display.flip()
         image = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
         if in_observation_shape:
             image = cv2.resize(image, dsize=self._observation_shape[:2])
@@ -125,7 +141,8 @@ class PushEnv(gym.Env):
         obs['diff_angle'] = diff_angle
         return obs
 
-    def reset(self, seed=0):
+    def reset(self):
+        self._steps = 0
         self.space = pymunk.Space()
         self.space.gravity = 0, 0
         self.space.damping = 0
@@ -139,16 +156,38 @@ class PushEnv(gym.Env):
                  self.add_segment((5, 506), (506, 506), 2)]
         self.space.add(*walls)
 
-        # Set random seed.
-        np.random.seed(seed)
-
         # Add agents, block, and goal zone.
-        self.agents = [self.add_agent((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
-                       for _ in range(self._num_agents)]
-        # self.agent = self.agents[0]
-        # self.agent = self.add_circle((np.random.randint(50, 450), np.random.randint(50, 450)), 15)
-        self.block = self.add_tee((np.random.randint(100, 400), np.random.randint(100, 400)),
-                                  np.random.randn() * 2 * np.pi - np.pi)
+        self.agents = []
+        agent_radius = 15
+        for _ in range(self._num_agents):
+            wall = np.random.randint(0, 4)
+            if wall == 0:
+                # top wall
+                spawn_x = np.random.randint(low=agent_radius+1, high=self.agent_spawn_max_wall_dist)
+                spawn_y = np.random.randint(low=0, high=self._side_len)
+            elif wall == 1:
+                # left wall
+                spawn_x = np.random.randint(low=0, high=self._side_len)
+                spawn_y = np.random.randint(low=agent_radius + 1, high=self.agent_spawn_max_wall_dist)
+            elif wall == 2:
+                # bottom wall
+                spawn_x = np.random.randint(low=agent_radius+1, high=self.agent_spawn_max_wall_dist)
+                spawn_x = self._side_len - spawn_x
+                spawn_y = np.random.randint(low=0, high=self._side_len)
+            else:
+                # right wall
+                spawn_x = np.random.randint(low=0, high=self._side_len)
+                spawn_y = np.random.randint(low=agent_radius + 1, high=self.agent_spawn_max_wall_dist)
+                spawn_y = self._side_len - spawn_y
+
+            self.agents.append(self.add_agent((spawn_x, spawn_y), agent_radius))
+
+        self.block = self.add_tee((
+            np.random.randint(low=self.object_spawn_min_wall_dist,
+                              high=self._side_len - self.object_spawn_min_wall_dist),
+            np.random.randint(low=self.object_spawn_min_wall_dist,
+                              high=self._side_len - self.object_spawn_min_wall_dist),
+        ), np.random.randn() * 2 * np.pi - np.pi)
         self.goal_color = pygame.Color('LightGreen')
         self.goal_pose = ((256, 256), np.pi / 4)  # x, y, theta (in radians)
 
@@ -156,8 +195,8 @@ class PushEnv(gym.Env):
         self.goal_area = self.num_pixels_with_goal_color(self.get_screen_img())
         self.max_score = 1000.0
         self.success_threshold = 0.95
-        self.screen = self.render()
-        return self.mask_obs(self.observation())
+        obs = self.observation()
+        return self.mask_obs(obs)
 
     def num_pixels_with_goal_color(self, img):
         goal_color_match = (np.sum(img == np.uint8(self.goal_color)[:3], axis=2) == 3)
@@ -198,14 +237,7 @@ class PushEnv(gym.Env):
     def render(self, mode='human'):
         self.clear_screen()
         self.draw_objects()
-
-        # Info and flip screen.
-        # self.screen.blit(self.font.render(f'FPS: {self.clock.get_fps():.1f}', True, pygame.Color('darkgrey')), (10, 10))
-        # self.screen.blit(self.font.render('Push the gray block to the green target pose.', True, pygame.Color('darkgrey')), (10, self._screen_size[0] - 35))
-        # self.screen.blit(self.font.render('Press ESC or Q to quit.', True, pygame.Color('darkgrey')), (10, self._screen_size[0] - 20))
-        pygame.display.flip()
-        self.cache_video.append(self.get_screen_img(in_observation_shape=True))
-        return self.screen
+        return self.get_screen_img(in_observation_shape=False)
 
     def step(self, act: np.ndarray):
         """
@@ -251,6 +283,8 @@ class PushEnv(gym.Env):
         reward, done = self.reward_from_visible_goal_area(visible_goal_pixels)
 
         # Done?
+        self._steps += 1
+        done = self._steps >= self.max_steps
         for event in pygame.event.get():
             if (event.type == pygame.QUIT or event.type == pygame.KEYDOWN and (
                     event.key in [pygame.K_ESCAPE, pygame.K_q])):
