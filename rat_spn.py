@@ -1113,7 +1113,7 @@ class RatSpn(nn.Module):
             for key, metric in metrics.items():
                 if metric is None:
                     continue
-                key_base = f"{layer_index}/{rep_key}/{key}"
+                key_base = f"lay{layer_index}/{rep_key}/{key}"
                 metric = metric.to(self.device)
                 log_dict.update({
                     f"{key_base}/min": metric.index_select(rep_dim, rep).min().item(),
