@@ -1805,7 +1805,7 @@ class RatSpn(nn.Module):
                 logging.update(layer_log)
         return child_entropies.flatten(), logging
 
-    def naive_ent_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
+    def naive_entropy_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
         if layer_index is None:
             layer_index = self.max_layer_index
 

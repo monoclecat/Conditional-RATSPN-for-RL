@@ -5,7 +5,7 @@ import numpy as np
 import torch as th
 import torch.nn.functional as F
 from dataclasses import dataclass
-from torch import nn, Tensor
+from torch import nn
 
 from layers import CrossProduct, Sum
 from distributions import GaussianMixture
@@ -101,10 +101,20 @@ class CSPN(RatSpn):
 
         return super().forward(x, **kwargs)
 
-    def recursive_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> Tuple[Tensor, Optional[dict]]:
+    def recursive_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> Tuple[th.Tensor, Optional[dict]]:
         if condition is not None:
             self.set_params(condition)
         return super().recursive_entropy_approx(**kwargs)
+
+    def naive_entropy_approx(self, condition: th.Tensor = None, **kwargs) -> th.Tensor:
+        if condition is not None:
+            self.set_params(condition)
+        return super().naive_entropy_approx(**kwargs)
+
+    def huber_entropy_lb(self, condition: th.Tensor = None, **kwargs) -> th.Tensor:
+        if condition is not None:
+            self.set_params(condition)
+        return super().huber_entropy_lb(**kwargs)
 
     def sum_node_entropies(self, condition=None, reduction='mean'):
         """

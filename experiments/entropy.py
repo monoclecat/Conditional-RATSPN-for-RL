@@ -163,7 +163,7 @@ if __name__ == "__main__":
                 add_sub_weight_ent=args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse',
                 detach_weight_ent_subtraction=args.objective == 'huber_hack_reverse'
             )
-            naive_ent = model.naive_ent_approx(
+            naive_ent = model.naive_entropy_approx(
                 sample_size=args.naive_sample_size, sample_with_grad=args.objective == 'naive'
             )
             combined_log = {**recursive_log, **huber_log}
