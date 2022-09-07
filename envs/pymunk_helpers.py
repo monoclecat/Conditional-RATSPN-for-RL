@@ -130,16 +130,23 @@ class DrawOptions(pymunk.SpaceDebugDrawOptions):
         """
         self.surface = surface
         super(DrawOptions, self).__init__()
-        self._hide_agents = False
         self._agent_color = agent_color
+        self._draw_agents = True
+        self._draw_objects = True
 
     @contextmanager
-    def draw_agent_ctx(self, hide: bool = True):
-        self._hide_agents = hide
+    def draw_ctx(self, draw_agents: bool = True, draw_objects: bool = True):
+        self._draw_agents = draw_agents
+        self._draw_objects = draw_objects
         try:
             yield
         finally:
-            self._hide_agents = False
+            self._draw_agents = True
+            self._draw_objects = True
+
+    def abort_draw(self, fill_color):
+        return (fill_color == self._agent_color and not self._draw_agents) \
+            or (fill_color != self._agent_color and not self._draw_objects)
 
     def draw_circle(
             self,
@@ -149,7 +156,7 @@ class DrawOptions(pymunk.SpaceDebugDrawOptions):
             outline_color: SpaceDebugColor,
             fill_color: SpaceDebugColor,
     ) -> None:
-        if self._hide_agents and fill_color == self._agent_color:
+        if self.abort_draw(fill_color):
             return
         p = to_pygame(pos, self.surface)
 
@@ -214,6 +221,8 @@ class DrawOptions(pymunk.SpaceDebugDrawOptions):
             outline_color: SpaceDebugColor,
             fill_color: SpaceDebugColor,
     ) -> None:
+        if self.abort_draw(fill_color):
+            return
         ps = [to_pygame(v, self.surface) for v in verts]
         ps += [ps[0]]
 

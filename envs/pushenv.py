@@ -45,7 +45,7 @@ class PushEnv(gym.Env):
         self._screen_size = (self._side_len, self._side_len)
         self.screen_center = self._screen_size[0] * 0.5, self._screen_size[1] * 0.5
 
-        self._action_shape = (self._num_agents, 2)
+        self._action_shape = (self._num_agents * 2,)
         self._action_space = spaces.Box(low=-1.0, high=1.0, shape=self._action_shape)
 
         self._obs_mask = 'image'
@@ -99,16 +99,22 @@ class PushEnv(gym.Env):
         else:
             raise NotImplemented("Currently, only the observation mask 'image' is supported. ")
 
-    def get_screen_img(self, hide_agents=False, goal_only=False):
-        self.screen = self.draw_space(hide_agents=hide_agents, goal_only=goal_only)
-        no_agent_img = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
-        return no_agent_img
+    def get_screen_img(self, in_observation_shape: bool = True):
+        image = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
+        if in_observation_shape:
+            image = cv2.resize(image, dsize=self._observation_shape[:2])
+        return image
 
     def observation(self):
         # Get observation.
-        image = np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2)))
+        self.clear_screen()
+        self.draw_objects(agents=False, objects=True)
+        no_agent_image = self.get_screen_img(in_observation_shape=True)
+        self.draw_objects(agents=True, objects=False)
+        image = self.get_screen_img(in_observation_shape=True)
         obs = {
-            'image': cv2.resize(image, dsize=self._observation_shape[:2]),
+            'no_agent_image': no_agent_image,
+            'image': image,
             'pos_agent': [a.position for a in self.agents],
             'vel_agent': [a.velocity for a in self.agents],
             'block_pose': (self.block.position, self.block.angle),
@@ -146,7 +152,8 @@ class PushEnv(gym.Env):
         self.goal_color = pygame.Color('LightGreen')
         self.goal_pose = ((256, 256), np.pi / 4)  # x, y, theta (in radians)
 
-        self.goal_area = self.num_pixels_with_goal_color(self.get_screen_img(goal_only=True))
+        self.clear_screen()
+        self.goal_area = self.num_pixels_with_goal_color(self.get_screen_img())
         self.max_score = 1000.0
         self.success_threshold = 0.95
         self.screen = self.render()
@@ -164,7 +171,10 @@ class PushEnv(gym.Env):
         done = bool(reward > self.max_score * self.success_threshold)
         return reward, done
 
-    def draw_space(self, hide_agents: bool = False, goal_only: bool = False):
+    def clear_screen(self):
+        """
+        Clears screen and draws goal.
+        """
         # Clear screen.
         self.screen.fill(pygame.Color("white"))
 
@@ -179,32 +189,44 @@ class PushEnv(gym.Env):
             goal_points += [goal_points[0]]
             pygame.draw.polygon(self.draw_options.surface, self.goal_color, goal_points)
 
-        assert not goal_only or not hide_agents
-        if not goal_only:
-            # Draw agent and block.
-            with self.draw_options.draw_agent_ctx(hide=hide_agents):
-                self.space.debug_draw(self.draw_options)
+    def draw_objects(self, agents: bool = True, objects: bool = True):
+        # Draw agent and block.
+        with self.draw_options.draw_ctx(draw_agents=agents, draw_objects=objects):
+            self.space.debug_draw(self.draw_options)
         return self.screen
 
     def render(self, mode='human'):
-        self.draw_space()
+        self.clear_screen()
+        self.draw_objects()
 
         # Info and flip screen.
         # self.screen.blit(self.font.render(f'FPS: {self.clock.get_fps():.1f}', True, pygame.Color('darkgrey')), (10, 10))
         # self.screen.blit(self.font.render('Push the gray block to the green target pose.', True, pygame.Color('darkgrey')), (10, self._screen_size[0] - 35))
         # self.screen.blit(self.font.render('Press ESC or Q to quit.', True, pygame.Color('darkgrey')), (10, self._screen_size[0] - 20))
         pygame.display.flip()
-        self.cache_video.append(
-            cv2.resize(np.uint8(pygame.surfarray.array3d(self.screen).transpose((1, 0, 2))),
-                       dsize=self._observation_shape[:2]))
+        self.cache_video.append(self.get_screen_img(in_observation_shape=True))
         return self.screen
 
-    def step(self, act: np.ndarray = None):
+    def step(self, act: np.ndarray):
+        """
+        Step the environment.
+
+        Args:
+            act: np.ndarray with shape (num_agents * 2,) of actions between -1.0 and +1.0.
+                The actions are mapped to the agents like this:
+                [agent0_x , agent0_y , agent1_x , agent1_y , ...]
+                x and y in the range of (-1.0, +1.0) are mapped to the pixel coords (0, self._side_len)
+                x == -1.0 is at the left of the env
+                y == -1.0 is at the top of the env
+
+        Returns: new observation, reward, done, info
+
+        """
         # TODO clip actions either here or in agent
-        assert act.shape == (self._num_agents, 2), f"Action must have shape (num_agents={self._num_agents}, 2)"
+        assert act.shape == self._action_shape, f"Action must have shape {self._action_shape}"
         assert act.min() >= -1.0 and act.max() <= 1.0
         act = (act/2 + 0.5) * self._side_len
-        act = [pymunk.Vec2d(act[i, 0], act[i, 1]) for i in range(self._num_agents)]
+        act = [pymunk.Vec2d(act[i*2], act[i*2 + 1]) for i in range(self._num_agents)]
         dt = 1.0 / self.sim_hz
         for _ in range(self.sim_hz // self.control_hz):
 
@@ -221,11 +243,11 @@ class PushEnv(gym.Env):
                 self.clock.tick(self.sim_hz)  # Limit framerate.
 
             # Render screen.
-            self.screen = self.render()
+            # self.screen = self.render()
         obs = self.observation()
 
         # Get score (reward). Hide agents so their overlapping of the goal isn't counted
-        visible_goal_pixels = self.num_pixels_with_goal_color(self.get_screen_img(hide_agents=True))
+        visible_goal_pixels = self.num_pixels_with_goal_color(obs['no_agent_image'])
         reward, done = self.reward_from_visible_goal_area(visible_goal_pixels)
 
         # Done?
