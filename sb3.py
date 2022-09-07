@@ -12,6 +12,9 @@ from stable_baselines3.common.torch_layers import (
     NatureCNN,
     get_actor_critic_arch,
 )
+from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
+from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.type_aliases import Schedule
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -137,17 +140,32 @@ class CspnActor(BasePolicy):
             action = self.cspn.sample_onehot_style(condition=features, is_mpe=deterministic).sample
         else:
             action = self.cspn.sample_index_style(condition=features, is_mpe=deterministic).sample
-        return action.squeeze(0)
+        # action shape [nr_nodes_sampled, nr_samples_of_each_node, nr_conditionals, nr_features, repetitions]
+        # root node is sampled, with one sample per conditional, so shape is always [1, 1, w, action_shape, 1]
+        action = action.squeeze(0).squeeze(0).squeeze(-1)
+        return action
 
     def action_entropy(self, obs: th.Tensor, log_ent_metrics: bool = True) -> Tuple[th.Tensor, th.Tensor, dict]:
         # return action and entropy
         features = self.extract_features(obs)
-        action = self.cspn.sample_onehot_style(condition=features, is_mpe=False).sample.squeeze(0).squeeze(0)
-        entropy, vi_ent_log = self.cspn.vi_entropy_approx(
-            condition=None, verbose=log_ent_metrics,
-            sample_size=self.vi_ent_approx_sample_size,
-        )
-        return action, entropy, vi_ent_log
+        action = self.cspn.sample_onehot_style(condition=features, is_mpe=False).sample
+        action = action.squeeze(0).squeeze(0).squeeze(-1)
+        if self.entropy_objective == 'recursive':
+            entropy, ent_log = self.cspn.recursive_entropy_approx(
+                condition=features, verbose=log_ent_metrics,
+                sample_size=self.recurs_ent_approx_sample_size,
+            )
+        elif self.entropy_objective == 'naive':
+            ent_log = {}
+            entropy = self.cspn.naive_entropy_approx(
+                condition=features, verbose=log_ent_metrics,
+                sample_size=self.naive_ent_approx_sample_size,
+            )
+        elif self.entropy_objective == 'huber':
+            entropy, ent_log = self.cspn.huber_entropy_lb(condition=features, verbose=log_ent_metrics)
+        else:
+            raise ValueError(f"entropy_objective {self.entropy_objective} unknown!")
+        return action, entropy, ent_log
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         return self(observation, deterministic)
@@ -259,6 +277,15 @@ class CspnSAC(SAC):
                 not self.action_space.bounded_above.all() and self.action_space.bounded_above.any():
             raise NotImplementedError("Case not covered yet where only part of the action space is bounded")
 
+    def learn(self, **kwargs) -> OffPolicyAlgorithm:
+        if kwargs.get('tb_log_name') is None:
+            kwargs['tb_log_name'] = 'CspnSAC'
+        if kwargs.get('callback') is None:
+            kwargs['callback'] = CspnCallback()
+        else:
+            kwargs['callback'] = [CspnCallback(), kwargs['callback']]
+        return super(CspnSAC, self).learn(**kwargs)
+
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
@@ -284,7 +311,7 @@ class CspnSAC(SAC):
                 self.actor.reset_noise()
 
             # Action by the current actor for the sampled state
-            actions_pi, entropy, vi_ent_log = self.actor.action_entropy(replay_data.observations)
+            actions_pi, entropy, _ = self.actor.action_entropy(replay_data.observations, log_ent_metrics=False)
             entropy = entropy.reshape(-1, 1)
             actor_ent_log.append(entropy.mean().item())
 
@@ -346,9 +373,6 @@ class CspnSAC(SAC):
             # Optimize the actor
             self.actor.optimizer.zero_grad()
             actor_loss.backward()
-            # for lay in [*self.actor.cspn.feat_layers, *self.actor.cspn.dist_layers, *self.actor.cspn.sum_layers]:
-            #     if isinstance(lay, th.nn.Linear) and lay.weight.grad.isnan().any():
-            #         print(2)
             self.actor.optimizer.step()
 
             # Update target networks
@@ -365,10 +389,6 @@ class CspnSAC(SAC):
         self.logger.record("train/critic_values", np.mean(critic_values))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-        if vi_ent_log is not None:
-            for layer_id, layer_dict in vi_ent_log.items():
-                for key, val in layer_dict.items():
-                    self.logger.record(f"vi_ent_approx/sum_layer{layer_id}/{key}", np.mean(val))
 
     def _sample_action(
             self,
@@ -419,9 +439,96 @@ class CspnSAC(SAC):
         return action, buffer_action
 
 
+class CspnCallback(BaseCallback):
+    """
+    A custom callback that derives from ``BaseCallback``.
+
+    :param verbose: (int) Verbosity level 0: not output 1: info 2: debug
+    """
+    def __init__(self, verbose=0):
+        super(CspnCallback, self).__init__(verbose)
+        # Those variables will be accessible in the callback
+        # (they are defined in the base class)
+        # The RL model
+        self.model = None  # type: Optional[CspnSAC]
+        # An alias for self.model.get_env(), the environment used for training
+        # self.training_env = None  # type: Union[gym.Env, VecEnv, None]
+        # Number of time the callback was called
+        # self.n_calls = 0  # type: int
+        # self.num_timesteps = 0  # type: int
+        # local and global variables
+        # self.locals = None  # type: Dict[str, Any]
+        # self.globals = None  # type: Dict[str, Any]
+        # The logger object, used to report things in the terminal
+        # self.logger = None  # stable_baselines3.common.logger
+        # # Sometimes, for event callback, it is useful
+        # # to have access to the parent object
+        # self.parent = None  # type: Optional[BaseCallback]
+
+    def _on_training_start(self) -> None:
+        """
+        This method is called before the first rollout starts.
+        """
+        pass
+
+    def _on_rollout_start(self) -> None:
+        """
+        A rollout is the collection of environment interaction
+        using the current policy.
+        This event is triggered before collecting new samples.
+        """
+        pass
+
+    def _on_step(self) -> bool:
+        """
+        This method will be called by the model after each call to `env.step()`.
+
+        For child callback (of an `EventCallback`), this will be called
+        when the event is triggered.
+
+        :return: (bool) If the callback returns False, training is aborted early.
+        """
+        log_every = 10
+        if self.model.num_timesteps > self.model.learning_starts \
+                and (self.model.num_timesteps // self.model.n_envs) % log_every == 0:
+            actor: CspnActor = self.model.actor
+            cspn: CSPN = self.model.actor.cspn
+
+            recursive_ent, recurs_log = cspn.recursive_entropy_approx(
+                condition=None, verbose=True,
+                sample_size=actor.recurs_ent_approx_sample_size,
+            )
+            naive_ent = cspn.naive_entropy_approx(
+                condition=None,
+                sample_size=actor.naive_ent_approx_sample_size,
+            )
+            huber_ent, huber_log = cspn.huber_entropy_lb(condition=None, verbose=True)
+            log = {**recurs_log, **huber_log}
+            log.update({
+                'recursive_ent_approx': recursive_ent.detach().mean().item(),
+                'huber_entropy_LB': huber_ent.detach().mean().item(),
+                'naive_ent_approx': naive_ent.detach().mean().item(),
+            })
+            for key, val in log.items():
+                self.model.logger.record(f"train/{key}", val)
+        return True
+
+    def _on_rollout_end(self) -> None:
+        """
+        This event is triggered before updating the policy.
+        """
+        pass
+
+    def _on_training_end(self) -> None:
+        """
+        This event is triggered before exiting the `learn()` method.
+        """
+        pass
+
+
 class EntropyLoggingSAC(SAC):
     """
-    Soft Actor-Critic (SAC) where the entropy is logged.
+    Soft Actor-Critic (SAC) for MLP policies where the entropy is logged.
     """
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
