@@ -61,9 +61,12 @@ if __name__ == "__main__":
                         help='List of sizes of the CSPN sum param layers.')
     parser.add_argument('--dist_param_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN dist param layers.')
-    # VI entropy arguments
-    parser.add_argument('--vi_ent_sample_size', '-ent_sample_size', type=int, default=5,
-                        help='Number of samples to approximate entropy with. ')
+    parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.')
+    # Entropy arguments
+    parser.add_argument('--recurs_sample_size', type=int, default=5,
+                        help='Number of samples to approximate recursive entropy with. ')
+    parser.add_argument('--naive_sample_size', type=int, default=50,
+                        help='Number of samples to approximate naive entropy with. ')
     # PushEnv arguments
     parser.add_argument('--num_agents', type=int, default=4,
                         help='Number of agents to use in PushEnv. Is ignored if PushEnv is not selected.')
@@ -184,7 +187,9 @@ if __name__ == "__main__":
                     'sum_param_layers': args.sum_param_layers,
                     'dist_param_layers': args.dist_param_layers,
                     'cond_layers_inner_act': nn.Identity if args.no_relu else nn.ReLU,
-                    'vi_ent_approx_sample_size': args.vi_ent_sample_size,
+                    'entropy_objective': args.objective,
+                    'recurs_ent_approx_sample_size': args.recurs_sample_size,
+                    'naive_ent_approx_sample_size': args.naive_sample_size,
                 }
                 sac_kwargs['policy_kwargs'] = {
                     'actor_cspn_args': cspn_args,

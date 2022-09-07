@@ -69,9 +69,11 @@ class CspnActor(BasePolicy):
             feat_layers: int,
             sum_param_layers: int,
             dist_param_layers: int,
+            entropy_objective: str,
+            recurs_ent_approx_sample_size: int,
+            naive_ent_approx_sample_size: int,
             normalize_images: bool = True,
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
-            vi_ent_approx_sample_size: int = 5,
             squash_output: bool = True,
             min_std: float = 0.001,
             max_std: float = 1.0,
@@ -87,7 +89,9 @@ class CspnActor(BasePolicy):
 
         # Save arguments to re-create object at loading
         self.features_dim = features_dim
-        self.vi_ent_approx_sample_size = vi_ent_approx_sample_size
+        self.recurs_ent_approx_sample_size = recurs_ent_approx_sample_size
+        self.naive_ent_approx_sample_size = naive_ent_approx_sample_size
+        self.entropy_objective = entropy_objective
 
         action_dim = get_action_dim(self.action_space)
 
@@ -350,20 +354,6 @@ class CspnSAC(SAC):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-
-            if False:
-                samples = self.actor.cspn.sample_index_style(
-                    condition=replay_data.observations.float(), n=10, is_mpe=False, start_at_layer=1)
-                nr_nodes, n, w, d, r = samples.shape
-                first_rep = samples[:, :, :, :, 0]
-                actions = first_rep.view(nr_nodes * n * w, d)
-                expanded_obs = replay_data.observations.unsqueeze(0).unsqueeze(0).expand(nr_nodes, n, -1, -1)
-                expanded_obs = expanded_obs.reshape(nr_nodes * n * w, expanded_obs.size(-1))
-                q_vals = th.cat(self.critic(expanded_obs, actions), dim=1)
-                min_q_vals, _ =  th.min(q_vals, dim=1, keepdim=True)
-                min_q_vals = min_q_vals.view(nr_nodes, n, w)
-                one_state = min_q_vals[:, :, 0]
-                print(1)
 
         self._n_updates += gradient_steps
 
