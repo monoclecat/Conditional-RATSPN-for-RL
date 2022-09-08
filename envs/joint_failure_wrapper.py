@@ -23,8 +23,13 @@ class JointFailureWrapper(gym.Wrapper):
             self.action_space.high
         ))
         self.observation_space = gym.spaces.Box(low=new_low, high=new_high, dtype=np.float64)
+        self.clear_joint_failures()
 
-    def _sample_joint_failures(self):
+    def clear_joint_failures(self):
+        self.joint_failures = np.hstack((np.zeros(self.action_space.shape), np.zeros(self.action_space.shape)))
+        return self.joint_failures
+
+    def sample_joint_failures(self):
         failing_joints = (np.random.random_sample(self.action_space.shape) < 0.1).astype(self.observation_space.dtype)
         low = self.action_space.low
         high = self.action_space.high
@@ -33,10 +38,11 @@ class JointFailureWrapper(gym.Wrapper):
             uniform_sample = uniform_sample * failing_joints
         else:
             uniform_sample = np.zeros(self.action_space.shape)
-        return np.hstack((failing_joints, uniform_sample))
+        self.joint_failures = np.hstack((failing_joints, uniform_sample))
+        return self.joint_failures
 
     def step(self, action: np.ndarray):
-        fails = self._sample_joint_failures()
+        fails = self.joint_failures
         action_mask = -(fails[:self.action_space.shape[0]] - 1)
         action = action * action_mask
         samples = fails[self.action_space.shape[0]:]
@@ -48,4 +54,4 @@ class JointFailureWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         observation = super(JointFailureWrapper, self).reset(**kwargs)
-        return np.hstack((observation, np.zeros(self.action_space.shape), np.zeros(self.action_space.shape)))
+        return np.hstack((observation, self.clear_joint_failures()))
