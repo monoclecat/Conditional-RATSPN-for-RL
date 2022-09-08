@@ -69,14 +69,6 @@ if __name__ == "__main__":
                         help='Number of samples to approximate recursive entropy with. ')
     parser.add_argument('--naive_sample_size', type=int, default=50,
                         help='Number of samples to approximate naive entropy with. ')
-    # PushEnv arguments
-    parser.add_argument('--num_agents', type=int, default=4,
-                        help='Number of agents to use in PushEnv. Is ignored if PushEnv is not selected.')
-    parser.add_argument('--max_ep_len', type=int, default=200, help='Maximum episode length in steps.')
-    parser.add_argument('--agent_spawn_max_wall_dist', '-ag_wall', type=int, default=30,
-                        help='When agents spawn they must be maximum this far away from the walls.')
-    parser.add_argument('--object_spawn_min_wall_dist', '-obj_wall', type=int, default=100,
-                        help='When objects spawn they must be minimum this far away from the walls.')
     args = parser.parse_args()
 
     if not args.save_interval:
@@ -126,33 +118,13 @@ if __name__ == "__main__":
                 settings=wandb.Settings(start_method="fork"),
             )
 
-        if args.env_name == 'PushEnv':
-            # def time_lim_push_env():
-                # env = PushEnv(num_agents=args.num_agents)
-                # env = gym.wrappers.TimeLimit(env, max_episode_steps=100)
-                # return env
-            # env = DummyVecEnv([time_lim_push_env])
-            env = make_vec_env(
-                env_id=PushEnv,
-                env_kwargs={
-                    'num_agents': args.num_agents,
-                    'max_episode_len': args.max_ep_len,
-                    'agent_spawn_max_wall_dist': args.agent_spawn_max_wall_dist,
-                    'object_spawn_min_wall_dist': args.object_spawn_min_wall_dist,
-                },
-                n_envs=args.num_envs,
-                monitor_dir=monitor_path,
-                # vec_env_cls=SubprocVecEnv,
-                # vec_env_kwargs={'start_method': 'fork'},
-            )
-        else:
-            env = make_vec_env(
-                env_id=args.env_name,
-                n_envs=args.num_envs,
-                monitor_dir=monitor_path,
-                # vec_env_cls=SubprocVecEnv,
-                # vec_env_kwargs={'start_method': 'fork'},
-            )
+        env = make_vec_env(
+            env_id=args.env_name,
+            n_envs=args.num_envs,
+            monitor_dir=monitor_path,
+            # vec_env_cls=SubprocVecEnv,
+            # vec_env_kwargs={'start_method': 'fork'},
+        )
         if not args.no_video:
             # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
             env = VecVideoRecorder(env, video_folder=video_path,
