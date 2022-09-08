@@ -474,21 +474,21 @@ class CrossProduct(AbstractLayer):
         self._scopes = [[] for _ in range(self.cardinality)]
 
         # Create sequence of scopes
-        scopes = np.arange(self.in_features)
+        # scopes = np.arange(self.in_features)
 
         # For two consecutive scopes
-        for i in range(0, self.in_features, self.cardinality):
-            for j in range(cardinality):
-                if i + j < in_features:
-                    self._scopes[j].append(scopes[i + j])
-                else:
+        # for i in range(0, self.in_features, self.cardinality):
+            # for j in range(cardinality):
+                # if i + j < in_features:
+                    # self._scopes[j].append(scopes[i + j])
+                # else:
                     # Case: d mod cardinality != 0 => Create marginalized nodes with prob 1.0
                     # Pad x in forward pass on the right: [n, d, c] -> [n, d+1, c] where index
                     # d+1 is the marginalized node (index "in_features")
-                    self._scopes[j].append(self.in_features)
-
+                    # self._scopes[j].append(self.in_features)
         # Transform into numpy array for easier indexing
-        self._scopes = np.array(self._scopes)
+        # self._scopes = np.array(self._scopes)
+        self._scopes = np.asarray((range(0, self.in_features, self.cardinality), range(1, self.in_features+1, self.cardinality)))
 
         # Create index map from flattened to coordinates (only needed in sampling)
         self.unraveled_channel_indices = nn.Parameter(
