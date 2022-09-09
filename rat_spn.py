@@ -131,6 +131,10 @@ class RatSpn(nn.Module):
         self.num_layers = self.__max_layer_index + 1
 
     @property
+    def dtype(self):
+        return self._leaf.base_leaf.marginalization_constant.dtype
+
+    @property
     def max_layer_index(self):
         return self.__max_layer_index
 
@@ -202,11 +206,11 @@ class RatSpn(nn.Module):
 
         Args:
             x:
-                Input of shape [*batch_dims, weight_sets, self.config.F, output_channels,
-                                self.config.R or 1 if no rep is to be specified].
+                Input of shape [*batch_dims, weight_sets, self.config.F, output_channels, repetitions].
                     batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
                     weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
-                    output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
+                    output_channels: self.config.I or 1 if x should be evaluated on all distributions of a leaf scope
+                    repetitions: self.config.R or 1 if x should be evaluated on all repetitions
             layer_index: Evaluate log-likelihood of x at layer
             x_needs_permutation: An SPNs own samples where no inverted permutation was applied, don't need to be
                 permuted in the forward pass.
@@ -217,6 +221,8 @@ class RatSpn(nn.Module):
         if layer_index is None:
             layer_index = self.max_layer_index
 
+        assert x.dtype == self.dtype, \
+            f"x has data type {x.dtype} but must have data type {self.dtype}"
         assert x.dim() >= 5, "Input needs at least 5 dims. Did you read the docstring of RatSpn.forward()?"
         assert x.size(-3) == self.config.F and (x.size(-2) == 1 or x.size(-2) == self.config.I) \
             and (x.size(-1) == 1 or x.size(-1) == self.config.R), \
@@ -374,9 +380,9 @@ class RatSpn(nn.Module):
             class_index: Class index. Can be either an int in combination with a value for `n` which will result in `n`
                 samples from P(X | C = class_index). Or can be a list of ints which will map each index `c_i` in the
                 list to a sample from P(X | C = c_i).
-            evidence: th.Tensor with shape [*batch_dims, w, F, r], where are is 1 if no repetition is specified.
-                Evidence that can be provided to condition the samples. If evidence is given, `n` and
-                `class_index` must be `None`. Evidence must contain NaN values which will be imputed according to the
+            evidence: th.Tensor with shape [optional batch_dims, w, F, r], where are is 1 if no repetition is specified.
+                Evidence that can be provided to condition the samples.
+                Evidence must contain NaN values which will be imputed according to the
                 distribution represented by the SPN. The result will contain the evidence and replace all NaNs with the
                 sampled values.
                 If evidence is given, n is the number of samples to generate per evidence.
@@ -391,11 +397,13 @@ class RatSpn(nn.Module):
         Returns:
             Sample with
                 sample (th.Tensor): Samples generated according to the distribution specified by the SPN.
-                    When sampling the root sum node of the SPN, the tensor will be of size [nr_nodes, n, w, f]:
+                    When sampling the root sum node of the SPN, the tensor
+                    will be of size [nr_nodes, *batch_dims, w, f]:
                         nr_nodes: Dimension over the nodes being sampled. When sampling from the root sum node,
                             nr_nodes will be self.config.C (usually 1). When sampling from an inner layer,
                             the size of this dimension will be the number of that layer's output channels.
-                        n: Number of samples being drawn per weight set (dimension `w`).
+                        batch_dims: Shape with numbers of samples being drawn per weight set.
+                            When sampling with evidence, batch_dims will be (*n, *evidence_batch_dims)
                         w: Dimension over weight sets. In the RatSpn case, w is always 1. In the Cspn case, the SPN
                             represents a conditional distribution. w is the number of conditionals the Spn was given
                             prior to calling this function (see Cspn.sample()).
@@ -405,13 +413,13 @@ class RatSpn(nn.Module):
                         r: Dimension over the repetitions.
                     Sampling with split_by_scope = True adds another dimension [nr_nodes, s, n, w, f, r]
                         s: Number of scopes in the layer that is sampled from.
-
-
         """
         if post_processing_kwargs is None:
             post_processing_kwargs = {}
         assert mode is not None, "A sampling mode must be provided!"
         assert class_index is None or evidence is None, "Cannot provide both, evidence and class indices."
+        assert evidence is None or evidence.dtype == self.dtype, \
+            f"evidence has data type {evidence.dtype} but must have data type {self.dtype}"
         # assert n is None or evidence is None, "Cannot provide both, number of samples to generate (n) and evidence."
 
         if layer_index is None:
@@ -423,15 +431,10 @@ class RatSpn(nn.Module):
         # Check if evidence contains nans
         if evidence is not None:
             assert (evidence != evidence).any(), "Evidence has no NaN values."
-            assert evidence.shape[-2] == self.config.F and \
-                   (evidence.shape[-1] == self.config.R or evidence.shape[-1] == 1), \
-                "The evidence doesn't seem to have a repetition dimension."
-            assert evidence.shape[-3] == self.root.weights.shape[0], \
-                "Evidence was created under a different number of conditionals than what the SPN is set to now. "
-            # evidence has shape [*batch_dims, w, self.config.F, 1 or self.config.R]
-
-            # Set n to the number of samples in the evidence
-            n = (*n, *evidence.shape[:-3])
+            # evidence needs shape
+            # [*batch_dims, weight_sets, self.config.F, output_channels, repetitions]
+            # see RatSpn.forward() for more information
+            n = (*n, *evidence.shape[:-4])
 
         with provide_evidence(self, evidence, requires_grad=(mode == 'onehot')):  # May be None but that's ok
             # If class is given, use it as base index
@@ -497,7 +500,10 @@ class RatSpn(nn.Module):
                     else:
                         ctx.scopes = layer.in_features // layer.cardinality
                 ctx = layer.sample(ctx=ctx, mode=mode)
-                ctx.assert_correct_indices()
+                try:
+                    ctx.assert_correct_indices()
+                except AssertionError as e:
+                    raise AssertionError(f"In layer {layer}, sampling mode {ctx.sampling_mode}:\n{e}")
 
             # Sample leaf
             if ctx.scopes is None:
