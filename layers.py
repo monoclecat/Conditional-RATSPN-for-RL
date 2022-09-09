@@ -416,8 +416,7 @@ class Product(AbstractLayer):
 
         # Remove padding
         if self._pad:
-            x = x[:, :, :, : -self._pad]
-
+            x, _ = th.tensor_split(x, [-self._pad], dim=feature_dim)
         return x
 
     def __repr__(self):
@@ -566,7 +565,8 @@ class CrossProduct(AbstractLayer):
 
         # Remove padding
         if self._pad:
-            indices = indices[:, :, :, : -self._pad]
+            # indices is [nr_nodes=oc, n, w, in_features, r]
+            indices, _ = th.tensor_split(indices, [-self._pad], dim=-2 if mode == 'index' else -3)
 
         ctx.parent_indices = indices
         return ctx
