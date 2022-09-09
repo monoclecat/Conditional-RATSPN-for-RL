@@ -147,12 +147,13 @@ class RatNormal(Leaf):
         Forward pass through the leaf layer.
 
         Args:
-            x:
-                Input of shape
+            x: th.Tensor of shape
                     [*batch_dims, weight_sets, self.config.F, output_channels, self.config.R]
                     batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
                     weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
                     output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
+                If tanh squashing of the samples is enabled, x must be from the unsquashed distribution,
+                i.e. from the distribution with infinite support!
             layer_index: Evaluate log-likelihood of x at layer
             detach_params: If True, all leaf parameters involved in calculating the log_probs are detached
         Returns:
@@ -161,7 +162,7 @@ class RatNormal(Leaf):
 
         correction = None
         if self._tanh_squash and not self._no_tanh_log_prob_correction:
-            # This correction term assumes that the input is from a distribution with infinite support
+            # This correction term assumes that x is from a distribution with infinite support
             correction = 2 * (np.log(2) - x - F.softplus(-2 * x))
             # This correction term assumes the input to be squashed already
             # correction = th.log(1 - x**2 + 1e-6)
@@ -204,7 +205,6 @@ class RatNormal(Leaf):
             if not ctx.is_mpe:
                 selected_stds = stds.expand(*ctx.n, -1, -1, -1, -1)
         elif mode == 'index':
-            w, d, i, r = means.shape
             # ctx.parent_indices [nr_nodes, *batch_dims, w, self.config.F, r]
             selected_means = means.expand(*ctx.parent_indices.shape[:-3], *means.shape)
 
