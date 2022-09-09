@@ -584,21 +584,21 @@ class RatSpn(nn.Module):
                 sample = sample.unsqueeze(-1)
                 ctx.has_rep_dim = True
 
+        if evidence is not None:
+            # evidence has shape [*evidence_batch_dims, w, d, oc, r],
+            # sample has shape [oc, *sample_batch_dims, *evidence_batch_dims, w, d, r]
+            evidence = evidence.expand(*ctx.n, -1, -1, -1, -1)
+            evidence = th.einsum('...or -> o...r', evidence)
+            assert evidence.shape == sample.shape
+
+            # Update NaN entries in evidence with the sampled values
+            fill_with_evidence = ~th.isnan(evidence)
+            sample[fill_with_evidence] = evidence[fill_with_evidence]
+            ctx.evidence_filled_in = True
+
         if self.config.tanh_squash and ctx.needs_squashing:
             sample = sample.clamp(-6.0, 6.0).tanh()
             ctx.needs_squashing = False
-
-        if evidence is not None:
-            if self.config.tanh_squash:
-                evidence = evidence.clamp(-6.0, 6.0).tanh()
-            # Update NaN entries in evidence with the sampled values
-            nan_mask = th.isnan(evidence).expand_as(sample)
-            evidence = evidence.expand_as(sample).clone()
-
-            # First make a copy such that the original object is not changed
-            evidence[nan_mask] = sample[nan_mask.expand_as(sample)]
-            sample = evidence
-            ctx.evidence_filled_in = True
 
         ctx.sample = sample
         return ctx

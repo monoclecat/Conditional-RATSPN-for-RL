@@ -186,9 +186,6 @@ class Sum(AbstractLayer):
         else:
             if mode == 'index':
                 # If this is not the root node, use the paths (out channels), specified by the parent layer
-                if ctx.repetition_indices is not None:
-                    self._check_repetition_indices(ctx)
-
                 # parent_indices [nr_nodes, *sample_shape, w, d, r]
                 # weights [w, d, ic, oc, r]
                 weights = weights.expand(*ctx.parent_indices.shape[:-1], -1, -1, -1)
@@ -203,7 +200,6 @@ class Sum(AbstractLayer):
                 weights = th.gather(weights, dim=-2, index=parent_indices.unsqueeze(-2)).squeeze(-2)
                 # weights from selected parent with shape [nr_nodes, *sample_shape, w, d, ic, r]
             else:  # mode == 'onehot'
-                assert ctx.parent_indices.detach().sum(-2).max().item() == 1.0
                 # parent_indices [nr_nodes, *sample_shape, w, d, oc, r]
                 weights = weights * ctx.parent_indices.unsqueeze(-3)
                 # [nr_nodes, *sample_shape, w, d, ic, oc, r]
@@ -212,20 +208,20 @@ class Sum(AbstractLayer):
 
         # If evidence is given, adjust the weights with the likelihoods of the observed paths
         if self._is_input_cache_enabled and self._input_cache is not None:
+            weight_offsets = self._input_cache.clone()
             if mode == 'index':
-                # inp_cache = self._input_cache.unsqueeze(0)
-                inp_cache = self._input_cache
                 if ctx.repetition_indices is not None:
                     rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                    rep_ind = rep_ind.expand(-1, -1, -1, d, ic, -1)
-                    inp_cache = inp_cache.expand(rep_ind.size(0), sample_shape, -1, -1, -1, -1)
-                    # Both are now [nr_nodes, sample_shape=n, w, d, ic, r]
-                    weight_offsets = th.gather(inp_cache, dim=-1, index=rep_ind).squeeze(-1)
-                else:
-                    weight_offsets = inp_cache
-                weights = weights + weight_offsets
+                    rep_ind = rep_ind.expand(*([-1] * ctx.repetition_indices.dim()), d, ic, -1)
+                    weight_offsets = weight_offsets.expand(*rep_ind.shape[:-1], -1)
+                    # Both are now [nr_nodes, *sample_shape, w, d, ic, r]
+                    weight_offsets = th.gather(weight_offsets, dim=-1, index=rep_ind)
             else:  # mode == 'onehot'
-                raise NotImplementedError("evidence-based sampling isn't implemented yet for the onehot case")
+                if ctx.parent_indices is not None:
+                    # ctx.parent_indices is missing the ic dim, inp_cache is missing the oc dim
+                    weight_offsets = weight_offsets.unsqueeze(-2) * ctx.parent_indices.unsqueeze(-3)
+                    weight_offsets = weight_offsets.sum(-2)
+            weights = weights + weight_offsets
 
         # If sampling context is MPE, set max weight to 1 and rest to zero, such that the maximum index will be sampled
         if ctx.is_mpe:
@@ -298,16 +294,6 @@ class Sum(AbstractLayer):
         self._skew = self._skew.sum(dim=3)
 
         return self._mean, self._var, self._skew
-
-    def _check_repetition_indices(self, ctx: Sample):
-        assert ctx.repetition_indices.shape[0] == ctx.parent_indices.shape[0]
-        assert ctx.repetition_indices.shape[1] == ctx.parent_indices.shape[1]
-        if self.num_repetitions > 1 and ctx.repetition_indices is None:
-            raise Exception(
-                f"Sum layer has multiple repetitions (num_repetitions=={self.num_repetitions}) but repetition_indices argument was None, expected a Long tensor size #samples."
-            )
-        if self.num_repetitions == 1 and ctx.repetition_indices is None:
-            ctx.repetition_indices = th.zeros(ctx.n, dtype=int, device=self.__device)
 
     def __repr__(self):
         return "Sum(in_channels={}, in_features={}, out_channels={}, dropout={}, out_shape={})".format(
