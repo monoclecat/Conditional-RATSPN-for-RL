@@ -1129,23 +1129,6 @@ class RatSpn(nn.Module):
 
         return log_dict
 
-    @staticmethod
-    def split_shuffled_scopes(t: th.Tensor, scope_dim: int):
-        """
-        The scopes in the tensor are split into a left scope and a right scope, where
-        the scope dimension contains the shuffled scopes of the left side and the right side,
-        [x_{0,L}, x_{0,R}, x_{1,L}, x_{1,R}, x_{2,L}, x_{2,R}, ...]
-        """
-        shape_before_scope = t.shape[:scope_dim]
-        shape_after_scope = t.shape[scope_dim + 1:]
-        num_scopes = t.size(scope_dim)
-        left_scope_right_scope = t.view(*shape_before_scope, num_scopes // 2, 2, *shape_after_scope)
-        dev = left_scope_right_scope.device
-        index_dim = scope_dim + 1 if scope_dim > 0 else scope_dim
-        left_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(0, device=dev)).squeeze(index_dim)
-        right_scope = left_scope_right_scope.index_select(index_dim, th.as_tensor(1, device=dev)).squeeze(index_dim)
-        return left_scope, right_scope
-
     def vips_sum_prod_pass(self, layer_index: int, log_probs: th.Tensor, accum_weights: th.Tensor):
         if layer_index == self.max_layer_index:
             log_weights = self.root_weights_split_by_rep
@@ -1190,7 +1173,7 @@ class RatSpn(nn.Module):
             log_probs = self.shape_like_crossprod_input_mapping(log_probs, -2)
             left_probs, right_probs = th.split(log_probs, s//2, dim=-5)
 
-            left_weights, right_weights = self.split_shuffled_scopes(log_weights, scope_dim=1)
+            left_weights, right_weights = CrossProduct.split_shuffled_scopes(log_weights, scope_dim=1)
             left_weights = left_weights.unsqueeze(-2)
             right_weights = right_weights.unsqueeze(-3)
             left_probs = left_probs + left_weights
@@ -1319,12 +1302,12 @@ class RatSpn(nn.Module):
             resh_weights = resh_log_weights.exp()
 
             weighed_resp = weighed_resp.unsqueeze(-2)
-            weighed_resp_ls, weighed_resp_rs = self.split_shuffled_scopes(weighed_resp, -4)
+            weighed_resp_ls, weighed_resp_rs = CrossProduct.split_shuffled_scopes(weighed_resp, -4)
             weighed_resp_ls = weighed_resp_ls.unsqueeze(-3)
             weighed_resp_rs = weighed_resp_rs.unsqueeze(-4)
 
             accum_weights = accum_weights.unsqueeze(-2)
-            accum_ls, accum_rs = self.split_shuffled_scopes(accum_weights, -4)
+            accum_ls, accum_rs = CrossProduct.split_shuffled_scopes(accum_weights, -4)
             accum_ls = accum_ls.unsqueeze(-3)
             accum_rs = accum_rs.unsqueeze(-4)
 
@@ -1440,7 +1423,7 @@ class RatSpn(nn.Module):
                     child_entropies=sampled_node_entropies,
                 )
                 ic, w, d_old, ic, R = sampled_self_ll.shape
-                prod_ll_ls, prod_ll_rs = self.split_shuffled_scopes(sampled_self_ll, 2)
+                prod_ll_ls, prod_ll_rs = CrossProduct.split_shuffled_scopes(sampled_self_ll, 2)
                 prod_ll_ls = prod_ll_ls.unsqueeze(4).unsqueeze(1)
                 prod_ll_rs = prod_ll_rs.unsqueeze(3).unsqueeze(0)
                 prod_ll = prod_ll_ls + prod_ll_rs
@@ -1634,7 +1617,7 @@ class RatSpn(nn.Module):
                     child_entropies=sampled_node_entropies,
                 )
                 ic, w, d_old, ic, R = sampled_self_ll.shape
-                prod_ll_ls, prod_ll_rs = self.split_shuffled_scopes(sampled_self_ll, 2)
+                prod_ll_ls, prod_ll_rs = CrossProduct.split_shuffled_scopes(sampled_self_ll, 2)
                 prod_ll_ls = prod_ll_ls.unsqueeze(4).unsqueeze(1)
                 prod_ll_rs = prod_ll_rs.unsqueeze(3).unsqueeze(0)
                 prod_ll = prod_ll_ls + prod_ll_rs
@@ -1664,7 +1647,7 @@ class RatSpn(nn.Module):
 
                     # Previous layer's oc is current layer's ic
                     log_probs = log_probs.unsqueeze(-2)
-                    left_scope, right_scope = self.split_shuffled_scopes(log_probs, -4)
+                    left_scope, right_scope = CrossProduct.split_shuffled_scopes(log_probs, -4)
 
                     # Unsqueeze to create dim to sum scope-split weights over
                     left_scope = left_scope.unsqueeze(-3)
@@ -1674,7 +1657,7 @@ class RatSpn(nn.Module):
                         left_scope = left_scope + resh_log_weights
                         right_scope = right_scope + resh_log_weights
                     else:
-                        accum_ls, accum_rs = self.split_shuffled_scopes(accum_resh_weights.unsqueeze(-2), -4)
+                        accum_ls, accum_rs = CrossProduct.split_shuffled_scopes(accum_resh_weights.unsqueeze(-2), -4)
 
                         accum_ls = accum_ls.unsqueeze(-3)
                         weighted_ls_log_w = accum_ls * resh_log_weights
@@ -1765,7 +1748,7 @@ class RatSpn(nn.Module):
                 weighed_ch_ent = sampled_node_entropies.unsqueeze(-2) * accum_resh_weights
                 log_probs = th.einsum('ABswR -> wsABR', log_probs)
                 log_probs = log_probs + weighed_ch_ent
-                left_scope, right_scope = self.split_shuffled_scopes(log_probs, scope_dim=1)
+                left_scope, right_scope = CrossProduct.split_shuffled_scopes(log_probs, scope_dim=1)
                 left_scope = left_scope.unsqueeze(2)
                 right_scope = right_scope.unsqueeze(3)
                 new_weights = left_scope + right_scope
@@ -1865,7 +1848,7 @@ class RatSpn(nn.Module):
             if i % 2 == 1 and i != self.max_layer_index+1:
                 # It is a CrossProduct layer
                 # Calculate the log_probs of the product nodes among themselves
-                left_scope, right_scope = self.split_shuffled_scopes(log_probs, 1)
+                left_scope, right_scope = CrossProduct.split_shuffled_scopes(log_probs, 1)
                 w, d, o, _, R, _ = left_scope.shape  # first dim is o as well
                 left_scope = left_scope.unsqueeze(2).unsqueeze(-4)
                 right_scope = right_scope.unsqueeze(3).unsqueeze(-3)

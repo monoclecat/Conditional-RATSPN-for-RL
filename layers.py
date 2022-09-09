@@ -470,26 +470,6 @@ class CrossProduct(AbstractLayer):
         self.cardinality = check_valid(cardinality, int, 2, in_features + 1)
         self._out_features = np.ceil(self.in_features / self.cardinality).astype(int)
 
-        # Collect scopes for each product child
-        self._scopes = [[] for _ in range(self.cardinality)]
-
-        # Create sequence of scopes
-        # scopes = np.arange(self.in_features)
-
-        # For two consecutive scopes
-        # for i in range(0, self.in_features, self.cardinality):
-            # for j in range(cardinality):
-                # if i + j < in_features:
-                    # self._scopes[j].append(scopes[i + j])
-                # else:
-                    # Case: d mod cardinality != 0 => Create marginalized nodes with prob 1.0
-                    # Pad x in forward pass on the right: [n, d, c] -> [n, d+1, c] where index
-                    # d+1 is the marginalized node (index "in_features")
-                    # self._scopes[j].append(self.in_features)
-        # Transform into numpy array for easier indexing
-        # self._scopes = np.array(self._scopes)
-        self._scopes = np.asarray((range(0, self.in_features, self.cardinality), range(1, self.in_features+1, self.cardinality)))
-
         # Create index map from flattened to coordinates (only needed in sampling)
         self.unraveled_channel_indices = nn.Parameter(
             th.tensor([(i, j) for i in range(self.in_channels)
@@ -522,28 +502,17 @@ class CrossProduct(AbstractLayer):
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/2), in_channels^2].
         """
-        if self._pad:
-            # Pad with marginalized nodes
-            x = F.pad(x, pad=[0, 0, 0, 0, 0, self._pad], mode="constant", value=0.0)
-
-        # Dimensions
-        w, d, c, r = x.shape[-4:]
-        n = x.shape[:-4]  # Any number of batch dimensions
-        d_out = d // self.cardinality
-
-        # Build outer sum, using broadcasting, this can be done with
-        # modifying the tensor dimensions:
-        # left: [*n, w, d/2, c, r] -> [*n, w, d/2, c, 1, r]
-        # right: [*n, w, d/2, c, r] -> [*n, w, d/2, 1, c, r]
-        left = x[..., :, self._scopes[0, :], :, :].unsqueeze(-2)
-        right = x[..., :, self._scopes[1, :], :, :].unsqueeze(-3)
-
+        # split_shuffled_scopes will pad x to make the features divisible by the cardinality
+        left_scope, right_scope = CrossProduct.split_shuffled_scopes(x, scope_dim=-3, cardinality=self.cardinality)
+        left_scope = left_scope.unsqueeze(-2)
+        right_scope = right_scope.unsqueeze(-3)
         # left + right with broadcasting: [*n, w, d/2, c, 1, r] + [*n, w, d/2, 1, c, r] -> [*n, w, d/2, c, c, r]
-        result = left + right
+        result = left_scope + right_scope
 
         # Put the two channel dimensions from the outer sum into one single dimension:
         # [*n, w, d/2, c, c, r] -> [*n, w, d/2, c * c, r]
-        result = result.view(*n, w, d_out, c * c, r)
+        result = result.view(*result.shape[:-3], result.shape[-3] * result.shape[-2], result.shape[-1])
+        assert result.shape[-3:] == (self.in_features // self.cardinality, self.in_channels ** 2, self.num_repetitions)
         return result
 
     def sample(self, mode: str = None, ctx: Sample = None) -> Union[Sample, th.Tensor]:
@@ -647,3 +616,25 @@ class CrossProduct(AbstractLayer):
 
     def __repr__(self):
         return "CrossProduct(in_features={}, out_shape={})".format(self.in_features, self.out_shape)
+
+    @staticmethod
+    def split_shuffled_scopes(t: th.Tensor, scope_dim: int, cardinality: int = 2):
+        """
+        The scopes in the tensor are split into a left scope and a right scope, where
+        the scope dimension contains the shuffled scopes of the left side and the right side,
+        [x_{0,L}, x_{0,R}, x_{1,L}, x_{1,R}, x_{2,L}, x_{2,R}, ...]
+        """
+        shape_before_scope = t.shape[:scope_dim]
+        shape_after_scope = t.shape[scope_dim + 1:]
+        if padding := t.size(scope_dim) % cardinality != 0:
+            pad = th.zeros(*shape_before_scope, padding, *shape_after_scope, device=t.device)
+            t = th.cat((t, pad), dim=scope_dim)
+        left_scope_right_scope = t.view(
+            *shape_before_scope, t.size(scope_dim) // cardinality, cardinality, *shape_after_scope
+        )
+        index_dim = scope_dim + 1 if scope_dim > 0 else scope_dim
+        left_scope, right_scope = th.split(left_scope_right_scope, 1, dim=index_dim)
+        left_scope = left_scope.squeeze(index_dim)
+        right_scope = right_scope.squeeze(index_dim)
+        return left_scope, right_scope
+
