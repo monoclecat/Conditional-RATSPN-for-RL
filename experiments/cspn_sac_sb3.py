@@ -14,7 +14,6 @@ from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
 
 from cspn import CSPN, print_cspn_params
 from sb3 import CspnActor, CspnSAC, EntropyLoggingSAC, CspnPolicy
-from envs.pushenv import PushEnv
 from utils import non_existing_folder_name
 
 
@@ -47,6 +46,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning_starts', type=int, default=1000,
                         help='Nr. of steps to act randomly in the beginning.')
     parser.add_argument('--buffer_size', type=int, default=300_000, help='replay buffer size')
+    parser.add_argument('--joint_fail_prob', type=float, default=0.05, help="Joints can fail with this probability")
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,
@@ -125,6 +125,10 @@ if __name__ == "__main__":
             # vec_env_cls=SubprocVecEnv,
             # vec_env_kwargs={'start_method': 'fork'},
         )
+        if env.observation_space.dtype == np.float64:
+            env.observation_space = gym.spaces.Box(
+                low=env.observation_space.low, high=env.observation_space.high, dtype=np.float32
+            )
         if not args.no_video:
             # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
             env = VecVideoRecorder(env, video_folder=video_path,
@@ -190,6 +194,7 @@ if __name__ == "__main__":
                     'naive_ent_approx_sample_size': args.naive_sample_size,
                 }
                 sac_kwargs['policy_kwargs'] = {
+                    'joint_failure_prob': args.joint_fail_prob,
                     'actor_cspn_args': cspn_args,
                     'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
                 }

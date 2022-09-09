@@ -75,6 +75,7 @@ class CspnActor(BasePolicy):
             entropy_objective: str,
             recurs_ent_approx_sample_size: int,
             naive_ent_approx_sample_size: int,
+            joint_failure_info_in_obs: bool = False,
             normalize_images: bool = True,
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
             squash_output: bool = True,
@@ -95,6 +96,7 @@ class CspnActor(BasePolicy):
         self.recurs_ent_approx_sample_size = recurs_ent_approx_sample_size
         self.naive_ent_approx_sample_size = naive_ent_approx_sample_size
         self.entropy_objective = entropy_objective
+        self.joint_failure_info_in_obs = joint_failure_info_in_obs
 
         action_dim = get_action_dim(self.action_space)
 
@@ -134,37 +136,67 @@ class CspnActor(BasePolicy):
         )
         return data
 
-    def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        features = self.extract_features(obs)
-        if th.is_grad_enabled():
-            action = self.cspn.sample_onehot_style(condition=features, is_mpe=deterministic).sample
-        else:
-            action = self.cspn.sample_index_style(condition=features, is_mpe=deterministic).sample
+    def _sample(self, condition: th.Tensor, is_mpe: bool, joint_failure_info: Optional[th.Tensor]):
+        evidence = None
+        failed_joints = None
+        if joint_failure_info is not None:
+            joint_failure_info = joint_failure_info.to(dtype=self.cspn.dtype)
+            failed_joints, evidence = th.hsplit(joint_failure_info, 2)
+            evidence[failed_joints == 0.0] = th.nan
+            evidence.unsqueeze_(0).unsqueeze_(-1).unsqueeze_(-1)
+        action: th.Tensor = self.cspn.sample(
+            mode='onehot' if th.is_grad_enabled() else 'index',
+            condition=condition,
+            is_mpe=is_mpe,
+            evidence=evidence.atanh(),  # evidence must be unsquashed, i.e. from inf support
+        ).sample
+        if joint_failure_info is not None:
+            # The additional batch dimension of the evidence must be removed
+            action = action.squeeze(0)
         # action shape [nr_nodes_sampled, nr_samples_of_each_node, nr_conditionals, nr_features, repetitions]
         # root node is sampled, with one sample per conditional, so shape is always [1, 1, w, action_shape, 1]
         action = action.squeeze(0).squeeze(0).squeeze(-1)
+        if joint_failure_info is not None:
+            assert not (fj := failed_joints == 1.0).any() or \
+                ((diff := (action[fj] - evidence[0, :, :, 0, 0][fj]).abs().max()) < 1e-5).all(), \
+                f"Found a difference of {diff} between original evidence and evidence contained in CSPN sample."
         return action
 
-    def action_entropy(self, obs: th.Tensor, log_ent_metrics: bool = True) -> Tuple[th.Tensor, th.Tensor, dict]:
+    def extract_features(self, obs: th.Tensor) -> Tuple[th.Tensor, Optional[th.Tensor]]:
+        joint_failure_info = None
+        if self.joint_failure_info_in_obs:
+            obs, joint_failure_info = th.hsplit(obs, self.observation_space.shape)
+            assert joint_failure_info.shape[1] == self.action_space.shape[0] * 2
+        return super(CspnActor, self).extract_features(obs), joint_failure_info
+
+    def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
+        action, _, _ = self.action_entropy(
+            obs=obs, deterministic=deterministic, log_ent_metrics=False, compute_entropy=False
+        )
+        return action
+
+    def action_entropy(self, obs: th.Tensor, deterministic: bool = False, log_ent_metrics: bool = False,
+                       compute_entropy: bool = False) -> Tuple[th.Tensor, th.Tensor, dict]:
         # return action and entropy
-        features = self.extract_features(obs)
-        action = self.cspn.sample_onehot_style(condition=features, is_mpe=False).sample
-        action = action.squeeze(0).squeeze(0).squeeze(-1)
-        if self.entropy_objective == 'recursive':
-            entropy, ent_log = self.cspn.recursive_entropy_approx(
-                condition=features, verbose=log_ent_metrics,
-                sample_size=self.recurs_ent_approx_sample_size,
-            )
-        elif self.entropy_objective == 'naive':
-            ent_log = {}
-            entropy = self.cspn.naive_entropy_approx(
-                condition=features, verbose=log_ent_metrics,
-                sample_size=self.naive_ent_approx_sample_size,
-            )
-        elif self.entropy_objective == 'huber':
-            entropy, ent_log = self.cspn.huber_entropy_lb(condition=features, verbose=log_ent_metrics)
-        else:
-            raise ValueError(f"entropy_objective {self.entropy_objective} unknown!")
+        features, joint_failure_info = self.extract_features(obs)
+        action = self._sample(condition=features, is_mpe=deterministic, joint_failure_info=joint_failure_info)
+        entropy = ent_log = None
+        if compute_entropy:
+            if self.entropy_objective == 'recursive':
+                entropy, ent_log = self.cspn.recursive_entropy_approx(
+                    condition=features, verbose=log_ent_metrics,
+                    sample_size=self.recurs_ent_approx_sample_size,
+                )
+            elif self.entropy_objective == 'naive':
+                ent_log = {}
+                entropy = self.cspn.naive_entropy_approx(
+                    condition=features, verbose=log_ent_metrics,
+                    sample_size=self.naive_ent_approx_sample_size,
+                )
+            elif self.entropy_objective == 'huber':
+                entropy, ent_log = self.cspn.huber_entropy_lb(condition=features, verbose=log_ent_metrics)
+            else:
+                raise ValueError(f"entropy_objective {self.entropy_objective} unknown!")
         return action, entropy, ent_log
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
@@ -201,6 +233,8 @@ class CspnPolicy(SACPolicy):
             action_space: gym.spaces.Space,
             lr_schedule: Schedule,
             actor_cspn_args: dict,
+            joint_failure_prob: float = 0.0,
+            sample_failing_joints: bool = True,
             net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
             critic_activation_fn: Type[nn.Module] = nn.ReLU,
             log_std_init: float = -3,
@@ -223,6 +257,9 @@ class CspnPolicy(SACPolicy):
             optimizer_kwargs=optimizer_kwargs,
             squash_output=squash_output,
         )
+        self.joints_can_fail = joint_failure_prob > 0.0
+        self.joint_failure_prob = joint_failure_prob
+        self.sample_failing_joints = sample_failing_joints
 
         if net_arch is None:
             if features_extractor_class == NatureCNN:
@@ -239,6 +276,20 @@ class CspnPolicy(SACPolicy):
             "normalize_images": normalize_images,
         }
         self.actor_kwargs = self.net_args.copy()
+        self.actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
+        if False and self.joints_can_fail:  #TODO this might be relevant for an MLP actor
+            orig_obs = self.actor_kwargs['observation_space']
+            new_low = np.hstack((
+                orig_obs.low,
+                np.zeros_like(self.action_space.low),
+                self.action_space.low
+            ))
+            new_high = np.hstack((
+                orig_obs.high,
+                np.ones_like(self.action_space.high),
+                self.action_space.high
+            ))
+            self.actor_kwargs['observation_space'] = gym.spaces.Box(low=new_low, high=new_high, dtype=orig_obs.dtype)
         self.actor_kwargs.update(actor_cspn_args)
 
         self.critic_kwargs = self.net_args.copy()
@@ -265,6 +316,46 @@ class CspnPolicy(SACPolicy):
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         actor_kwargs['squash_output'] = self.squash_output
         return CspnActor(**actor_kwargs).to(self.device)
+
+    def sample_joint_failures(self, batch_size):
+        action_shape = (batch_size,) + self.action_space.shape
+        failing_joints = (np.random.random_sample(action_shape) < self.joint_failure_prob)
+        low = self.action_space.low
+        high = self.action_space.high
+        if self.sample_failing_joints:
+            uniform_sample = low + np.random.random_sample(action_shape) * (high - low)
+            uniform_sample = uniform_sample * failing_joints
+        else:
+            uniform_sample = np.zeros(action_shape)
+        fail_info = np.hstack((failing_joints, uniform_sample)).astype(self.observation_space.dtype)
+        return th.as_tensor(fail_info, device=self.actor.device)
+
+    def action_entropy_with_joint_failure(
+            self,
+            observation: th.Tensor,
+            deterministic: bool = False,
+            log_ent_metrics: bool = False,
+            compute_entropy: bool = False
+    ):
+        joints_failed = self.sample_joint_failures(batch_size=observation.shape[0])
+        observation = th.hstack((observation, joints_failed))
+        unscaled_action, entropy, ent_log = self.actor.action_entropy(
+            obs=observation,
+            deterministic=deterministic,
+            log_ent_metrics=log_ent_metrics,
+            compute_entropy=compute_entropy,
+        )
+
+        failed_joints, samples = th.hsplit(joints_failed, 2)
+        action_mask = -(failed_joints - 1)
+        unscaled_action = unscaled_action * action_mask + samples
+        return unscaled_action, entropy, ent_log
+
+    def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
+        unscaled_action, entropy, ent_log = self.action_entropy_with_joint_failure(
+            observation=observation, deterministic=deterministic, log_ent_metrics=False, compute_entropy=False
+        )
+        return unscaled_action
 
 
 class CspnSAC(SAC):
@@ -311,7 +402,10 @@ class CspnSAC(SAC):
                 self.actor.reset_noise()
 
             # Action by the current actor for the sampled state
-            actions_pi, entropy, _ = self.actor.action_entropy(replay_data.observations, log_ent_metrics=False)
+            # actions_pi, entropy, _ = self.actor.action_entropy(replay_data.observations, log_ent_metrics=False)
+            actions_pi, entropy, _ = self.policy.action_entropy_with_joint_failure(
+                observation=replay_data.observations, deterministic=False, log_ent_metrics=False, compute_entropy=True
+            )
             entropy = entropy.reshape(-1, 1)
             actor_ent_log.append(entropy.mean().item())
 
@@ -336,8 +430,12 @@ class CspnSAC(SAC):
 
             with th.no_grad():
                 # Select action according to policy
-                next_actions, next_entropy, _ = self.actor.action_entropy(replay_data.next_observations,
-                                                                          log_ent_metrics=False)
+                next_actions, next_entropy, _ = self.policy.action_entropy_with_joint_failure(
+                    observation=replay_data.next_observations,
+                    deterministic=False,
+                    log_ent_metrics=False,
+                    compute_entropy=True,
+                )
                 # Compute the next Q values: min over all critics targets
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
@@ -389,54 +487,6 @@ class CspnSAC(SAC):
         self.logger.record("train/critic_values", np.mean(critic_values))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-
-    def _sample_action(
-            self,
-            learning_starts: int,
-            action_noise: Optional[ActionNoise] = None,
-            n_envs: int = 1,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Sample an action according to the exploration policy.
-        This is either done by sampling the probability distribution of the policy,
-        or sampling a random action (from a uniform distribution over the action space)
-        or by adding noise to the deterministic output.
-
-        :param action_noise: Action noise that will be used for exploration
-            Required for deterministic policy (e.g. TD3). This can also be used
-            in addition to the stochastic policy for SAC.
-        :param learning_starts: Number of steps before learning for the warm-up phase.
-        :param n_envs:
-        :return: action to take in the environment
-            and scaled action that will be stored in the replay buffer.
-            The two differs when the action space is not normalized (bounds are not [-1, 1]).
-        """
-        # Select action randomly or according to policy
-        if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
-            # Warmup phase
-            unscaled_action = np.array([self.action_space.sample() for _ in range(n_envs)])
-        else:
-            # Note: when using continuous actions,
-            # we assume that the policy uses tanh to scale the action
-            # We use non-deterministic action in the case of SAC, for TD3, it does not matter
-            unscaled_action, _ = self.predict(self._last_obs, deterministic=False)
-
-        # Rescale the action from [low, high] to [-1, 1]
-        if isinstance(self.action_space, gym.spaces.Box) and self.actor.squash_output:
-            scaled_action = self.policy.scale_action(unscaled_action)
-
-            # Add noise to the action (improve exploration)
-            if action_noise is not None:
-                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
-
-            # We store the scaled action in the buffer
-            buffer_action = scaled_action
-            action = self.policy.unscale_action(scaled_action)
-        else:
-            # Discrete case or action space unbounded, no need to normalize or clip
-            buffer_action = unscaled_action
-            action = buffer_action
-        return action, buffer_action
 
 
 class CspnCallback(BaseCallback):
