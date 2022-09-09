@@ -132,12 +132,14 @@ class Sample:
             if self.parent_indices is not None:
                 if self.has_rep_dim:
                     assert (self.parent_indices.detach().sum(-2) == 1.0).all(), \
-                        "Onehot sampling, sampling context has repetition dim: " \
-                        "In the features of each repetition, not just one output channel " \
+                        "Context: Onehot sampling, sampling context has repetition dim. \n" \
+                        "Issue: In the features of each repetition, not just one output channel " \
                         "of the layer below was selected."
                 else:
                     assert (self.parent_indices.detach().sum(-2).sum(-1) == 1.0).all(), \
-                        "Onehot sampling, sampling context has NO repetition dim: " \
-                        "In each feature, not just one output channel " \
+                        "Context: Onehot sampling, sampling context has no repetition dim. \n" \
+                        "Issue: In each feature, not just one output channel " \
                         "of the layer below was selected."
-
+        else:
+            assert self.parent_indices is None or self.parent_indices.shape[1:(len(self.n)+1)] == self.n
+            assert self.repetition_indices is None or self.repetition_indices.shape[1:(len(self.n)+1)] == self.n
