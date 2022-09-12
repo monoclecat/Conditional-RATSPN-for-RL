@@ -206,7 +206,7 @@ class RatNormal(Leaf):
                 selected_stds = stds.expand(*ctx.n, -1, -1, -1, -1)
         elif mode == 'index':
             # ctx.parent_indices [nr_nodes, *batch_dims, w, self.config.F, r]
-            selected_means = means.expand(*ctx.parent_indices.shape[:-3], *means.shape)
+            selected_means = means.expand(*ctx.parent_indices.shape[:-1], -1, -1)
 
             if ctx.repetition_indices is not None:
                 rep_ind = ctx.repetition_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
@@ -218,7 +218,7 @@ class RatNormal(Leaf):
             selected_means = th.gather(selected_means, dim=-2, index=par_ind).squeeze(-2)
             selected_means = selected_means.squeeze(-1)
             if not ctx.is_mpe:
-                selected_stds = stds.expand(*ctx.parent_indices.shape[:-3], *stds.shape)
+                selected_stds = stds.expand(*ctx.parent_indices.shape[:-1], -1, -1)
                 if ctx.repetition_indices is not None:
                     selected_stds = th.gather(selected_stds, dim=-1, index=rep_ind)
                 selected_stds = th.gather(selected_stds, dim=-2, index=par_ind).squeeze(-2)
