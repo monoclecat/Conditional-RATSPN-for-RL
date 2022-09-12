@@ -4,6 +4,7 @@ import sys
 import time
 import csv
 
+import torch
 import wandb
 import imageio
 import numpy as np
@@ -75,34 +76,44 @@ def get_mnist_loaders(dataset_dir, use_cuda, device, batch_size, img_side_len, i
     return train_loader, test_loader
 
 
-def evaluate_sampling(model, save_dir, device, img_size, wandb_run=None, mpe=False, eval_ll=True, style='index'):
-    model.eval()
-    log_like = None
-    label = th.as_tensor(np.arange(10)).to(device)
-    samples_per_label = 10
-    with th.no_grad():
-        if isinstance(model, CSPN):
-            label = F.one_hot(label, 10).float().to(device)
-            samples = model.sample(n=samples_per_label, mode=style, condition=label, is_mpe=mpe).sample
-            samples = th.einsum('o...r -> ...or', samples)
-            if eval_ll:
-                log_like = model(x=samples.atanh(), condition=None).mean().item()
+def sample_each_digit(model, **kwargs):
+    if isinstance(model, CSPN):
+        l = F.one_hot(th.arange(10), 10).float().to(model.device)
+        s = model.sample(condition=l, **kwargs).sample
+    else:
+        l = th.arange(10, device=model.device)
+        if model.config.C > 1:
+            s = model.sample(class_index=l, **kwargs).sample
         else:
-            if model.config.C > 1:
-                samples = model.sample(n=samples_per_label, mode=style, class_index=label, is_mpe=mpe).sample
-                samples = th.einsum('o...r -> ...or', samples)
-            else:
-                samples = model.sample(n=samples_per_label, mode=style, is_mpe=mpe).sample
-                samples = th.einsum('o...r -> ...or', samples)
-            if eval_ll:
-                log_like = model(x=samples).mean().item()
-        if wandb_run is not None and log_like is not None:
-            wandb.log({f"{'mpe_' if mpe else ''}sample_log_likelihood": log_like})
-        if model.config.tanh_squash:
-            samples.mul_(0.5).add_(0.5)
-        samples = samples.view(-1, *img_size[1:])
-        # plt.imshow(samples[0].cpu(), cmap='Greys')
-        # plt.show()
+            s = model.sample(**kwargs).sample
+    return s
+
+
+def evaluate_sampling(model, img_size, wandb_run=None, eval_ll=True, style='index'):
+    log_like = None
+    samples_per_label = 10
+    sample_kwargs = {
+        'n': samples_per_label, 'mode': style, 'is_mpe': False,
+    }
+    samples = sample_each_digit(model, **sample_kwargs)
+    samples = th.einsum('o...r -> ...or', samples)
+    if eval_ll:
+        if isinstance(model, CSPN):
+            log_like = model(x=samples.atanh(), condition=None).mean().item()
+        else:
+            log_like = model(x=samples.atanh()).mean().item()
+    sample_kwargs['is_mpe'] = True
+    sample_kwargs['n'] = 1
+    mpe_samples = sample_each_digit(model, **sample_kwargs)
+    mpe_samples = th.einsum('o...r -> ...or', mpe_samples)
+    samples = th.vstack((samples, mpe_samples))
+    if wandb_run is not None and log_like is not None:
+        wandb.log({f"sample_log_likelihood": log_like})
+    if model.config.tanh_squash:
+        samples.mul_(0.5).add_(0.5)
+    samples = samples.view(-1, *img_size[1:])
+    # plt.imshow(samples[0].cpu(), cmap='Greys')
+    # plt.show()
     return samples, log_like
     if False and not mpe:
         # To test sampling with evidence
@@ -157,21 +168,75 @@ def evaluate_sampling(model, save_dir, device, img_size, wandb_run=None, mpe=Fal
                         arr = skimage.img_as_ubyte(arr.permute(1, 2, 0).numpy())
                         imageio.imwrite(feat_dir, arr)
 
-    if False:
-        # To test sampling with evidence
-        if model.config.tanh_squash:
-            samples.sub_(0.5).mul_(2).atanh_()
-        zero = samples[0]
-        zero[0, :10] = 0.0
-        zero[0, 18:] = 0.0
-        zero[zero == 0.0] = th.nan
-        zero = zero.flatten(start_dim=1).expand(10, -1)
-        path_parts = save_dir.split('/')
-        evidence_samples = model.sample(condition=label, mode='index', evidence=zero, n=None, is_mpe=mpe).sample
-        if model.config.tanh_squash:
-            evidence_samples.mul_(0.5).add_(0.5)
-        evidence_samples = evidence_samples.view(-1, *img_size[1:])
-        plot_samples(evidence_samples, os.path.join('/', *path_parts[:-1], f"{path_parts[-1].split('_')[0]}_slice_evidence_zero.png"))
+
+def horizontal_bar_mask():
+    h = w = 28
+    horizontal_nan_width = 12
+    mask = th.zeros((1, h, w), dtype=th.bool)
+    border_left_over = (h - horizontal_nan_width) // 2
+    mask[0, border_left_over:(h - border_left_over)] = True
+    return mask
+
+
+def sample_with_evidence(model, loader, style):
+    evidences = None
+    num_samples_per_evid = 5
+
+    nan_mask = horizontal_bar_mask().to(model.device)
+    evid_color_mask = ~nan_mask.repeat(3, 1, 1)
+    evid_color_mask[2] = False
+
+    for image, label in loader:
+        for digit in range(10):
+            index = th.where(label == digit)[0]
+            if len(index) == 0:
+                continue
+            index = index[0]
+            matching_digit = image[index].to(model.device)
+            assert (label[index] == digit).all()
+            if evidences is None:
+                evidences = matching_digit
+            else:
+                evidences = th.vstack((evidences, matching_digit))
+        if len(evidences) == 10:
+            break
+    evidences = evidences.unsqueeze(1)
+    if model.config.tanh_squash:
+        evidences.sub_(0.5).mul_(2).atanh_()
+    colored = evidences.repeat(1, 3, 1, 1)
+    colored[:, [0, 1]] = 0.0
+    show_n_tell_tensors = colored.clone()
+
+    evidences[:, nan_mask] = th.nan
+    colored = evidences.repeat(1, 3, 1, 1)
+    colored[:, evid_color_mask] = 0.0
+    show_n_tell_tensors = th.vstack((show_n_tell_tensors, colored.clone()))
+
+    evidences = evidences.flatten(start_dim=1)
+    evidences = evidences.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+    sample_kwargs = {
+        'mode': style, 'is_mpe': False, 'evidence': evidences, 'n': num_samples_per_evid,
+    }
+
+    def reshape_and_color(t):
+        h = w = 28
+        t = t.clone().squeeze(2).squeeze(0).squeeze(-1)
+        # sample = sample.view(num_samples_per_evid, 10, h, w)
+        t = t.view(-1, 1, h, w)
+        t = t.repeat(1, 3, 1, 1)
+        t[:, evid_color_mask] = 0.0
+        return t
+    show_n_tell_tensors = th.vstack((
+        show_n_tell_tensors, reshape_and_color(sample_each_digit(model, **sample_kwargs))
+    ))
+
+    # MPE samples
+    sample_kwargs['is_mpe'] = True
+    sample_kwargs['n'] = 1
+    show_n_tell_tensors = th.vstack((
+        show_n_tell_tensors, reshape_and_color(sample_each_digit(model, **sample_kwargs))
+    ))
+    return show_n_tell_tensors
 
 
 def evaluate_model(model, loader, tag):
@@ -203,22 +268,23 @@ def evaluate_model(model, loader, tag):
     return mean_ll
 
 
-def plot_samples(x: th.Tensor, path, wandb_run=None, caption="", is_mpe=False):
+def plot_samples(x: th.Tensor, path, wandb_run=None, wandb_caption="", wandb_log_key="unknown_sample"):
     """
     Plot a single sample with the target and prediction in the title.
 
     Args:
         x (th.Tensor): Batch of input images. Has to be shape: [N, C, H, W].
     """
-    x.unsqueeze_(1)
+    if x.dim() == 3:
+        x.unsqueeze_(1)
     # Clip to valid range
     x[x < 0.0] = 0.0
     x[x > 1.0] = 1.0
 
     tensors = torchvision.utils.make_grid(x, nrow=10, padding=1).cpu()
     if wandb_run is not None:
-        wandb_img = wandb.Image(tensors, caption)
-        wandb.log({f"{'MPE samples' if is_mpe else 'Samples'}": wandb_img})
+        wandb_img = wandb.Image(tensors, wandb_caption)
+        wandb.log({wandb_log_key: wandb_img})
     arr = tensors.permute(1, 2, 0).numpy()
     arr = skimage.img_as_ubyte(arr)
     imageio.imwrite(path, arr)
@@ -339,35 +405,35 @@ class CsvLogger(dict):
 def mnist_gen_train(
         results_dir: str,
         dataset_dir: str,
-        device: str = 'cuda',
-        batch_size: int = 256,
-        learning_rate: float = 1e-3,
-        epochs: int = 1e5,
-        model_path: str = None,
-        run_name: str = 'test_run',
-        proj_name: str = 'test_proj',
-        eval_interval: int = 10,
-        save_interval: int = 10,
-        no_wandb: bool = False,
-        ratspn: bool = False,
-        RATSPN_R: int = 3,
-        RATSPN_D: int = 3, RATSPN_I: int = 3, RATSPN_S: int = 3, RATSPN_dropout: float = 0.0,
-        CSPN_sum_param_layers: list = None,
-        CSPN_dist_param_layers: list = None,
-        CSPN_feat_layers: list = None,
-        min_sigma: float = 1e-5,
-        no_tanh: bool = False,
-        no_correction_term: bool = False,
-        lin_std: bool = False,
-        verbose: bool = False,
-        sample_onehot: bool = False,
-        invert: float = 0.0,
-        no_eval_at_start: bool = False,
-        ent_approx: bool = False,
-        ent_approx__sample_size: int = 5,
-        ent_loss_coef: float = 0.0,
-        learn_by_sampling: bool = False,
-        learn_by_sampling__sample_size: int = 5,
+        device: str,
+        batch_size: int,
+        learning_rate: float,
+        epochs: int,
+        model_path: str,
+        run_name: str,
+        proj_name: str,
+        eval_interval: int,
+        save_interval: int,
+        no_wandb: bool,
+        ratspn: bool,
+        RATSPN_R: int,
+        RATSPN_D: int, RATSPN_I: int, RATSPN_S: int, RATSPN_dropout: float,
+        CSPN_sum_param_layers: list,
+        CSPN_dist_param_layers: list,
+        CSPN_feat_layers: list,
+        min_sigma: float,
+        no_tanh: bool,
+        no_correction_term: bool,
+        verbose: bool,
+        sample_onehot: bool,
+        invert: float,
+        no_eval_at_start: bool,
+        ent_approx: bool,
+        ent_approx__sample_size: int,
+        ent_loss_coef: float,
+        learn_by_sampling: bool,
+        learn_by_sampling__evidence: bool,
+        learn_by_sampling__sample_size: int,
 ):
     """
 
@@ -403,7 +469,6 @@ def mnist_gen_train(
         learn_by_sampling__sample_size: When learning by sampling, this arg sets the number of samples generated for each label.
         no_tanh: Don't apply tanh squashing to leaves.
         no_wandb: Don't log with wandb.
-        lin_std: Learn stds in linear space instead of log space
         no_correction_term: Don't apply tanh correction term to logprob
     """
     if CSPN_sum_param_layers is None:
@@ -473,7 +538,7 @@ def mnist_gen_train(
         config.dropout = RATSPN_dropout
         config.leaf_base_class = RatNormal
         config.leaf_base_kwargs = {
-            'no_tanh_log_prob_correction': no_correction_term, 'stds_in_lin_space': lin_std
+            'no_tanh_log_prob_correction': no_correction_term, 'stds_in_lin_space': True,
         }
         if not no_tanh:
             config.tanh_squash = True
@@ -507,20 +572,32 @@ def mnist_gen_train(
     logger = CsvLogger(csv_log)
 
     def eval_routine(epoch):
-        print("Evaluating model ...")
-        for mpe in [False, True]:
-            save_path = os.path.join(sample_dir, f"{'mpe-' if mpe else ''}epoch-{epoch:04}_{run_name}.png")
-            samples, log_like = evaluate_sampling(model, save_path, device, img_size, mpe=mpe, wandb_run=wandb_run,
+        model.eval()
+        with torch.no_grad():
+            print("Evaluating model ...")
+            save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_{run_name}_samples.png")
+            samples, log_like = evaluate_sampling(model, img_size, wandb_run=wandb_run,
                                                   style='onehot' if sample_onehot else 'index')
-            caption = f"{'MPE Samples' if mpe else 'Samples'} at epoch {epoch:04}. Avg. LL: {np.mean(log_like):.2f}"
-            print(caption)
-            plot_samples(samples, save_path, is_mpe=mpe, wandb_run=wandb_run)
+            wandb_caption = f"Samples at epoch {epoch:04}. Avg. LL: {np.mean(log_like):.2f}"
+            print(wandb_caption)
+            plot_samples(
+                samples, save_path, wandb_run=wandb_run,
+                wandb_caption=wandb_caption, wandb_log_key='Samples',
+            )
 
-        logger.reset(epoch)
-        mnist_test_ll = evaluate_model(model, test_loader, "MNIST test")
-        logger['mnist_test_ll'] = mnist_test_ll
-        if wandb_run is not None:
-            wandb.log({'MNIST test LL': mnist_test_ll})
+            samples_with_evidence = sample_with_evidence(model, train_loader,
+                                                         style='onehot' if sample_onehot else 'index')
+            save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_{run_name}_sampling_with_evid.png")
+            plot_samples(
+                x=samples_with_evidence, path=save_path, wandb_run=wandb_run,
+                wandb_caption=f"Sampling with evidence at epoch {epoch:04}", wandb_log_key='Evidence samples',
+            )
+
+            logger.reset(epoch)
+            mnist_test_ll = evaluate_model(model, test_loader, "MNIST test")
+            logger['mnist_test_ll'] = mnist_test_ll
+            if wandb_run is not None:
+                wandb.log({'MNIST test LL': mnist_test_ll})
 
     epoch = 0
     if not no_eval_at_start:
@@ -528,6 +605,7 @@ def mnist_gen_train(
         logger.average()
         logger.write()
     for epoch in range(epochs):
+        model.train()
         if epoch > 20:
             lmbda = 0.5
         t_start = time.time()
@@ -555,14 +633,25 @@ def mnist_gen_train(
                     loss_ce = F.binary_cross_entropy_with_logits(output, label)
                 ll_loss = -output.mean()
                 loss = (1 - lmbda) * ll_loss + lmbda * loss_ce
-                log_dict['nll_loss'] = loss
+                log_dict['nll_loss'] = ll_loss
                 log_dict['ce_loss'] = loss_ce
                 if ent_approx:
                     vi_ent_approx = model.vi_entropy_approx(sample_size=ent_approx__sample_size).mean()
                     log_dict['vi_ent_approx'] = vi_ent_approx
             else:
-                if learn_by_sampling:
-                    sample: th.Tensor = model.sample_onehot_style(condition=label, n=learn_by_sampling__sample_size)
+                if learn_by_sampling or learn_by_sampling__evidence:
+                    if learn_by_sampling__evidence:
+                        evidence = data.clone()
+                        nan_mask = horizontal_bar_mask().to(model.device)
+                        nan_mask = nan_mask.flatten().unsqueeze(-1).unsqueeze(-1)
+                        nan_mask = nan_mask.expand_as(data)
+                        evidence[nan_mask] = th.nan
+                    else:
+                        evidence = None
+                    sample: th.Tensor = model.sample_onehot_style(
+                        condition=label, n=learn_by_sampling__sample_size, evidence=evidence,
+                    ).sample
+                    sample = th.einsum('o...r -> ...or', sample)
                     if model.config.tanh_squash:
                         sample = sample.clamp(-0.99999, 0.99999).atanh()
                     loss = ((data - sample) ** 2).mean()
@@ -657,12 +746,13 @@ if __name__ == "__main__":
     parser.add_argument('--invert', type=float, default=0.0, help='Probability of an MNIST image being inverted.')
     parser.add_argument('--no_eval_at_start', action='store_true', help='Don\'t evaluate model at the beginning')
     parser.add_argument('--learn_by_sampling', action='store_true', help='Learn in sampling mode.')
+    parser.add_argument('--learn_by_sampling__evidence', action='store_true',
+                        help='Give part of the image as evidence')
     parser.add_argument('--learn_by_sampling__sample_size', type=int, default=10,
                         help='When learning by sampling, this arg sets the number of samples generated for each label.')
     parser.add_argument('--min_sigma', type=float, default=1e-5, help='Minimum standard deviation')
     parser.add_argument('--no_tanh', action='store_true', help='Don\'t apply tanh squashing to leaves.')
     parser.add_argument('--no_wandb', action='store_true', help='Don\'t log with wandb.')
-    parser.add_argument('--lin_std', action='store_true', help='Stds are learned in linear space instead of log-space. ')
     parser.add_argument('--no_correction_term', action='store_true', help='Don\'t apply tanh correction term to logprob')
     args = parser.parse_args()
     mnist_gen_train(**vars(args))
