@@ -148,9 +148,9 @@ class RatNormal(Leaf):
 
         Args:
             x: th.Tensor of shape
-                    [*batch_dims, weight_sets, self.config.F, output_channels, self.config.R]
-                    batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
-                    weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
+                    [*batch_dims, conditionals, self.config.F, output_channels, self.config.R]
+                    batch_dims: Sample shape per conditional.
+                    conditionals: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
                     output_channels: self.config.I or 1 if x should be evaluated on each distribution of a leaf scope
                 If tanh squashing of the samples is enabled, x must be from the unsquashed distribution,
                 i.e. from the distribution with infinite support!

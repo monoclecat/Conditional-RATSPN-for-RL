@@ -206,9 +206,9 @@ class RatSpn(nn.Module):
 
         Args:
             x:
-                Input of shape [*batch_dims, weight_sets, self.config.F, output_channels, repetitions].
-                    batch_dims: Sample shape per weight set (= per conditional in the CSPN sense).
-                    weight_sets: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
+                Input of shape [*batch_dims, conditionals, self.config.F, output_channels, repetitions].
+                    batch_dims: Sample shape per conditional.
+                    conditionals: In CSPNs, weights are different for each conditional. In RatSpn, this is 1.
                     output_channels: self.config.I or 1 if x should be evaluated on all distributions of a leaf scope
                     repetitions: self.config.R or 1 if x should be evaluated on all repetitions
             layer_index: Evaluate log-likelihood of x at layer
@@ -402,11 +402,14 @@ class RatSpn(nn.Module):
                         nr_nodes: Dimension over the nodes being sampled. When sampling from the root sum node,
                             nr_nodes will be self.config.C (usually 1). When sampling from an inner layer,
                             the size of this dimension will be the number of that layer's output channels.
-                        batch_dims: Shape with numbers of samples being drawn per weight set.
+                        batch_dims: Shape with numbers of samples being drawn per conditional.
                             When sampling with evidence, batch_dims will be (*n, *evidence_batch_dims)
-                        w: Dimension over weight sets. In the RatSpn case, w is always 1. In the Cspn case, the SPN
-                            represents a conditional distribution. w is the number of conditionals the Spn was given
-                            prior to calling this function (see Cspn.sample()).
+                        w: Dimension over conditionals.
+                            In the RatSpn case, the class index and the evidence will set this dim. Otherwise,
+                                it is always 1.
+                            In the Cspn case, the SPN represents a conditional distribution.
+                                w is the number of conditionals the Spn was given
+                                prior to calling this function (see Cspn.sample()).
                         f: f = self.config.F is the number of features of the Spn as a whole.
                     Inner layers of the Spn have an additional repetition dimension. When sampling an inner layer, the
                     sample tensor will be of size [nr_nodes, n, w, f, r]
@@ -436,7 +439,7 @@ class RatSpn(nn.Module):
         if evidence is not None:
             assert (evidence != evidence).any(), "Evidence has no NaN values."
             # evidence needs shape
-            # [*batch_dims, weight_sets, self.config.F, output_channels, repetitions]
+            # [*batch_dims, conditionals, self.config.F, output_channels, repetitions]
             # see RatSpn.forward() for more information
             n = (*n, *evidence.shape[:-4])
 
@@ -657,7 +660,7 @@ class RatSpn(nn.Module):
         # repetition - ic * d * r in total.
         # child_ll contains the LL of the samples of each node evaluated among all other nodes - separated
         # by repetition and feature.
-        # The tensor shape is [ic, w, d, ic, r]. Looking at one weight set, one feature and one repetition,
+        # The tensor shape is [ic, w, d, ic, r]. Looking at one conditional, one feature and one repetition,
         # we are looking at the slice [:, 0, 0, :, 0].
         # The first dimension is the dimension of the samples - there are 'ic' of them.
         # The 4th dimension is the dimension of the LLs of the nodes for those samples.
@@ -695,7 +698,7 @@ class RatSpn(nn.Module):
         Returns: Tuple of
             responsibilities: th.Tensor of shape [w, d, oc of child layer, oc, r of child layer].
             samples: th.Tensor of shape [ic, samples per node, w, f, r]
-                (w is the number of weight sets = the number of conditionals, f = self.config.F)
+                (w is the number of conditionals, f = self.config.F)
 
         """
         assert child_ll is None or (not return_sample_ctx), \
@@ -740,7 +743,7 @@ class RatSpn(nn.Module):
         # repetition - ic * d * r in total.
         # child_ll contains the LL of the samples of each node evaluated among all other nodes - separated
         # by repetition and feature.
-        # The tensor shape is [ic, w, d, ic, r]. Looking at one weight set, one feature and one repetition,
+        # The tensor shape is [ic, w, d, ic, r]. Looking at one conditional, one feature and one repetition,
         # we are looking at the slice [:, 0, 0, :, 0].
         # The first dimension is the dimension of the samples - there are 'ic' of them.
         # The 4th dimension is the dimension of the LLs of the nodes for those samples.

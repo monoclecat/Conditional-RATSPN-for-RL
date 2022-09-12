@@ -67,7 +67,7 @@ class Sum(AbstractLayer):
         self.dropout = nn.Parameter(th.tensor(check_valid(dropout, float, 0.0, 1.0)), requires_grad=False)
         self.ratspn = ratspn
 
-        # Weights, such that each sumnode has its own weights. weight_sets := w = 1 in the RatSpn case.
+        # Weights, such that each sumnode has its own weights. conditionals := w = 1 in the RatSpn case.
         ws = th.randn(1, self.in_features, self.in_channels, self.out_channels, self.num_repetitions)
         self.weight_param = nn.Parameter(ws)
         self._bernoulli_dist = th.distributions.Bernoulli(probs=self.dropout)
@@ -113,8 +113,8 @@ class Sum(AbstractLayer):
         Sum layer forward pass.
 
         Args:
-            x: Input of shape [batch, weight_sets, in_features, in_channels, repetitions].
-                weight_sets: In CSPNs, there are separate weights for each batch element.
+            x: Input of shape [batch, conditionals, in_features, in_channels, repetitions].
+                conditionals: In CSPNs, there are separate weights for each batch element.
 
         Returns:
             th.Tensor: Output of shape [batch, in_features, out_channels]
@@ -336,7 +336,7 @@ class Product(AbstractLayer):
         Product layer forward pass.
 
         Args:
-            x: Input of shape [*batch_dims, weight_sets, in_features, channel, repetitions].
+            x: Input of shape [*batch_dims, conditionals, in_features, channel, repetitions].
 
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/cardinality), channel].
@@ -481,8 +481,8 @@ class CrossProduct(AbstractLayer):
         Product layer forward pass.
 
         Args:
-            x: Input of shape [any number of batch dims, weight_sets, in_features, in_channels, repetition].
-                weight_sets: In CSPNs, there are separate weights for each batch element.
+            x: Input of shape [any number of batch dims, conditionals, in_features, in_channels, repetition].
+                conditionals: In CSPNs, there are separate weights for each batch element.
 
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/2), in_channels^2].
