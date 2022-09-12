@@ -487,7 +487,8 @@ class CrossProduct(AbstractLayer):
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/2), in_channels^2].
         """
-        # split_shuffled_scopes will pad x to make the features divisible by the cardinality
+        if self._pad > 0:
+            x = F.pad(x, pad=(0, 0, 0, 0, 0, self._pad), value=0)
         left_scope, right_scope = CrossProduct.split_shuffled_scopes(x, scope_dim=-3, cardinality=self.cardinality)
         left_scope = left_scope.unsqueeze(-2)
         right_scope = right_scope.unsqueeze(-3)
