@@ -417,7 +417,11 @@ class RatSpn(nn.Module):
         if post_processing_kwargs is None:
             post_processing_kwargs = {}
         assert mode is not None, "A sampling mode must be provided!"
-        assert class_index is None or evidence is None, "Cannot provide both, evidence and class indices."
+        # assert class_index is None or evidence is None, "Cannot provide both, evidence and class indices."
+        assert class_index is None or class_index.dim() == 1, "Class index must have shape [conditionals]"
+        if class_index is not None and evidence is not None:
+            assert class_index.shape[0] == evidence.shape[1], \
+                "class_index must have same number of conditionals as evidence"
         assert evidence is None or evidence.dtype == self.dtype, \
             f"evidence has data type {evidence.dtype} but must have data type {self.dtype}"
         # assert n is None or evidence is None, "Cannot provide both, number of samples to generate (n) and evidence."
@@ -454,13 +458,11 @@ class RatSpn(nn.Module):
                 layer_index -= 1
                 ctx.scopes = 1
                 if class_index is not None:
-                    n = (*n, len(class_index))
-                    ctx.parent_indices = th.as_tensor(class_index).expand(*n)
-                    ctx.parent_indices = th.einsum('...c -> c...', ctx.parent_indices)
+                    ctx.parent_indices = th.as_tensor(class_index).expand(*n, -1)
                     if mode == 'onehot':
                         ctx.parent_indices = F.one_hot(ctx.parent_indices, num_classes=self.config.C)
-                    ctx.n = n
-                    ctx.parent_indices = ctx.parent_indices.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                    ctx.parent_indices = ctx.parent_indices.unsqueeze(0).unsqueeze(-1)
+                    ctx.parent_indices = ctx.parent_indices.unsqueeze(-2 if mode == 'index' else -3)
 
                 ctx = self.root.sample(ctx=ctx, mode=mode)
 
