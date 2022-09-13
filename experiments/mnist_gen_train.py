@@ -178,6 +178,28 @@ def horizontal_bar_mask():
     return mask
 
 
+def sample_root_children(model, style):
+    sample_kwargs = {
+        'mode': style, 'is_mpe': False, 'n': 5, 'layer_index': model.max_layer_index - 1,
+    }
+    if False:
+        samples = sample_each_digit(model, **sample_kwargs)
+        samples = th.einsum('o...r -> ...or', samples)
+    sample_kwargs['is_mpe'] = True
+    sample_kwargs['n'] = 1
+    mpe_samples = sample_each_digit(model, **sample_kwargs)
+    mpe_samples = th.einsum('o...r -> ...or', mpe_samples)
+    if False:
+        samples = th.vstack((samples, mpe_samples))
+    else:
+        samples = mpe_samples
+    samples = th.einsum('nwfor -> nwofr', samples)
+    if model.config.tanh_squash:
+        samples.mul_(0.5).add_(0.5)
+    samples = samples.view(-1, samples.shape[2], 28, 28, samples.shape[-1])
+    return samples
+
+
 def sample_with_evidence(model, loader, style):
     evidences = None
     num_samples_per_evid = 5
@@ -268,7 +290,7 @@ def evaluate_model(model, loader, tag):
     return mean_ll
 
 
-def plot_samples(x: th.Tensor, path, wandb_run=None, wandb_caption="", wandb_log_key="unknown_sample"):
+def plot_samples(x: th.Tensor, path, wandb_run=None, wandb_caption="", wandb_log_key="unknown_sample", ncol=10):
     """
     Plot a single sample with the target and prediction in the title.
 
@@ -281,7 +303,7 @@ def plot_samples(x: th.Tensor, path, wandb_run=None, wandb_caption="", wandb_log
     x[x < 0.0] = 0.0
     x[x > 1.0] = 1.0
 
-    tensors = torchvision.utils.make_grid(x, nrow=10, padding=1).cpu()
+    tensors = torchvision.utils.make_grid(x, nrow=ncol, padding=1).cpu()
     if wandb_run is not None:
         wandb_img = wandb.Image(tensors, wandb_caption)
         wandb.log({wandb_log_key: wandb_img})
@@ -592,6 +614,18 @@ def mnist_gen_train(
                 x=samples_with_evidence, path=save_path, wandb_run=wandb_run,
                 wandb_caption=f"Sampling with evidence at epoch {epoch:04}", wandb_log_key='Evidence samples',
             )
+
+            root_children_samples = sample_root_children(model, style='onehot' if sample_onehot else 'index')
+            save_path = os.path.join(sample_dir, f"epoch-{epoch:04}_all_root_children")
+            os.makedirs(save_path, exist_ok=True)
+            for r in range(root_children_samples.shape[-1]):
+                plot_samples(
+                    x=root_children_samples[..., r].reshape(-1, 28, 28),
+                    path=os.path.join(save_path, f"epoch-{epoch:04}_{run_name}_root_children_in_rep{r}.png"),
+                    wandb_run=wandb_run,
+                    wandb_caption=f"Sampling root children at epoch {epoch:04}", wandb_log_key='Root children samples',
+                    ncol=root_children_samples.shape[1],
+                )
 
             logger.reset(epoch)
             mnist_test_ll = evaluate_model(model, test_loader, "MNIST test")
