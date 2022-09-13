@@ -143,12 +143,12 @@ class CspnActor(BasePolicy):
             joint_failure_info = joint_failure_info.to(dtype=self.cspn.dtype)
             failed_joints, evidence = th.hsplit(joint_failure_info, 2)
             evidence[failed_joints == 0.0] = th.nan
-            evidence.unsqueeze_(0).unsqueeze_(-1).unsqueeze_(-1)
+            evidence = evidence.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).atanh()
         action: th.Tensor = self.cspn.sample(
             mode='onehot' if th.is_grad_enabled() else 'index',
             condition=condition,
             is_mpe=is_mpe,
-            evidence=evidence.atanh(),  # evidence must be unsquashed, i.e. from inf support
+            evidence=evidence,  # evidence must be unsquashed, i.e. from inf support
         ).sample
         if joint_failure_info is not None:
             # The additional batch dimension of the evidence must be removed
@@ -156,10 +156,6 @@ class CspnActor(BasePolicy):
         # action shape [nr_nodes_sampled, nr_samples_of_each_node, nr_conditionals, nr_features, repetitions]
         # root node is sampled, with one sample per conditional, so shape is always [1, 1, w, action_shape, 1]
         action = action.squeeze(0).squeeze(0).squeeze(-1)
-        if joint_failure_info is not None:
-            assert not (fj := failed_joints == 1.0).any() or \
-                ((diff := (action[fj] - evidence[0, :, :, 0, 0][fj]).abs().max()) < 1e-5).all(), \
-                f"Found a difference of {diff} between original evidence and evidence contained in CSPN sample."
         return action
 
     def extract_features(self, obs: th.Tensor) -> Tuple[th.Tensor, Optional[th.Tensor]]:
