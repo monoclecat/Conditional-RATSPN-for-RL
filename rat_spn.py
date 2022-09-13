@@ -676,8 +676,8 @@ class RatSpn(nn.Module):
         return responsibilities
 
     def layer_responsibilities(self, layer_index, sample_size: int = 5, child_ll: th.Tensor = None,
-                               aux_with_grad: bool = False, return_sample_ctx: bool = False) \
-            -> Tuple[th.Tensor, Optional[Sample]]:
+                               aux_with_grad: bool = False, return_sample_ctx: bool = False, marginal_mask=None) \
+            -> th.Tensor:
         """
         Approximate the responsibilities of a Sum layer in the Spn.
         For this it draws samples of the child nodes of the layer. These samples can be returned as well.
@@ -705,17 +705,18 @@ class RatSpn(nn.Module):
             "If child_ll is provided, return_sample_ctx must be False."
         layer = self.layer_index_to_obj(layer_index)
         assert isinstance(layer, Sum), "Responsibilities can only be computed for Sum layers!"
-        ctx = None
         if child_ll is None:
             ctx = self.sample(
                 mode='onehot' if th.is_grad_enabled() else 'index',
                 n=sample_size, layer_index=layer_index-1, is_mpe=False,
                 do_sample_postprocessing=False,
             )
-            samples = ctx.sample
+            samples = ctx.sample.unsqueeze(-2)
             # We sampled all ic nodes of each repetition in the child layer
+            if marginal_mask is not None:
+                samples[marginal_mask.expand_as(samples)] = th.nan
 
-            child_ll = self.forward(x=samples.unsqueeze(-2), layer_index=layer_index-1, x_needs_permutation=False,
+            child_ll = self.forward(x=samples, layer_index=layer_index-1, x_needs_permutation=False,
                                     detach_params=not aux_with_grad)
             child_ll = child_ll.mean(dim=1)
 
@@ -755,7 +756,7 @@ class RatSpn(nn.Module):
         child_ll = th.einsum('iwdioR -> wdioR', child_ll)
 
         responsibilities: th.Tensor = log_weights + child_ll - ll
-        return responsibilities, (ctx if return_sample_ctx else None)
+        return responsibilities
 
     def weigh_tensors(self, layer_index, tensors: List = None, return_weight_ent=False) \
             -> Tuple[List[th.Tensor], Optional[th.Tensor]]:
@@ -1048,7 +1049,7 @@ class RatSpn(nn.Module):
 
     def layer_entropy_approx(
             self, layer_index=0, child_entropies: th.Tensor = None, child_ll: th.Tensor = None,
-            sample_size=5, aux_with_grad=False, verbose=False,
+            sample_size=5, aux_with_grad=False, verbose=False, marginal_mask=None,
     ) -> Tuple[th.Tensor, Optional[Dict]]:
         """
 
@@ -1068,6 +1069,11 @@ class RatSpn(nn.Module):
             "When sampling from a layer other than the leaf layer, child entropies must be provided!"
         logging = {}
         metrics = {}
+        if marginal_mask is not None:
+            assert (shape_is := marginal_mask.shape) == (shape_should := self._leaf.base_leaf.mean_param.shape[:2]), \
+                f"marginal_mask is of shape {shape_is} but needs to have shape {shape_should}"
+            marginal_mask = marginal_mask.clone().bool().unsqueeze(-1).unsqueeze(-1)
+            marginal_mask = self.apply_permutation(marginal_mask)
 
         if layer_index == 0:
             if child_ll is None:
@@ -1076,10 +1082,12 @@ class RatSpn(nn.Module):
                     n=sample_size, layer_index=layer_index, is_mpe=False,
                     do_sample_postprocessing=False,
                 )
+                sample = th.einsum('InwFR -> nwFIR', ctx.sample)
+                if marginal_mask is not None:
+                    sample[marginal_mask.expand_as(sample)] = th.nan
                 # ctx.sample [self.config.I, n, w, self.config.F, self.config.R]
                 child_ll = self.forward(
-                    x=th.einsum('InwFR -> nwFIR', ctx.sample),
-                    layer_index=layer_index, x_needs_permutation=False
+                    x=sample, layer_index=layer_index, x_needs_permutation=False
                 )
             # child_ll [n, w, self.config.F // leaf cardinality, self.config.I, self.config.R]
             node_entropies = -child_ll.mean(dim=0)
@@ -1089,9 +1097,9 @@ class RatSpn(nn.Module):
             if isinstance(layer, CrossProduct):
                 node_entropies = layer(child_entropies)
             else:
-                responsibility, ctx = self.layer_responsibilities(
+                responsibility, _ = self.layer_responsibilities(
                     layer_index=layer_index, sample_size=sample_size,
-                    child_ll=child_ll, aux_with_grad=aux_with_grad,
+                    child_ll=child_ll, aux_with_grad=aux_with_grad, marginal_mask=marginal_mask,
                 )
                 # responsibility [w, d, ic, oc, r]
 
@@ -1777,7 +1785,7 @@ class RatSpn(nn.Module):
                 step_callback(step)
         return vips_logging
 
-    def recursive_entropy_approx(self, sample_size=10, aux_with_grad: bool = False, verbose=False) \
+    def recursive_entropy_approx(self, sample_size=10, aux_with_grad: bool = False, verbose=False, **kwargs) \
             -> Tuple[th.Tensor, Optional[Dict]]:
         """
         Approximate the entropy of the root sum node in a recursive manner.
@@ -1793,13 +1801,13 @@ class RatSpn(nn.Module):
             child_entropies, layer_log = self.layer_entropy_approx(
                 layer_index=layer_index, child_entropies=child_entropies,
                 sample_size=sample_size, aux_with_grad=aux_with_grad,
-                verbose=verbose,
+                verbose=verbose, **kwargs,
             )
             if layer_log != {}:
                 logging.update(layer_log)
         return child_entropies.flatten(), logging
 
-    def naive_entropy_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False):
+    def naive_entropy_approx(self, sample_size=100, layer_index: int = None, sample_with_grad=False, **kwargs):
         if layer_index is None:
             layer_index = self.max_layer_index
 
@@ -1818,7 +1826,7 @@ class RatSpn(nn.Module):
 
     def huber_entropy_lb(self, layer_index: int = None, verbose=True,
                          detach_weights: bool = False, add_sub_weight_ent: bool = False,
-                         detach_weight_ent_subtraction: bool = False):
+                         detach_weight_ent_subtraction: bool = False, **kwargs):
         """
         Calculate the entropy lower bound of the SPN as in Huber '08.
 
