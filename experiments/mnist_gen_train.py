@@ -208,20 +208,24 @@ def sample_with_evidence(model, loader, style):
     evid_color_mask = ~nan_mask.repeat(3, 1, 1)
     evid_color_mask[2] = False
 
+    digit = 0
     for image, label in loader:
-        for digit in range(10):
-            index = th.where(label == digit)[0]
-            if len(index) == 0:
-                continue
-            index = index[0]
-            matching_digit = image[index].to(model.device)
-            assert (label[index] == digit).all()
-            if evidences is None:
-                evidences = matching_digit
-            else:
-                evidences = th.vstack((evidences, matching_digit))
-        if len(evidences) == 10:
+        index = th.where(label == digit)[0]
+        if len(index) == 0:
+            continue
+        index = index[0]
+        matching_digit = image[index].to(model.device)
+        assert len(matching_digit) == 1
+        assert (label[index] == digit).all()
+        if evidences is None:
+            evidences = matching_digit
+        else:
+            evidences = th.vstack((evidences, matching_digit))
+        digit += 1
+        if len(evidences) >= 10:
+            evidences = evidences[:10]
             break
+    assert len(evidences) == 10
     evidences = evidences.unsqueeze(1)
     if model.config.tanh_squash:
         evidences.sub_(0.5).mul_(2).atanh_()
@@ -443,6 +447,7 @@ def mnist_gen_train(
         CSPN_sum_param_layers: list,
         CSPN_dist_param_layers: list,
         CSPN_feat_layers: list,
+        CSPN_cond_layers_inner_act: str,
         min_sigma: float,
         no_tanh: bool,
         no_correction_term: bool,
@@ -552,6 +557,14 @@ def mnist_gen_train(
             config.feat_layers = CSPN_feat_layers
             config.sum_param_layers = CSPN_sum_param_layers
             config.dist_param_layers = CSPN_dist_param_layers
+            if CSPN_cond_layers_inner_act == 'relu':
+                config.cond_layers_inner_act = nn.ReLU
+            elif CSPN_cond_layers_inner_act == 'leaky_relu':
+                config.cond_layers_inner_act = nn.LeakyReLU
+            elif CSPN_cond_layers_inner_act == 'softplus':
+                config.cond_layers_inner_act = nn.Softplus
+            else:
+                config.cond_layers_inner_act = nn.Identity
         config.F = int(np.prod(img_size))
         config.R = RATSPN_R
         config.D = RATSPN_D
@@ -576,7 +589,8 @@ def mnist_gen_train(
             print_cspn_params(model)
         model = model.to(device)
         if wandb_run is not None:
-            wandb_run.config.update({'SPN_config': config})
+            # wandb_run.config.update({'SPN_config': config})
+            wandb.log(vars(config))
     else:
         print(f"Using pretrained model under {model_path}")
         model = th.load(model_path, map_location=device)
@@ -760,12 +774,15 @@ if __name__ == "__main__":
     parser.add_argument('--RATSPN_I', '-I', type=int, default=5, help='Number of Gauss dists per pixel.')
     parser.add_argument('--RATSPN_S', '-S', type=int, default=5, help='Number of sums per RV in each sum layer.')
     parser.add_argument('--RATSPN_dropout', type=float, default=0.0, help='Dropout to apply')
-    parser.add_argument('--CSPN_feat_layers', type=int, nargs='+',
+    parser.add_argument('--CSPN_feat_layers', '-feat_lay', type=int, nargs='+',
                         help='List of sizes of the CSPN feature layers.')
-    parser.add_argument('--CSPN_sum_param_layers', type=int, nargs='+',
+    parser.add_argument('--CSPN_sum_param_layers', '-sum_lay', type=int, nargs='+',
                         help='List of sizes of the CSPN sum param layers.')
-    parser.add_argument('--CSPN_dist_param_layers', type=int, nargs='+',
+    parser.add_argument('--CSPN_dist_param_layers', '-dist_lay', type=int, nargs='+',
                         help='List of sizes of the CSPN dist param layers.')
+    parser.add_argument('--CSPN_cond_layers_inner_act', '-act', type=str,
+                        choices=['relu', 'leaky_relu', 'softplus', 'none'],
+                        help='Activations of all CSPN layers that provide the parameters.')
     parser.add_argument('--save_interval', '-save', type=int, default=10, help='Epoch interval to save model')
     parser.add_argument('--eval_interval', '-eval', type=int, default=10, help='Epoch interval to evaluate model')
     parser.add_argument('--verbose', '-V', action='store_true', help='Output more debugging information when running.')

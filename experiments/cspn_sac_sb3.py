@@ -11,9 +11,10 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
+from stable_baselines3.sac import MlpPolicy
 
 from cspn import CSPN, print_cspn_params
-from sb3 import CspnActor, CspnSAC, EntropyLoggingSAC, CspnPolicy
+from sb3 import *
 from utils import non_existing_folder_name
 
 
@@ -176,29 +177,26 @@ if __name__ == "__main__":
                 'learning_rate': args.learning_rate,
                 'buffer_size': args.buffer_size,
             }
-            if args.mlp_actor:
-                model = EntropyLoggingSAC("MlpPolicy", **sac_kwargs)
-            else:
-                cspn_args = {
-                    'R': args.repetitions,
-                    'D': args.cspn_depth,
-                    'I': args.num_dist,
-                    'S': args.num_sums,
-                    'dropout': args.dropout,
-                    'feat_layers': args.feat_layers,
-                    'sum_param_layers': args.sum_param_layers,
-                    'dist_param_layers': args.dist_param_layers,
-                    'cond_layers_inner_act': nn.Identity if args.no_relu else nn.ReLU,
-                    'entropy_objective': args.objective,
-                    'recurs_ent_approx_sample_size': args.recurs_sample_size,
-                    'naive_ent_approx_sample_size': args.naive_sample_size,
-                }
-                sac_kwargs['policy_kwargs'] = {
-                    'joint_failure_prob': args.joint_fail_prob,
-                    'actor_cspn_args': cspn_args,
-                    'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
-                }
-                model = CspnSAC(policy=CspnPolicy, **sac_kwargs)
+            cspn_args = {
+                'R': args.repetitions,
+                'D': args.cspn_depth,
+                'I': args.num_dist,
+                'S': args.num_sums,
+                'dropout': args.dropout,
+                'feat_layers': args.feat_layers,
+                'sum_param_layers': args.sum_param_layers,
+                'dist_param_layers': args.dist_param_layers,
+                'cond_layers_inner_act': nn.Identity if args.no_relu else nn.ReLU,
+                'entropy_objective': args.objective,
+                'recurs_ent_approx_sample_size': args.recurs_sample_size,
+                'naive_ent_approx_sample_size': args.naive_sample_size,
+            }
+            sac_kwargs['policy_kwargs'] = {
+                'joint_failure_prob': args.joint_fail_prob,
+                'actor_cspn_args': cspn_args,
+                'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
+            }
+            model = CspnSAC(policy=CustomMlpPolicy if args.mlp_actor else CspnPolicy, **sac_kwargs)
             # model_name = f"sac_{'mlp' if args.mlp_actor else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
 
         if not args.no_wandb:

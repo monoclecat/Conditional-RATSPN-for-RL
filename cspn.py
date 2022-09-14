@@ -233,15 +233,15 @@ class CSPN(RatSpn):
         self.sum_param_heads = nn.ModuleList()
         for layer in self._inner_layers:
             if isinstance(layer, Sum):
-                self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], layer.weights.numel()))
-                # print(f"Sum layer has {layer.weights.numel()} weights.")
-        self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self.root.weights.numel()))
-        # print(f"Root sum layer has {self.root.weights.numel()} weights.")
+                self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], layer.weight_param.numel()))
+                # print(f"Sum layer has {layer.weight_param.numel()} weights.")
+        self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self.root.weight_param.numel()))
+        # print(f"Root sum layer has {self.root.weight_param.numel()} weights.")
 
         if isinstance(self._leaf, GaussianMixture):
-            self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self._leaf.sum.weights.numel()))
+            self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self._leaf.sum.weight_param.numel()))
             # print(f"A param head was added for the sum layer of the GaussianMixture leaves, "
-                  # f"having {self._leaf.sum.weights.numel()} weights.")
+                  # f"having {self._leaf.sum.weight_param.numel()} weights.")
 
         # dist_layer_sizes = [int(feature_dim * 10 ** (-i)) for i in range(1 + self.config.fc_dist_param_layers)]
         dist_layer_sizes = [feature_dim]
@@ -257,8 +257,6 @@ class CSPN(RatSpn):
 
         self.dist_mean_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.mean_param.numel())
         self.dist_std_head = nn.Linear(dist_layer_sizes[-1], self._leaf.base_leaf.std_param.numel())
-        # print(f"Dist layer has {self._leaf.base_leaf.mean_param.numel()} + "
-              # f"{self._leaf.base_leaf.std_param.numel()} weights.")
 
     def create_one_hot_in_channel_mapping(self):
         for lay in self._inner_layers:
@@ -300,8 +298,7 @@ class CSPN(RatSpn):
 
         # Sampling root weights need to have 5 dims as well
         weight_shape = (num_conditionals, 1, 1, 1, 1)
-        self._sampling_root.weight_param = th.ones(weight_shape).to(self.device)
-        self._sampling_root.weight_param = self._sampling_root.weights.mul_(1/self.config.C).log_()
+        self._sampling_root.weight_param = th.ones(weight_shape, device=self.device).mul_(1/self.config.C).log_()
 
         # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
         if isinstance(self._leaf, GaussianMixture):

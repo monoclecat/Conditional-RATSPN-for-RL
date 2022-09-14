@@ -1,6 +1,8 @@
+from abc import ABC
+
 import stable_baselines3 as sb3
 import gym
-from stable_baselines3.sac.policies import SACPolicy
+from stable_baselines3.sac.policies import SACPolicy, Actor
 from stable_baselines3.sac.sac import SAC
 from stable_baselines3.common.utils import polyak_update
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic, BaseModel
@@ -30,6 +32,8 @@ from cspn import CspnConfig, CSPN
 from distributions import RatNormal
 from stable_baselines3.common.utils import zip_strict
 
+LOG_STD_MAX = 2
+LOG_STD_MIN = -20
 
 def polyak_update(
         params: Iterable[th.nn.Parameter],
@@ -44,7 +48,30 @@ def polyak_update(
                 th.add(target_param.data, param.data, alpha=tau, out=target_param.data)
 
 
-class CspnActor(BasePolicy):
+class JointFailureActor(BasePolicy):
+    def __init__(
+            self, *args, joint_failure_info_in_obs: bool = False, **kwargs):
+        self.joint_failure_info_in_obs = joint_failure_info_in_obs
+        super(JointFailureActor, self).__init__(*args, **kwargs)
+
+    def extract_features(self, obs: th.Tensor) -> Tuple[th.Tensor, Optional[th.Tensor]]:
+        joint_failure_info = None
+        if self.joint_failure_info_in_obs:
+            obs, joint_failure_info = th.hsplit(obs, self.observation_space.shape)
+            assert joint_failure_info.shape[1] == self.action_space.shape[0] * 2
+        return super(JointFailureActor, self).extract_features(obs), joint_failure_info
+
+    def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
+        action, _, _ = self.action_entropy(
+            obs=obs, deterministic=deterministic, log_ent_metrics=False, compute_entropy=False
+        )
+        return action
+
+    def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
+        return self(observation, deterministic)
+
+
+class CspnActor(JointFailureActor):
     """
     Actor network (policy) for SAC.
 
@@ -62,6 +89,7 @@ class CspnActor(BasePolicy):
             self,
             observation_space: gym.spaces.Space,
             action_space: gym.spaces.Space,
+            net_arch: List[int],
             features_extractor: nn.Module,
             features_dim: int,
             R: int,
@@ -75,12 +103,13 @@ class CspnActor(BasePolicy):
             entropy_objective: str,
             recurs_ent_approx_sample_size: int,
             naive_ent_approx_sample_size: int,
-            joint_failure_info_in_obs: bool = False,
-            normalize_images: bool = True,
             cond_layers_inner_act: Type[nn.Module] = nn.ReLU,
             squash_output: bool = True,
             min_std: float = 0.001,
             max_std: float = 1.0,
+            activation_fn: Type[nn.Module] = nn.ReLU,
+            normalize_images: bool = True,
+            joint_failure_info_in_obs: bool = False,
             **kwargs
     ):
         super(CspnActor, self).__init__(
@@ -88,7 +117,8 @@ class CspnActor(BasePolicy):
             action_space,
             features_extractor=features_extractor,
             normalize_images=normalize_images,
-            squash_output=squash_output,
+            joint_failure_info_in_obs=joint_failure_info_in_obs,
+            squash_output=True,
         )
 
         # Save arguments to re-create object at loading
@@ -96,7 +126,6 @@ class CspnActor(BasePolicy):
         self.recurs_ent_approx_sample_size = recurs_ent_approx_sample_size
         self.naive_ent_approx_sample_size = naive_ent_approx_sample_size
         self.entropy_objective = entropy_objective
-        self.joint_failure_info_in_obs = joint_failure_info_in_obs
 
         action_dim = get_action_dim(self.action_space)
 
@@ -138,7 +167,6 @@ class CspnActor(BasePolicy):
 
     def _sample(self, condition: th.Tensor, is_mpe: bool, joint_failure_info: Optional[th.Tensor]):
         evidence = None
-        failed_joints = None
         if joint_failure_info is not None:
             joint_failure_info = joint_failure_info.to(dtype=self.cspn.dtype)
             failed_joints, evidence = th.hsplit(joint_failure_info, 2)
@@ -158,48 +186,38 @@ class CspnActor(BasePolicy):
         action = action.squeeze(0).squeeze(0).squeeze(-1)
         return action
 
-    def extract_features(self, obs: th.Tensor) -> Tuple[th.Tensor, Optional[th.Tensor]]:
-        joint_failure_info = None
-        if self.joint_failure_info_in_obs:
-            obs, joint_failure_info = th.hsplit(obs, self.observation_space.shape)
-            assert joint_failure_info.shape[1] == self.action_space.shape[0] * 2
-        return super(CspnActor, self).extract_features(obs), joint_failure_info
-
-    def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        action, _, _ = self.action_entropy(
-            obs=obs, deterministic=deterministic, log_ent_metrics=False, compute_entropy=False
-        )
-        return action
-
     def action_entropy(self, obs: th.Tensor, deterministic: bool = False, log_ent_metrics: bool = False,
                        compute_entropy: bool = False) -> Tuple[th.Tensor, th.Tensor, dict]:
         # return action and entropy
         features, joint_failure_info = self.extract_features(obs)
         action = self._sample(condition=features, is_mpe=deterministic, joint_failure_info=joint_failure_info)
         entropy = ent_log = None
+        failed_joints, _ = th.hsplit(joint_failure_info, 2)
         if compute_entropy:
             if self.entropy_objective == 'recursive':
                 entropy, ent_log = self.cspn.recursive_entropy_approx(
                     condition=features, verbose=log_ent_metrics,
                     sample_size=self.recurs_ent_approx_sample_size,
+                    marginal_mask=failed_joints,
                 )
             elif self.entropy_objective == 'naive':
                 ent_log = {}
                 entropy = self.cspn.naive_entropy_approx(
-                    condition=features, verbose=log_ent_metrics,
+                    condition=features,
                     sample_size=self.naive_ent_approx_sample_size,
+                    marginal_mask=failed_joints,
                 )
             elif self.entropy_objective == 'huber':
-                entropy, ent_log = self.cspn.huber_entropy_lb(condition=features, verbose=log_ent_metrics)
+                entropy, ent_log = self.cspn.huber_entropy_lb(
+                    condition=features, verbose=log_ent_metrics,
+                    marginal_mask=failed_joints,
+                )
             else:
                 raise ValueError(f"entropy_objective {self.entropy_objective} unknown!")
         return action, entropy, ent_log
 
-    def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        return self(observation, deterministic)
 
-
-class CspnPolicy(SACPolicy):
+class JointFailurePolicy(SACPolicy):
     """
     Policy class (with a CSPN actor and an MLP critic) for SAC.
 
@@ -224,56 +242,16 @@ class CspnPolicy(SACPolicy):
     """
 
     def __init__(
-            self,
-            observation_space: gym.spaces.Space,
-            action_space: gym.spaces.Space,
-            lr_schedule: Schedule,
-            actor_cspn_args: dict,
+            self, *args,
             joint_failure_prob: float = 0.0,
             sample_failing_joints: bool = True,
-            net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
-            critic_activation_fn: Type[nn.Module] = nn.ReLU,
-            log_std_init: float = -3,
-            features_extractor_class: Type[BaseFeaturesExtractor] = FlattenExtractor,
-            features_extractor_kwargs: Optional[Dict[str, Any]] = None,
-            normalize_images: bool = True,
-            optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
-            optimizer_kwargs: Optional[Dict[str, Any]] = None,
-            n_critics: int = 2,
-            share_features_extractor: bool = True,
-            squash_output: bool = True,
             **kwargs
     ):
-        super(SACPolicy, self).__init__(
-            observation_space,
-            action_space,
-            features_extractor_class,
-            features_extractor_kwargs,
-            optimizer_class=optimizer_class,
-            optimizer_kwargs=optimizer_kwargs,
-            squash_output=squash_output,
-        )
         self.joints_can_fail = joint_failure_prob > 0.0
         self.joint_failure_prob = joint_failure_prob
         self.sample_failing_joints = sample_failing_joints
-
-        if net_arch is None:
-            if features_extractor_class == NatureCNN:
-                net_arch = []
-            else:
-                net_arch = [256, 256]
-
-        if isinstance(net_arch, dict) and 'pi' in net_arch.keys():
-            warnings.warn("CspnPolicy ignores pi net_arch settings, as the Cspn needs different configuration.")
-
-        self.net_args = {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "normalize_images": normalize_images,
-        }
-        self.actor_kwargs = self.net_args.copy()
-        self.actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
-        if False and self.joints_can_fail:  #TODO this might be relevant for an MLP actor
+        super(JointFailurePolicy, self).__init__(*args, **kwargs)
+        if False:  # if actor is MlpActor
             orig_obs = self.actor_kwargs['observation_space']
             new_low = np.hstack((
                 orig_obs.low,
@@ -286,32 +264,6 @@ class CspnPolicy(SACPolicy):
                 self.action_space.high
             ))
             self.actor_kwargs['observation_space'] = gym.spaces.Box(low=new_low, high=new_high, dtype=orig_obs.dtype)
-        self.actor_kwargs.update(actor_cspn_args)
-
-        self.critic_kwargs = self.net_args.copy()
-        _, critic_arch = get_actor_critic_arch(net_arch)
-        self.critic_arch = critic_arch
-        self.critic_activation_fn = critic_activation_fn
-
-        self.critic_kwargs.update(
-            {
-                "activation_fn": self.critic_activation_fn,
-                "n_critics": n_critics,
-                "net_arch": critic_arch,
-                "share_features_extractor": share_features_extractor,
-            }
-        )
-
-        self.actor, self.actor_target = None, None
-        self.critic, self.critic_target = None, None
-        self.share_features_extractor = share_features_extractor
-
-        self._build(lr_schedule)
-
-    def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CspnActor:
-        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
-        actor_kwargs['squash_output'] = self.squash_output
-        return CspnActor(**actor_kwargs).to(self.device)
 
     def sample_joint_failures(self, batch_size):
         action_shape = (batch_size,) + self.action_space.shape
@@ -354,6 +306,69 @@ class CspnPolicy(SACPolicy):
         return unscaled_action
 
 
+class CspnPolicy(JointFailurePolicy):
+    def __init__(self, *args, actor_cspn_args: dict, **kwargs):
+        self.actor_cspn_args = actor_cspn_args
+        super(CspnPolicy, self).__init__(*args, **kwargs)
+
+    def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CspnActor:
+        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        actor_kwargs['squash_output'] = self.squash_output
+        actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
+        actor_kwargs.update(self.actor_cspn_args)
+        return CspnActor(**actor_kwargs).to(self.device)
+
+
+class CustomMlpActor(JointFailureActor, Actor):
+    def __init__(
+            self, *args, joint_failure_info_in_obs: bool = False, **kwargs
+    ):
+        self.joint_failure_info_in_obs = joint_failure_info_in_obs
+        Actor.__init__(self, *args, **kwargs)
+
+    def get_action_dist_params(self, obs: th.Tensor) -> Tuple[th.Tensor, th.Tensor, Dict[str, th.Tensor]]:
+        """
+        Get the parameters for the action distribution.
+
+        :param obs:
+        :return:
+            Mean, standard deviation and optional keyword arguments.
+        """
+        features = th.hstack(self.extract_features(obs))
+        latent_pi = self.latent_pi(features)
+        mean_actions = self.mu(latent_pi)
+
+        if self.use_sde:
+            return mean_actions, self.log_std, dict(latent_sde=latent_pi)
+        # Unstructured exploration (Original implementation)
+        log_std = self.log_std(latent_pi)
+        # Original Implementation to cap the standard deviation
+        log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+        return mean_actions, log_std, {}
+
+    def action_entropy(self, obs: th.Tensor, deterministic: bool = False, log_ent_metrics: bool = False,
+                       compute_entropy: bool = False) -> Tuple[th.Tensor, th.Tensor, dict]:
+        mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
+        if deterministic:
+            actions_pi = self.action_dist.actions_from_params(
+                mean_actions, log_std, deterministic=deterministic, **kwargs
+            )
+            return actions_pi, None, {}
+        else:
+            actions_pi, log_prob = self.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
+            return actions_pi, -log_prob, {}
+
+
+class CustomMlpPolicy(JointFailurePolicy):
+    def __init__(self, *args, actor_cspn_args=None, **kwargs):
+        super(CustomMlpPolicy, self).__init__(*args, **kwargs)
+
+    def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CustomMlpActor:
+        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
+        return CustomMlpActor(**actor_kwargs).to(self.device)
+
+
 class CspnSAC(SAC):
     """
     Soft Actor-Critic (SAC) modified for a CSPN actor
@@ -367,10 +382,11 @@ class CspnSAC(SAC):
     def learn(self, **kwargs) -> OffPolicyAlgorithm:
         if kwargs.get('tb_log_name') is None:
             kwargs['tb_log_name'] = 'CspnSAC'
-        if kwargs.get('callback') is None:
-            kwargs['callback'] = CspnCallback()
-        else:
-            kwargs['callback'] = [CspnCallback(), kwargs['callback']]
+        if isinstance(self.actor, CspnActor):
+            if kwargs.get('callback') is None:
+                kwargs['callback'] = CspnCallback()
+            else:
+                kwargs['callback'] = [CspnCallback(), kwargs['callback']]
         return super(CspnSAC, self).learn(**kwargs)
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
@@ -387,7 +403,6 @@ class CspnSAC(SAC):
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses, critic_values, = [], [], []
         actor_ent_log = []
-        vi_ent_log = None
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer

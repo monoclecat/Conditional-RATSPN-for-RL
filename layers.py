@@ -106,6 +106,7 @@ class Sum(AbstractLayer):
         if self.ratspn:
             return F.log_softmax(self.weight_param, dim=2)
         else:
+            assert th.allclose(self.weight_param.exp().sum(2), th.as_tensor(1.0))
             return self.weight_param
 
     def forward(self, x: th.Tensor, detach_params: bool = False):

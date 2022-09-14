@@ -106,6 +106,7 @@ class RatNormal(Leaf):
         if self._ratspn:
             return self.bounded_means()
         else:
+            assert ((self.min_mean <= self.mean_param) & (self.mean_param <= self.max_mean)).all()
             return self.mean_param
 
     @means.setter
@@ -118,22 +119,26 @@ class RatNormal(Leaf):
     @property
     def log_stds(self):
         if self._ratspn:
-            return self.bounded_stds()
+            std_param = self.bounded_stds()
         else:
-            if self._stds_in_lin_space:
-                return self.std_param.log()
-            else:
-                return self.std_param
+            std_param = self.std_param
+        if self._stds_in_lin_space:
+            assert ((self.min_sigma <= std_param) & (std_param <= self.max_sigma)).all()
+            return std_param.log()
+        else:
+            return std_param
 
     @property
     def stds(self):
         if self._ratspn:
-            return self.bounded_stds()
+            std_param = self.bounded_stds()
         else:
-            if self._stds_in_lin_space:
-                return self.std_param
-            else:
-                return self.std_param.exp()
+            std_param = self.std_param
+        if self._stds_in_lin_space:
+            assert ((self.min_sigma <= std_param) & (std_param <= self.max_sigma)).all()
+            return std_param
+        else:
+            return std_param.exp()
 
     @property
     def var(self):
