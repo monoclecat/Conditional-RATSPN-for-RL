@@ -11,6 +11,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.sac import MlpPolicy
 
 from cspn import CSPN, print_cspn_params
@@ -48,6 +49,8 @@ if __name__ == "__main__":
                         help='Nr. of steps to act randomly in the beginning.')
     parser.add_argument('--buffer_size', type=int, default=300_000, help='replay buffer size')
     parser.add_argument('--joint_fail_prob', type=float, default=0.05, help="Joints can fail with this probability")
+    parser.add_argument('--provide_joint_fail_info_to_critic', '-fails_to_critic', action='store_true',
+                        help="Include joint failure info in critic state.")
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,
@@ -97,7 +100,8 @@ if __name__ == "__main__":
         np.random.seed(seed)
         th.manual_seed(seed)
 
-        run_name_seed = f"{args.run_name}_s{seed}"
+        run_name = f"{'MLP' if args.mlp_actor else 'CSPN'}_{args.run_name}"
+        run_name_seed = f"{run_name}_s{seed}"
         log_path = os.path.join(args.log_dir, args.proj_name)
         log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
         monitor_path = os.path.join(log_path, "monitor")
@@ -111,7 +115,7 @@ if __name__ == "__main__":
                 dir=log_path,
                 project=args.proj_name,
                 name=run_name_seed,
-                group=args.run_name,
+                group=run_name,
                 sync_tensorboard=True,
                 monitor_gym=True,
                 reinit=True,
@@ -123,13 +127,10 @@ if __name__ == "__main__":
             env_id=args.env_name,
             n_envs=args.num_envs,
             monitor_dir=monitor_path,
+            wrapper_class=FloatWrapper,
             # vec_env_cls=SubprocVecEnv,
             # vec_env_kwargs={'start_method': 'fork'},
         )
-        if env.observation_space.dtype == np.float64:
-            env.observation_space = gym.spaces.Box(
-                low=env.observation_space.low, high=env.observation_space.high, dtype=np.float32
-            )
         if not args.no_video:
             # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
             env = VecVideoRecorder(env, video_folder=video_path,
@@ -193,25 +194,31 @@ if __name__ == "__main__":
             }
             sac_kwargs['policy_kwargs'] = {
                 'joint_failure_prob': args.joint_fail_prob,
+                'sample_failing_joints': True,
+                'provide_joint_fail_info_to_critic': args.provide_joint_fail_info_to_critic,
                 'actor_cspn_args': cspn_args,
                 'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
             }
             model = CspnSAC(policy=CustomMlpPolicy if args.mlp_actor else CspnPolicy, **sac_kwargs)
             # model_name = f"sac_{'mlp' if args.mlp_actor else 'cspn'}_{args.env_name}_{args.exp_name}_s{seed}"
 
+        callback = [CheckpointCallback(
+            save_freq=args.save_interval,
+            save_path=model_path,
+            name_prefix=run_name
+        )]
         if not args.no_wandb:
+            wandb.log(vars(args))
             run.config.update({
                 **sac_kwargs,
                 'machine': platform.node(),
             })
-            callback = WandbCallback(
-                gradient_save_freq=10000,
-                model_save_path=model_path,
-                model_save_freq=args.save_interval,
+            callback.append(WandbCallback(
+                # gradient_save_freq=10000,
+                # model_save_path=model_path,
+                # model_save_freq=args.save_interval,
                 verbose=2,
-            )
-        else:
-            callback = None
+            ))
 
         logger = configure(log_path, ["stdout", "csv", "tensorboard"])
         logger.output_formats[0].max_length = 50

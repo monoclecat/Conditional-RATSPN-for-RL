@@ -16,7 +16,7 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.type_aliases import Schedule
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -58,8 +58,10 @@ class JointFailureActor(BasePolicy):
         joint_failure_info = None
         if self.joint_failure_info_in_obs:
             obs, joint_failure_info = th.hsplit(obs, self.observation_space.shape)
-            assert joint_failure_info.shape[1] == self.action_space.shape[0] * 2
-        return super(JointFailureActor, self).extract_features(obs), joint_failure_info
+            assert (isinstance(self, CustomMlpActor) and joint_failure_info.shape[1] == 0) or \
+                   (isinstance(self, CspnActor) and joint_failure_info.shape[1] == self.action_space.shape[0] * 2)
+        obs = super(JointFailureActor, self).extract_features(obs)
+        return obs, joint_failure_info.to(dtype=obs.dtype)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         action, _, _ = self.action_entropy(
@@ -243,27 +245,35 @@ class JointFailurePolicy(SACPolicy):
 
     def __init__(
             self, *args,
-            joint_failure_prob: float = 0.0,
-            sample_failing_joints: bool = True,
+            provide_joint_fail_info_to_critic: bool,
+            joint_failure_prob: float,
+            sample_failing_joints: bool,
             **kwargs
     ):
         self.joints_can_fail = joint_failure_prob > 0.0
         self.joint_failure_prob = joint_failure_prob
         self.sample_failing_joints = sample_failing_joints
+        self.provide_joint_fail_info_to_critic = provide_joint_fail_info_to_critic
         super(JointFailurePolicy, self).__init__(*args, **kwargs)
-        if False:  # if actor is MlpActor
-            orig_obs = self.actor_kwargs['observation_space']
-            new_low = np.hstack((
-                orig_obs.low,
-                np.zeros_like(self.action_space.low),
-                self.action_space.low
-            ))
-            new_high = np.hstack((
-                orig_obs.high,
-                np.ones_like(self.action_space.high),
-                self.action_space.high
-            ))
-            self.actor_kwargs['observation_space'] = gym.spaces.Box(low=new_low, high=new_high, dtype=orig_obs.dtype)
+
+    def _build(self, lr_schedule: Schedule) -> None:
+        if self.provide_joint_fail_info_to_critic:
+            self._include_joint_failure_info_in_obs_space(self.critic_kwargs)
+        super(JointFailurePolicy, self)._build(lr_schedule)
+
+    def _include_joint_failure_info_in_obs_space(self, ac_kwargs):
+        orig_obs = ac_kwargs['observation_space']
+        new_low = np.hstack((
+            orig_obs.low,
+            np.zeros_like(self.action_space.low),
+            self.action_space.low
+        ))
+        new_high = np.hstack((
+            orig_obs.high,
+            np.ones_like(self.action_space.high),
+            self.action_space.high
+        ))
+        ac_kwargs['observation_space'] = gym.spaces.Box(low=new_low, high=new_high, dtype=orig_obs.dtype)
 
     def sample_joint_failures(self, batch_size):
         action_shape = (batch_size,) + self.action_space.shape
@@ -304,6 +314,13 @@ class JointFailurePolicy(SACPolicy):
             observation=observation, deterministic=deterministic, log_ent_metrics=False, compute_entropy=False
         )
         return unscaled_action
+
+    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
+        critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        if self.provide_joint_fail_info_to_critic:
+            assert isinstance(critic_kwargs['features_extractor'], FlattenExtractor)
+            critic_kwargs['features_dim'] = critic_kwargs['observation_space'].low.shape[0]
+        return ContinuousCritic(**critic_kwargs).to(self.device)
 
 
 class CspnPolicy(JointFailurePolicy):
@@ -363,8 +380,14 @@ class CustomMlpPolicy(JointFailurePolicy):
     def __init__(self, *args, actor_cspn_args=None, **kwargs):
         super(CustomMlpPolicy, self).__init__(*args, **kwargs)
 
+    def _build(self, lr_schedule: Schedule) -> None:
+        self._include_joint_failure_info_in_obs_space(self.actor_kwargs)
+        super(JointFailurePolicy, self)._build(lr_schedule)
+
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CustomMlpActor:
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        assert isinstance(actor_kwargs['features_extractor'], FlattenExtractor)
+        actor_kwargs['features_dim'] = actor_kwargs['observation_space'].low.shape[0]
         actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
         return CustomMlpActor(**actor_kwargs).to(self.device)
 
@@ -585,6 +608,17 @@ class CspnCallback(BaseCallback):
         This event is triggered before exiting the `learn()` method.
         """
         pass
+
+
+class FloatWrapper(gym.Wrapper):
+    def __init__(self, *args, **kwargs):
+        super(FloatWrapper, self).__init__(*args, **kwargs)
+        self.observation_space = gym.spaces.Box(
+            low=self.observation_space.low, high=self.observation_space.high, dtype=np.float32
+        )
+        self.action_space = gym.spaces.Box(
+            low=self.action_space.low, high=self.action_space.high, dtype=np.float32
+        )
 
 
 class EntropyLoggingSAC(SAC):
