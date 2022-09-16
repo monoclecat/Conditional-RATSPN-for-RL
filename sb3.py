@@ -245,14 +245,15 @@ class JointFailurePolicy(SACPolicy):
 
     def __init__(
             self, *args,
+            provide_joint_fail_info_to_actor: bool,
             provide_joint_fail_info_to_critic: bool,
             joint_failure_prob: float,
             sample_failing_joints: bool,
             **kwargs
     ):
-        self.joints_can_fail = joint_failure_prob > 0.0
         self.joint_failure_prob = joint_failure_prob
         self.sample_failing_joints = sample_failing_joints
+        self.provide_joint_fail_info_to_actor = provide_joint_fail_info_to_actor
         self.provide_joint_fail_info_to_critic = provide_joint_fail_info_to_critic
         super(JointFailurePolicy, self).__init__(*args, **kwargs)
 
@@ -331,7 +332,7 @@ class CspnPolicy(JointFailurePolicy):
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CspnActor:
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         actor_kwargs['squash_output'] = self.squash_output
-        actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
+        actor_kwargs['joint_failure_info_in_obs'] = self.provide_joint_fail_info_to_actor
         actor_kwargs.update(self.actor_cspn_args)
         return CspnActor(**actor_kwargs).to(self.device)
 
@@ -388,7 +389,7 @@ class CustomMlpPolicy(JointFailurePolicy):
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         assert isinstance(actor_kwargs['features_extractor'], FlattenExtractor)
         actor_kwargs['features_dim'] = actor_kwargs['observation_space'].low.shape[0]
-        actor_kwargs['joint_failure_info_in_obs'] = self.joints_can_fail
+        actor_kwargs['joint_failure_info_in_obs'] = self.provide_joint_fail_info_to_actor
         return CustomMlpActor(**actor_kwargs).to(self.device)
 
 
