@@ -241,8 +241,3 @@ dependencies:
     - wandb==0.13.3
     - werkzeug==2.1.1
     - zipp==3.8.0
-variables:
-  LD_LIBRARY_PATH: :/home/i53/student/andrew_delay/.mujoco/mujoco200/bin:/usr/lib/nvidia
-  PYTHONPATH: /home/i53/student/andrew_delay/SPFlow
-  WANDB_API_KEY: 59f7a0d8e07fbdd286dc0ef8993764b53e7fd557
-prefix: /home/temp_store/andrew_delay/miniconda3/envs/SPFlow
