@@ -402,15 +402,17 @@ class CspnSAC(SAC):
                 not self.action_space.bounded_above.all() and self.action_space.bounded_above.any():
             raise NotImplementedError("Case not covered yet where only part of the action space is bounded")
 
-    def learn(self, **kwargs) -> OffPolicyAlgorithm:
-        if kwargs.get('tb_log_name') is None:
-            kwargs['tb_log_name'] = 'CspnSAC'
+    def learn(self, tb_log_name=None, callback=None, **kwargs) -> OffPolicyAlgorithm:
+        if tb_log_name is None:
+            tb_log_name = 'CspnSAC'
         if isinstance(self.actor, CspnActor):
-            if kwargs.get('callback') is None:
-                kwargs['callback'] = CspnCallback()
+            if callback is None:
+                callback = CspnCallback()
+            elif isinstance(callback, list):
+                callback.append(CspnCallback())
             else:
-                kwargs['callback'] = [CspnCallback(), kwargs['callback']]
-        return super(CspnSAC, self).learn(**kwargs)
+                callback = [CspnCallback(), callback]
+        return super(CspnSAC, self).learn(tb_log_name=tb_log_name, callback=callback, **kwargs)
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
