@@ -142,7 +142,6 @@ dependencies:
     - charset-normalizer==2.0.12
     - click==8.1.2
     - cloudpickle==2.0.0
-    - cw2==1.2.5
     - cycler==0.11.0
     - cython==0.29.28
     - dataclasses==0.6
