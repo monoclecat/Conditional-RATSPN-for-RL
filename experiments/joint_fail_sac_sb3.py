@@ -20,7 +20,7 @@ from utils import non_existing_folder_name
 
 
 def joint_failure_sac(
-        seed: List[int],
+        seeds: List[int],
         mlp_actor: bool,
         num_envs: int,
         timesteps: int,
@@ -39,11 +39,12 @@ def joint_failure_sac(
         learning_starts: int,
         buffer_size: int,
         joint_fail_prob: float,
+        provide_joint_fail_info_to_actor: bool,
         provide_joint_fail_info_to_critic: bool,
-        repetitions: int,
-        cspn_depth: int,
-        num_dist: int,
-        num_sums: int,
+        repetitions: Optional[int],
+        cspn_depth: Optional[int],
+        num_dist: Optional[int],
+        num_sums: Optional[int],
         dropout: float,
         feat_layers: Optional[List[int]],
         sum_param_layers: Optional[List[int]],
@@ -76,7 +77,13 @@ def joint_failure_sac(
         from wandb.integration.sb3 import WandbCallback
         wandb.login(key=os.environ['WANDB_API_KEY'])
 
-    for seed in seed:
+    for seed in seeds:
+        log_args = {}
+        local_vars = locals().copy()
+        for key, val in local_vars.items():
+            if val is None or (t := type(val)) == int or t == list or t == bool or t == str or t == float:
+                log_args[f'config/{key}'] = val
+
         print(f"Seed: {seed}")
         np.random.seed(seed)
         th.manual_seed(seed)
@@ -177,6 +184,7 @@ def joint_failure_sac(
                 'joint_failure_prob': joint_fail_prob,
                 'sample_failing_joints': True,
                 'provide_joint_fail_info_to_critic': provide_joint_fail_info_to_critic,
+                'provide_joint_fail_info_to_actor': provide_joint_fail_info_to_actor,
                 'actor_cspn_args': cspn_args,
                 'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
             }
@@ -189,10 +197,7 @@ def joint_failure_sac(
             name_prefix=run_name
         )]
         if not no_wandb:
-            log_args = vars(args).copy()
-            log_args_keys = list(log_args.keys())
-            for key in log_args_keys:
-                log_args[f'config/{key}'] = log_args.pop(key)
+
             wandb.log(log_args)
             run.config.update({
                 **sac_kwargs,
@@ -231,7 +236,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', '-s', type=int, nargs='+', required=True)
+    parser.add_argument('--seeds', '-s', type=int, nargs='+', required=True)
     parser.add_argument('--mlp_actor', action='store_true', help='Use a MLP actor')
     parser.add_argument('--num_envs', type=int, default=1, help='Number of parallel environments to run.')
     parser.add_argument('--timesteps', type=int, default=int(1e6), help='Total timesteps to train model.')
@@ -252,8 +257,10 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--learning_starts', type=int, default=1000,
                         help='Nr. of steps to act randomly in the beginning.')
-    parser.add_argument('--buffer_size', type=int, default=300_000, help='replay buffer size')
+    parser.add_argument('--buffer_size', type=int, default=1_000_000, help='replay buffer size')
     parser.add_argument('--joint_fail_prob', type=float, default=0.05, help="Joints can fail with this probability")
+    parser.add_argument('--provide_joint_fail_info_to_actor', '-fails_to_actor', action='store_true',
+                        help="Include joint failure info in actor state.")
     parser.add_argument('--provide_joint_fail_info_to_critic', '-fails_to_critic', action='store_true',
                         help="Include joint failure info in critic state.")
     # CSPN arguments
