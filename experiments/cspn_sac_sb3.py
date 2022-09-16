@@ -39,9 +39,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str,
                         help='Path to the pretrained model.')
     parser.add_argument('--no_wandb', action='store_true', help="Don't log this run in WandB")
-    parser.add_argument('--no_video', action='store_true',
-                        help="Don't record videos of the agent. NOTE: This requires "
-                             "LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so to be set.")
+    parser.add_argument('--no_video', action='store_true', help="Don't record videos of the agent.")
     # SAC arguments
     parser.add_argument('--ent_coef', type=float, default=0.1, help='Entropy temperature')
     parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4, help='Learning rate')
@@ -58,9 +56,6 @@ if __name__ == "__main__":
     parser.add_argument('--num_dist', '-I', type=int, default=3, help='Number of Gauss dists per pixel.')
     parser.add_argument('--num_sums', '-S', type=int, default=3, help='Number of sums per RV in each sum layer.')
     parser.add_argument('--dropout', type=float, default=0.0, help='Dropout to apply')
-    parser.add_argument('--no_relu', action='store_true',
-                        help='Don\'t use inner ReLU activations in the layers providing '
-                             'the CSPN parameters from the conditional.')
     parser.add_argument('--feat_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN feature layers.')
     parser.add_argument('--sum_param_layers', type=int, nargs='+',
@@ -77,6 +72,10 @@ if __name__ == "__main__":
 
     if not args.save_interval:
         args.save_interval = args.timesteps
+
+    assert os.environ.get('LD_PRELOAD') is None, "The LD_PRELOAD environment variable may not be set externally."
+    if args.no_video:
+        os.environ['LD_PRELOAD'] = os.environ.get('CONDA_PREFIX') + '/lib/libGLEW.so'
 
     if args.timesteps == 0:
         learn = False
@@ -187,7 +186,7 @@ if __name__ == "__main__":
                 'feat_layers': args.feat_layers,
                 'sum_param_layers': args.sum_param_layers,
                 'dist_param_layers': args.dist_param_layers,
-                'cond_layers_inner_act': nn.Identity if args.no_relu else nn.ReLU,
+                'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if args.no_relu else nn.ReLU,
                 'entropy_objective': args.objective,
                 'recurs_ent_approx_sample_size': args.recurs_sample_size,
                 'naive_ent_approx_sample_size': args.naive_sample_size,
@@ -208,7 +207,11 @@ if __name__ == "__main__":
             name_prefix=run_name
         )]
         if not args.no_wandb:
-            wandb.log(vars(args))
+            log_args = vars(args).copy()
+            log_args_keys = list(log_args.keys())
+            for key in log_args_keys:
+                log_args[f'config/{key}'] = log_args.pop(key)
+            wandb.log(log_args)
             run.config.update({
                 **sac_kwargs,
                 'machine': platform.node(),
