@@ -12,4 +12,5 @@ params:
   joint_fail_prob: 0.0
 
 grid:
+  provide_joint_fail_info_to_actor: [True, False]
   provide_joint_fail_info_to_critic: [True, False]

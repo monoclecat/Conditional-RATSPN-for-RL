@@ -54,7 +54,7 @@ params:
   learning_starts: 1000
   buffer_size: 1_000_000
   joint_fail_prob:
-  provide_joint_fail_info_to_actor: True
+  provide_joint_fail_info_to_actor:
   provide_joint_fail_info_to_critic:
   repetitions:
   cspn_depth:
