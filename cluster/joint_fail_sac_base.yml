@@ -1,0 +1,71 @@
+---
+# Slurm config bwuni gpu
+name: "SLURM"   # MUST BE "SLURM"
+partition: "gpu"  # "single" for cpu, "gpu_4" or gpu_8" for gpu
+job-name: "joint_fail_sac" # this will be the experiment's name in slurm
+num_parallel_jobs: 5  # max number of jobs executed in parallel
+ntasks: 1   #  leave that like it is
+cpus-per-task: 2   # there are 10 cores for each GPU
+mem-per-cpu: 10000  # in MB
+time: 1000   # in minutes
+sbatch_args: # gpus need to be explicitly requested using this
+  gres=gpu:1: ""   #and this
+#  nodelist: "node5"
+
+---
+name: "DEFAULT"
+
+# Required: Can also be set in DEFAULT
+path: &path /home/temp_store/andrew_delay/cluster
+repetitions: 1    # number of repeated runs for each parameter combination
+
+# Required for AbstractIterativeExperiments only. Can also be set in DEFAULT
+iterations: 5000  # number of iterations per repetition.
+
+# Optional: Can also be set in DEFAULT
+# Only change these values if you are sure you know what you are doing.
+reps_per_job: 1    # number of repetitions in each job. useful for paralellization. defaults to 1.
+reps_in_parallel: 1
+
+wandb:
+  project: JointFailureSAC 2t2c=M4n2yC1$h
+  group: &proj joint_fail_HalfCheetah
+  entity: monoclecat
+  log_interval: &log_int 20
+  log_model: true
+  model_name: joint_fail_sac_model
+
+params:
+  seeds: [10, 20, 30, 40, 50]
+  mlp_actor:
+  num_envs: 1
+  timesteps: 3000000
+  save_interval: 300000
+  log_interval: *log_int
+  env_name: HalfCheetah-v3
+  device: cuda
+  proj_name: *proj
+  log_dir: *path
+  load_model_path:
+  no_wandb: False
+  no_video: False
+  ent_coef: 0.1
+  learning_rate: 0.0003
+  learning_starts: 1000
+  buffer_size: 1_000_000
+  joint_fail_prob:
+  provide_joint_fail_info_to_actor: True
+  provide_joint_fail_info_to_critic:
+  repetitions:
+  cspn_depth:
+  num_dist:
+  num_sums:
+  dropout:
+  feat_layers:
+  sum_param_layers:
+  dist_param_layers:
+  objective:
+  recurs_sample_size:
+  naive_sample_size:
+
+---
