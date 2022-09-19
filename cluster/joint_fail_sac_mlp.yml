@@ -1,6 +1,7 @@
 ---
 name: "DEFAULT"
 import_path: 'joint_fail_sac_base.yml'
+import_exp: 'DEFAULT'
 
 params:
   mlp_actor: True
@@ -10,7 +11,10 @@ name: &name "no_joint_fail"
 params:
   run_name: *name
   joint_fail_prob: 0.0
-
-grid:
-  provide_joint_fail_info_to_actor: [True, False]
-  provide_joint_fail_info_to_critic: [True, False]
+---
+name: &name "test_local"
+params:
+  run_name: *name
+  joint_fail_prob: 0.0
+  timesteps: 1000
+  save_interval: 1000

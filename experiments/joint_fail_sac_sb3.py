@@ -1,3 +1,5 @@
+import time
+
 import gym
 import numpy as np
 import os
@@ -41,8 +43,6 @@ def joint_failure_sac(
         learning_starts: int,
         buffer_size: int,
         joint_fail_prob: float,
-        provide_joint_fail_info_to_actor: bool,
-        provide_joint_fail_info_to_critic: bool,
         repetitions: Optional[int],
         cspn_depth: Optional[int],
         num_dist: Optional[int],
@@ -102,7 +102,6 @@ def joint_failure_sac(
             monitor_gym=True,
             reinit=True,
             force=True,
-            settings=wandb.Settings(start_method="fork"),
         )
 
     joint_fail_kwargs = {'joint_failure_prob': joint_fail_prob, 'sample_failing_joints': True}

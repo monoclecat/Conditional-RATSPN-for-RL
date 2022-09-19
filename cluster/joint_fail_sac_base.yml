@@ -28,7 +28,7 @@ reps_per_job: 1    # number of repetitions in each job. useful for paralellizati
 reps_in_parallel: 1
 
 wandb:
-  project: JointFailureSAC 2t2c=M4n2yC1$h
+  project: JointFailureSAC
   group: &proj joint_fail_HalfCheetah
   entity: monoclecat
   log_interval: &log_int 20
@@ -36,7 +36,6 @@ wandb:
   model_name: joint_fail_sac_model
 
 params:
-  seeds: [10, 20, 30, 40, 50]
   mlp_actor:
   num_envs: 1
   timesteps: 3000000
@@ -48,14 +47,12 @@ params:
   log_dir: *path
   load_model_path:
   no_wandb: False
-  no_video: False
+  no_video: True
   ent_coef: 0.1
   learning_rate: 0.0003
   learning_starts: 1000
   buffer_size: 1_000_000
   joint_fail_prob:
-  provide_joint_fail_info_to_actor:
-  provide_joint_fail_info_to_critic:
   repetitions:
   cspn_depth:
   num_dist:
@@ -67,5 +64,8 @@ params:
   objective:
   recurs_sample_size:
   naive_sample_size:
+
+grid:
+  seed: [10, 20, 30, 40, 50]
 
 ---
