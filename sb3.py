@@ -1,5 +1,3 @@
-from abc import ABC
-
 import stable_baselines3 as sb3
 import gym
 from stable_baselines3.sac.policies import SACPolicy, Actor
@@ -15,7 +13,7 @@ from stable_baselines3.common.torch_layers import (
     get_actor_critic_arch,
 )
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
+from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule, TrainFreq, RolloutReturn
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.type_aliases import Schedule
 import warnings
@@ -34,6 +32,7 @@ from stable_baselines3.common.utils import zip_strict
 
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
+
 
 def polyak_update(
         params: Iterable[th.nn.Parameter],
@@ -55,13 +54,15 @@ class JointFailureActor(BasePolicy):
         super(JointFailureActor, self).__init__(*args, **kwargs)
 
     def extract_features(self, obs: th.Tensor) -> Tuple[th.Tensor, Optional[th.Tensor]]:
-        joint_failure_info = None
-        if self.joint_failure_info_in_obs:
-            obs, joint_failure_info = th.hsplit(obs, self.observation_space.shape)
-            assert (isinstance(self, CustomMlpActor) and joint_failure_info.shape[1] == 0) or \
-                   (isinstance(self, CspnActor) and joint_failure_info.shape[1] == self.action_space.shape[0] * 2)
+        obs, joint_failure_info = th.hsplit(obs, self.observation_space.shape)
+        assert (isinstance(self, CustomMlpActor) and joint_failure_info.shape[1] == 0) or \
+               (isinstance(self, CspnActor) and joint_failure_info.shape[1] == self.action_space.shape[0] * 2)
         obs = super(JointFailureActor, self).extract_features(obs)
-        return obs, joint_failure_info.to(dtype=obs.dtype)
+        if self.joint_failure_info_in_obs:
+            joint_failure_info = joint_failure_info.to(dtype=obs.dtype)
+        else:
+            joint_failure_info = None
+        return obs, joint_failure_info
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         action, _, _ = self.action_entropy(
@@ -170,7 +171,7 @@ class CspnActor(JointFailureActor):
     def _sample(self, condition: th.Tensor, is_mpe: bool, joint_failure_info: Optional[th.Tensor]):
         evidence = None
         if joint_failure_info is not None:
-            joint_failure_info = joint_failure_info.to(dtype=self.cspn.dtype)
+            joint_failure_info = joint_failure_info.clone().to(dtype=self.cspn.dtype)
             failed_joints, evidence = th.hsplit(joint_failure_info, 2)
             evidence[failed_joints == 0.0] = th.nan
             evidence = evidence.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).atanh()
@@ -194,7 +195,10 @@ class CspnActor(JointFailureActor):
         features, joint_failure_info = self.extract_features(obs)
         action = self._sample(condition=features, is_mpe=deterministic, joint_failure_info=joint_failure_info)
         entropy = ent_log = None
-        failed_joints, _ = th.hsplit(joint_failure_info, 2)
+        if self.joint_failure_info_in_obs:
+            failed_joints, _ = th.hsplit(joint_failure_info, 2)
+        else:
+            failed_joints = None
         if compute_entropy:
             if self.entropy_objective == 'recursive':
                 entropy, ent_log = self.cspn.recursive_entropy_approx(
@@ -295,7 +299,7 @@ class JointFailurePolicy(SACPolicy):
             deterministic: bool = False,
             log_ent_metrics: bool = False,
             compute_entropy: bool = False
-    ):
+    ) -> Tuple[th.Tensor, th.Tensor, Optional[th.Tensor], Optional[dict]]:
         joints_failed = self.sample_joint_failures(batch_size=observation.shape[0])
         observation = th.hstack((observation, joints_failed))
         unscaled_action, entropy, ent_log = self.actor.action_entropy(
@@ -308,13 +312,24 @@ class JointFailurePolicy(SACPolicy):
         failed_joints, samples = th.hsplit(joints_failed, 2)
         action_mask = -(failed_joints - 1)
         unscaled_action = unscaled_action * action_mask + samples
-        return unscaled_action, entropy, ent_log
+        return unscaled_action, joints_failed, entropy, ent_log
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        unscaled_action, entropy, ent_log = self.action_entropy_with_joint_failure(
+        unscaled_action, joints_failed, entropy, ent_log = self.action_entropy_with_joint_failure(
             observation=observation, deterministic=deterministic, log_ent_metrics=False, compute_entropy=False
         )
         return unscaled_action
+
+    def _update_actor_kwargs(
+            self,
+            net_kwargs: Dict[str, Any],
+            features_extractor: Optional[BaseFeaturesExtractor] = None,
+    ) -> Dict[str, Any]:
+        actor_kwargs = self._update_features_extractor(net_kwargs, features_extractor)
+        assert isinstance(actor_kwargs['features_extractor'], FlattenExtractor)
+        actor_kwargs['features_dim'] = actor_kwargs['observation_space'].low.shape[0]
+        actor_kwargs['joint_failure_info_in_obs'] = self.provide_joint_fail_info_to_actor
+        return actor_kwargs
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
@@ -330,9 +345,8 @@ class CspnPolicy(JointFailurePolicy):
         super(CspnPolicy, self).__init__(*args, **kwargs)
 
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CspnActor:
-        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        actor_kwargs = self._update_actor_kwargs(self.actor_kwargs, features_extractor)
         actor_kwargs['squash_output'] = self.squash_output
-        actor_kwargs['joint_failure_info_in_obs'] = self.provide_joint_fail_info_to_actor
         actor_kwargs.update(self.actor_cspn_args)
         return CspnActor(**actor_kwargs).to(self.device)
 
@@ -386,10 +400,7 @@ class CustomMlpPolicy(JointFailurePolicy):
         super(JointFailurePolicy, self)._build(lr_schedule)
 
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> CustomMlpActor:
-        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
-        assert isinstance(actor_kwargs['features_extractor'], FlattenExtractor)
-        actor_kwargs['features_dim'] = actor_kwargs['observation_space'].low.shape[0]
-        actor_kwargs['joint_failure_info_in_obs'] = self.provide_joint_fail_info_to_actor
+        actor_kwargs = self._update_actor_kwargs(self.actor_kwargs, features_extractor)
         return CustomMlpActor(**actor_kwargs).to(self.device)
 
 
@@ -440,7 +451,7 @@ class CspnSAC(SAC):
 
             # Action by the current actor for the sampled state
             # actions_pi, entropy, _ = self.actor.action_entropy(replay_data.observations, log_ent_metrics=False)
-            actions_pi, entropy, _ = self.policy.action_entropy_with_joint_failure(
+            actions_pi, actions_pi_joints_failed, entropy, _ = self.policy.action_entropy_with_joint_failure(
                 observation=replay_data.observations, deterministic=False, log_ent_metrics=False, compute_entropy=True
             )
             entropy = entropy.reshape(-1, 1)
@@ -467,7 +478,7 @@ class CspnSAC(SAC):
 
             with th.no_grad():
                 # Select action according to policy
-                next_actions, next_entropy, _ = self.policy.action_entropy_with_joint_failure(
+                next_actions, next_actions_joint_failed, next_entropy, _ = self.policy.action_entropy_with_joint_failure(
                     observation=replay_data.next_observations,
                     deterministic=False,
                     log_ent_metrics=False,
