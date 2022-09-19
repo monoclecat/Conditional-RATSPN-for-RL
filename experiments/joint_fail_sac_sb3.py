@@ -2,6 +2,8 @@ import gym
 import numpy as np
 import os
 import platform
+import wandb
+from wandb.integration.sb3 import WandbCallback
 
 import torch as th
 import torch.nn as nn
@@ -11,16 +13,16 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
-from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.sac import MlpPolicy
+# from stable_baselines3.common.callbacks import CheckpointCallback
 
 from cspn import CSPN, print_cspn_params
 from sb3 import *
 from utils import non_existing_folder_name
+from envs.joint_failure_wrapper import wrap_in_float_and_joint_fail
 
 
 def joint_failure_sac(
-        seeds: List[int],
+        seed: int,
         mlp_actor: bool,
         num_envs: int,
         timesteps: int,
@@ -73,163 +75,155 @@ def joint_failure_sac(
         assert os.path.exists(log_dir), f"The log_dir doesn't exist! {log_dir}"
 
     if not no_wandb:
-        import wandb
-        from wandb.integration.sb3 import WandbCallback
         wandb.login(key=os.environ['WANDB_API_KEY'])
 
-    for seed in seeds:
-        log_args = {}
-        local_vars = locals().copy()
-        for key, val in local_vars.items():
-            if val is None or (t := type(val)) == int or t == list or t == bool or t == str or t == float:
-                log_args[f'config/{key}'] = val
+    print(f"Seed: {seed}")
+    np.random.seed(seed)
+    th.manual_seed(seed)
 
-        print(f"Seed: {seed}")
-        np.random.seed(seed)
-        th.manual_seed(seed)
+    run_name = f"{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
+    run_name_seed = f"{run_name}_s{seed}"
+    log_path = os.path.join(log_dir, proj_name)
+    log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
+    monitor_path = os.path.join(log_path, "monitor")
+    model_path = os.path.join(log_path, "models")
+    video_path = os.path.join(log_path, "video")
+    for d in [log_path, monitor_path, model_path, video_path]:
+        os.makedirs(d, exist_ok=True)
 
-        run_name = f"{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
-        run_name_seed = f"{run_name}_s{seed}"
-        log_path = os.path.join(log_dir, proj_name)
-        log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
-        monitor_path = os.path.join(log_path, "monitor")
-        model_path = os.path.join(log_path, "models")
-        video_path = os.path.join(log_path, "video")
-        for d in [log_path, monitor_path, model_path, video_path]:
-            os.makedirs(d, exist_ok=True)
-
-        if not no_wandb:
-            run = wandb.init(
-                dir=log_path,
-                project=proj_name,
-                name=run_name_seed,
-                group=run_name,
-                sync_tensorboard=True,
-                monitor_gym=True,
-                reinit=True,
-                force=True,
-                settings=wandb.Settings(start_method="fork"),
-            )
-
-        env = make_vec_env(
-            env_id=env_name,
-            n_envs=num_envs,
-            monitor_dir=monitor_path,
-            wrapper_class=FloatWrapper,
-            # vec_env_cls=SubprocVecEnv,
-            # vec_env_kwargs={'start_method': 'fork'},
+    run = None
+    if not no_wandb:
+        run = wandb.init(
+            dir=log_path,
+            project=proj_name,
+            name=run_name_seed,
+            group=run_name,
+            sync_tensorboard=True,
+            monitor_gym=True,
+            reinit=True,
+            force=True,
+            settings=wandb.Settings(start_method="fork"),
         )
-        if not no_video:
-            # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
-            env = VecVideoRecorder(env, video_folder=video_path,
-                                   record_video_trigger=lambda x: x % save_interval == 0,
-                                   video_length=200)
 
-        if load_model_path:
-            model = CspnSAC.load(load_model_path, env)
-            # model.tensorboard_log = None
-            # model.vi_aux_resp_grad_mode = vi_aux_resp_grad_mode
-            # model_name = f"sac_loadedpretrained_{env}_{proj_name}_{run_name_seed}"
-            model.seed = seed
-            model.learning_starts = learning_starts
-            # model.learning_rate = learning_rate
-            sac_kwargs = {
-                'env': model.env,
-                'seed': model.seed,
-                'verbose': model.verbose,
-                'ent_coef': model.ent_coef,
-                'learning_starts': model.learning_starts,
-                'device': model.device,
-                'learning_rate': model.learning_rate,
-                'policy_kwargs': {
-                    'cspn_args': {
-                        'R': model.actor.cspn.config.R,
-                        'D': model.actor.cspn.config.D,
-                        'I': model.actor.cspn.config.I,
-                        'S': model.actor.cspn.config.S,
-                        'dropout': model.actor.cspn.config.dropout,
-                        'sum_param_layers': model.actor.cspn.config.sum_param_layers,
-                        'dist_param_layers': model.actor.cspn.config.dist_param_layers,
-                        'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
-                        'vi_ent_approx_sample_size': model.actor.vi_ent_approx_sample_size,
-                    }
+    joint_fail_kwargs = {'joint_failure_prob': joint_fail_prob, 'sample_failing_joints': True}
+    env = make_vec_env(
+        env_id=env_name,
+        n_envs=num_envs,
+        monitor_dir=monitor_path,
+        wrapper_class=wrap_in_float_and_joint_fail,
+        wrapper_kwargs=joint_fail_kwargs,
+        # vec_env_cls=SubprocVecEnv,
+        # vec_env_kwargs={'start_method': 'fork'},
+    )
+    if not no_wandb:
+        run.config.update({
+            **joint_fail_kwargs,
+            'machine': platform.node(),
+        })
+
+    if not no_video:
+        # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
+        env = VecVideoRecorder(env, video_folder=video_path,
+                               record_video_trigger=lambda x: x % save_interval == 0,
+                               video_length=200)
+
+    if load_model_path:
+        model = EntropyLoggingSAC.load(load_model_path, env)
+        # model.tensorboard_log = None
+        # model.vi_aux_resp_grad_mode = vi_aux_resp_grad_mode
+        # model_name = f"sac_loadedpretrained_{env}_{proj_name}_{run_name_seed}"
+        model.seed = seed
+        model.learning_starts = learning_starts
+        # model.learning_rate = learning_rate
+        sac_kwargs = {
+            'env': model.env,
+            'seed': model.seed,
+            'verbose': model.verbose,
+            'ent_coef': model.ent_coef,
+            'learning_starts': model.learning_starts,
+            'device': model.device,
+            'learning_rate': model.learning_rate,
+            'policy_kwargs': {
+                'cspn_args': {
+                    'R': model.actor.cspn.config.R,
+                    'D': model.actor.cspn.config.D,
+                    'I': model.actor.cspn.config.I,
+                    'S': model.actor.cspn.config.S,
+                    'dropout': model.actor.cspn.config.dropout,
+                    'sum_param_layers': model.actor.cspn.config.sum_param_layers,
+                    'dist_param_layers': model.actor.cspn.config.dist_param_layers,
+                    'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
+                    'vi_ent_approx_sample_size': model.actor.vi_ent_approx_sample_size,
                 }
             }
-        else:
-            sac_kwargs = {
-                'env': env,
-                'seed': seed,
-                'verbose': 2,
-                'ent_coef': ent_coef,
-                'learning_starts': learning_starts,
-                'device': device,
-                'learning_rate': learning_rate,
-                'buffer_size': buffer_size,
-            }
-            cspn_args = {
-                'R': repetitions,
-                'D': cspn_depth,
-                'I': num_dist,
-                'S': num_sums,
-                'dropout': dropout,
-                'feat_layers': feat_layers,
-                'sum_param_layers': sum_param_layers,
-                'dist_param_layers': dist_param_layers,
-                'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if no_relu else nn.ReLU,
-                'entropy_objective': objective,
-                'recurs_ent_approx_sample_size': recurs_sample_size,
-                'naive_ent_approx_sample_size': naive_sample_size,
-            }
-            sac_kwargs['policy_kwargs'] = {
-                'joint_failure_prob': joint_fail_prob,
-                'sample_failing_joints': True,
-                'provide_joint_fail_info_to_critic': provide_joint_fail_info_to_critic,
-                'provide_joint_fail_info_to_actor': provide_joint_fail_info_to_actor,
-                'actor_cspn_args': cspn_args,
-                'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
-            }
-            model = CspnSAC(policy=CustomMlpPolicy if mlp_actor else CspnPolicy, **sac_kwargs)
-            # model_name = f"sac_{'mlp' if mlp_actor else 'cspn'}_{env_name}_{exp_name}_s{seed}"
+        }
+    else:
+        sac_kwargs = {
+            'env': env,
+            'seed': seed,
+            'verbose': 2,
+            'ent_coef': ent_coef,
+            'learning_starts': learning_starts,
+            'device': device,
+            'learning_rate': learning_rate,
+            'buffer_size': buffer_size,
+        }
+        cspn_args = {
+            'R': repetitions,
+            'D': cspn_depth,
+            'I': num_dist,
+            'S': num_sums,
+            'dropout': dropout,
+            'feat_layers': feat_layers,
+            'sum_param_layers': sum_param_layers,
+            'dist_param_layers': dist_param_layers,
+            'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if no_relu else nn.ReLU,
+            'entropy_objective': objective,
+            'recurs_ent_approx_sample_size': recurs_sample_size,
+            'naive_ent_approx_sample_size': naive_sample_size,
+        }
+        sac_kwargs['policy_kwargs'] = {
+            'actor_cspn_args': cspn_args,
+            'joint_failure_info_in_obs': True,
+            'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
+        }
+        model = EntropyLoggingSAC(policy=CustomMlpPolicy if mlp_actor else CspnPolicy, **sac_kwargs)
+        # model_name = f"sac_{'mlp' if mlp_actor else 'cspn'}_{env_name}_{exp_name}_s{seed}"
 
-        callback = [CheckpointCallback(
-            save_freq=save_interval,
-            save_path=model_path,
-            name_prefix=run_name
-        )]
-        if not no_wandb:
+    callback = [CheckpointCallback(
+        save_freq=save_interval,
+        save_path=model_path,
+        name_prefix=run_name
+    )]
+    if not no_wandb:
+        run.config.update(sac_kwargs)
+        callback.append(WandbCallback(
+            # gradient_save_freq=10000,
+            # model_save_path=model_path,
+            # model_save_freq=save_interval,
+            verbose=2,
+        ))
 
-            wandb.log(log_args)
-            run.config.update({
-                **sac_kwargs,
-                'machine': platform.node(),
-            })
-            callback.append(WandbCallback(
-                # gradient_save_freq=10000,
-                # model_save_path=model_path,
-                # model_save_freq=save_interval,
-                verbose=2,
-            ))
+    logger = configure(log_path, ["stdout", "csv", "tensorboard"])
+    logger.output_formats[0].max_length = 50
+    model.set_logger(logger)
 
-        logger = configure(log_path, ["stdout", "csv", "tensorboard"])
-        logger.output_formats[0].max_length = 50
-        model.set_logger(logger)
+    print(model.actor)
+    print(model.critic)
+    if isinstance(model.actor, CspnActor):
+        print_cspn_params(model.actor.cspn)
+    else:
+        print(f"Actor MLP has {sum(p.numel() for p in model.actor.parameters() if p.requires_grad)} parameters.")
 
-        print(model.actor)
-        print(model.critic)
-        if isinstance(model.actor, CspnActor):
-            print_cspn_params(model.actor.cspn)
-        else:
-            print(f"Actor MLP has {sum(p.numel() for p in model.actor.parameters() if p.requires_grad)} parameters.")
-
-        # noinspection PyTypeChecker
-        model.learn(
-            total_timesteps=timesteps,
-            log_interval=log_interval,
-            reset_num_timesteps=not model_path,
-            tb_log_name=f"{proj_name}/{run_name_seed}",
-            callback=callback,
-        )
-        run.finish()
+    # noinspection PyTypeChecker
+    model.learn(
+        total_timesteps=timesteps,
+        log_interval=log_interval,
+        reset_num_timesteps=not model_path,
+        tb_log_name=f"{proj_name}/{run_name_seed}",
+        callback=callback,
+    )
+    run.finish()
 
 
 if __name__ == "__main__":
@@ -282,5 +276,7 @@ if __name__ == "__main__":
                         help='Number of samples to approximate recursive entropy with. ')
     parser.add_argument('--naive_sample_size', type=int, default=50,
                         help='Number of samples to approximate naive entropy with. ')
-    args = parser.parse_args()
-    joint_failure_sac(**vars(args))
+    kwargs = vars(parser.parse_args())
+    seeds = kwargs.pop('seeds')
+    for seed in seeds:
+        joint_failure_sac(seed=seed, **kwargs)
