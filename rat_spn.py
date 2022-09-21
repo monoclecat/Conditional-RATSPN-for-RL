@@ -1023,7 +1023,10 @@ class RatSpn(nn.Module):
                         n=sample_size, layer_index=layer_index - 1, is_mpe=False,
                         do_sample_postprocessing=False,
                     )
-                    samples = ctx.sample.unsqueeze(-2)
+                    samples = ctx.sample
+                    if samples.dim() == 4:
+                        samples = samples.unsqueeze(-1)
+                    samples = samples.unsqueeze(-2)
                     # We sampled all ic nodes of each repetition in the child layer
                     if marginal_mask is not None:
                         samples[marginal_mask.expand_as(samples)] = th.nan
