@@ -76,7 +76,7 @@ class RatSpnConfig:
     def assert_valid(self):
         """Check whether the configuration is valid."""
         self.F = check_valid(self.F, int, 1)
-        self.D = check_valid(self.D, int, 1)
+        self.D = check_valid(self.D, int, 1, allow_none=True)
         self.C = check_valid(self.C, int, 1)
         self.S = check_valid(self.S, int, 1)
         self.R = check_valid(self.R, int, 1)
@@ -280,6 +280,8 @@ class RatSpn(nn.Module):
         self._inner_layers.append(prodlayer)
         sum_in_channels = self.config.I ** 2
 
+        if self.config.D is None:
+            self.config.D = int(np.log2(self.config.F))
         # Sum and product layers
         for i in np.arange(start=self.config.D - 1, stop=0, step=-1):
             # Current in_features

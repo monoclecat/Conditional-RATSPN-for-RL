@@ -69,7 +69,7 @@ class CspnActor(BasePolicy):
             features_extractor: nn.Module,
             features_dim: int,
             R: int,
-            D: int,
+            D: Optional[int],
             I: int,
             S: int,
             dropout: float,
