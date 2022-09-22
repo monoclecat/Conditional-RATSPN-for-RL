@@ -152,7 +152,9 @@ def joint_failure_sac(
                     'sum_param_layers': model.actor.cspn.config.sum_param_layers,
                     'dist_param_layers': model.actor.cspn.config.dist_param_layers,
                     'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
-                    'vi_ent_approx_sample_size': model.actor.vi_ent_approx_sample_size,
+                    'entropy_objective': None,
+                    'recurs_ent_approx_sample_size': None,
+                    'naive_ent_approx_sample_size': None,
                 }
             }
         }
@@ -252,10 +254,6 @@ if __name__ == "__main__":
                         help='Nr. of steps to act randomly in the beginning.')
     parser.add_argument('--buffer_size', type=int, default=1_000_000, help='replay buffer size')
     parser.add_argument('--joint_fail_prob', type=float, default=0.05, help="Joints can fail with this probability")
-    parser.add_argument('--provide_joint_fail_info_to_actor', '-fails_to_actor', action='store_true',
-                        help="Include joint failure info in actor state.")
-    parser.add_argument('--provide_joint_fail_info_to_critic', '-fails_to_critic', action='store_true',
-                        help="Include joint failure info in critic state.")
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,
