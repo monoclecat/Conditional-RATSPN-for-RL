@@ -81,7 +81,7 @@ def joint_failure_sac(
     np.random.seed(seed)
     th.manual_seed(seed)
 
-    run_name = f"{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
+    run_name = f"{'PRETRAINED' if load_model_path else ''}_{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
     run_name_seed = f"{run_name}_s{seed}"
     log_path = os.path.join(log_dir, proj_name)
     log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
@@ -124,7 +124,7 @@ def joint_failure_sac(
         # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
         env = VecVideoRecorder(env, video_folder=video_path,
                                record_video_trigger=lambda x: x % save_interval == 0,
-                               video_length=200)
+                               video_length=1000)
 
     if load_model_path:
         model = EntropyLoggingSAC.load(load_model_path, env)
@@ -152,9 +152,9 @@ def joint_failure_sac(
                     'sum_param_layers': model.actor.cspn.config.sum_param_layers,
                     'dist_param_layers': model.actor.cspn.config.dist_param_layers,
                     'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
-                    'entropy_objective': None,
-                    'recurs_ent_approx_sample_size': None,
-                    'naive_ent_approx_sample_size': None,
+                    'entropy_objective': model.actor.entropy_objective,
+                    'recurs_ent_approx_sample_size': model.actor.recurs_ent_approx_sample_size,
+                    'naive_ent_approx_sample_size': model.actor.naive_ent_approx_sample_size,
                 }
             }
         }
@@ -220,11 +220,12 @@ def joint_failure_sac(
     model.learn(
         total_timesteps=timesteps,
         log_interval=log_interval,
-        reset_num_timesteps=not model_path,
+        reset_num_timesteps=load_model_path is not None,
         tb_log_name=f"{proj_name}/{run_name_seed}",
         callback=callback,
     )
-    run.finish()
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":
@@ -267,7 +268,7 @@ if __name__ == "__main__":
                         help='List of sizes of the CSPN sum param layers.')
     parser.add_argument('--dist_param_layers', type=int, nargs='+',
                         help='List of sizes of the CSPN dist param layers.')
-    parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.')
+    parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.', required=False)
     # Entropy arguments
     parser.add_argument('--recurs_sample_size', type=int, default=5,
                         help='Number of samples to approximate recursive entropy with. ')
