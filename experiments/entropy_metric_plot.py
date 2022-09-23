@@ -23,7 +23,7 @@ if __name__ == "__main__":
     assert os.path.isdir(args.dir), f"Path {args.dir} is not a directory!"
 
     dir_re = ['recursive_aux_no_grad', 'recursive',
-              'huber', 'huber_hack', 'huber_hack_reverse',
+              'huber', 'huber_hack',
               'naive']
 
     child_dirs = os.listdir(args.dir)
@@ -31,13 +31,10 @@ if __name__ == "__main__":
     recursive_set = set(filter(re.compile('^recursive').match, child_dirs))
     huber_set = set(filter(re.compile('^huber').match, child_dirs))
     huber_hack_set = set(filter(re.compile('^huber_hack').match, child_dirs))
-    huber_hack_reverse_set = set(filter(re.compile('^huber_hack_reverse').match, child_dirs))
     naive_set = set(filter(re.compile('^naive').match, child_dirs))
 
     recursive_set -= recursive_aux_no_grad_set
-    huber_hack_set -= huber_hack_reverse_set
     huber_set -= huber_hack_set
-    huber_set -= huber_hack_reverse_set
 
     def color_and_dirs(color, dirs):
         return {'color': color, 'dirs': dirs}

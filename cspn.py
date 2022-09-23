@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from torch import nn
 
 from layers import CrossProduct, Sum
-from distributions import GaussianMixture
 
 from rat_spn import RatSpn, RatSpnConfig
 import matplotlib.pyplot as plt
@@ -166,11 +165,6 @@ class CSPN(RatSpn):
         del self._sampling_root.weight_param
         self._sampling_root.weight_param = placeholder
 
-        if isinstance(self._leaf, GaussianMixture):
-            placeholder = th.zeros_like(self._leaf.sum.weight_param)
-            del self._leaf.sum.weight_param
-            self._leaf.sum.weight_param = placeholder
-
         placeholder = th.zeros_like(self._leaf.base_leaf.mean_param)
         del self._leaf.base_leaf.mean_param
         del self._leaf.base_leaf.std_param
@@ -238,11 +232,6 @@ class CSPN(RatSpn):
         self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self.root.weight_param.numel()))
         # print(f"Root sum layer has {self.root.weight_param.numel()} weights.")
 
-        if isinstance(self._leaf, GaussianMixture):
-            self.sum_param_heads.append(nn.Linear(sum_layer_sizes[-1], self._leaf.sum.weight_param.numel()))
-            # print(f"A param head was added for the sum layer of the GaussianMixture leaves, "
-                  # f"having {self._leaf.sum.weight_param.numel()} weights.")
-
         # dist_layer_sizes = [int(feature_dim * 10 ** (-i)) for i in range(1 + self.config.fc_dist_param_layers)]
         dist_layer_sizes = [feature_dim]
         if self.config.dist_param_layers:
@@ -300,13 +289,6 @@ class CSPN(RatSpn):
         weight_shape = (num_conditionals, 1, 1, 1, 1)
         self._sampling_root.weight_param = th.ones(weight_shape, device=self.device).mul_(1/self.config.C).log_()
 
-        # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
-        if isinstance(self._leaf, GaussianMixture):
-            weight_shape = (num_conditionals, self._leaf.sum.in_features, self._leaf.sum.in_channels,
-                            self._leaf.sum.out_channels, self._leaf.sum.num_repetitions)
-            weights = self.sum_param_heads[i+1](sum_weights_pre_output).view(weight_shape)
-            self._leaf.sum.weight_param = F.log_softmax(weights, dim=2)
-
         # Set bounded weights of the Gaussian distributions in the leaves
         dist_param_shape = (num_conditionals, self._leaf.base_leaf.in_features, self.config.I, self.config.R)
         dist_weights_pre_output = self.dist_layers(features)
@@ -337,12 +319,6 @@ class CSPN(RatSpn):
         # Sampling root weights need to have 5 dims as well
         weight_shape = (0, 1, 1, 1, 1)
         self._sampling_root.weight_param = th.zeros(weight_shape).to(self.device)
-
-        # Set normalized weights of the Gaussian Mixture leaf layer if it exists.
-        if isinstance(self._leaf, GaussianMixture):
-            weight_shape = (0, self._leaf.sum.in_features, self._leaf.sum.in_channels,
-                            self._leaf.sum.out_channels, self._leaf.sum.num_repetitions)
-            self._leaf.sum.weight_param = th.zeros(weight_shape)
 
         # Set bounded weights of the Gaussian distributions in the leaves
         dist_param_shape = (0, self._leaf.base_leaf.in_features, self.config.I, self.config.R)

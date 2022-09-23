@@ -15,7 +15,7 @@ from base_distributions import Leaf
 from layers import CrossProduct, Sum
 from type_checks import check_valid
 from utils import *
-from distributions import IndependentMultivariate, GaussianMixture, truncated_normal_
+from distributions import IndependentMultivariate, truncated_normal_
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,6 @@ class RatSpnConfig:
     leaf_base_class: Type  # Type of the leaf base class (Normal, Bernoulli, etc)
     leaf_base_kwargs: Dict  # Parameters for the leaf base class, such as
     #                   tanh_factor: float  # If set, tanh will be applied to samples and taken times this factor.
-    gmm_leaves: bool  # If true, the leaves are Gaussian mixtures
     """
 
     is_ratspn: bool = True
@@ -59,7 +58,6 @@ class RatSpnConfig:
     dropout: float = None
     leaf_base_class: Type = None
     leaf_base_kwargs: Dict = None
-    gmm_leaves: bool = False
     tanh_squash: bool = None
 
     @property
@@ -266,7 +264,7 @@ class RatSpn(nn.Module):
         # Partition:        Cross products of all child-regions
 
         # Construct leaf
-        self._leaf = self._build_input_distribution(gmm_leaves=self.config.gmm_leaves)
+        self._leaf = self._build_input_distribution()
 
         self._inner_layers = nn.ModuleList()
         prod_in_channels = self.config.I
@@ -312,25 +310,18 @@ class RatSpn(nn.Module):
             th.ones(size=(1, 1, self.config.C, 1, 1)) * th.tensor(1 / self.config.C), requires_grad=False
         )
 
-    def _build_input_distribution(self, gmm_leaves):
+    def _build_input_distribution(self):
         """Construct the input distribution layer."""
         # Cardinality is the size of the region in the last partitions
         cardinality = np.ceil(self.config.F / (2 ** self.config.D)).astype(int)
-        if gmm_leaves:
-            return GaussianMixture(in_features=self.config.F, out_channels=self.config.I, gmm_modes=self.config.S,
-                                   num_repetitions=self.config.R, cardinality=cardinality, dropout=self.config.dropout,
-                                   tanh_squash=self.config.tanh_squash,
-                                   leaf_base_class=self.config.leaf_base_class,
-                                   leaf_base_kwargs=self.config.leaf_base_kwargs)
-        else:
-            return IndependentMultivariate(
-                in_features=self.config.F, out_channels=self.config.I,
-                num_repetitions=self.config.R, cardinality=cardinality, dropout=self.config.dropout,
-                tanh_squash=self.config.tanh_squash,
-                leaf_base_class=self.config.leaf_base_class,
-                leaf_base_kwargs=self.config.leaf_base_kwargs,
-                ratspn=self.config.is_ratspn,
-            )
+        return IndependentMultivariate(
+            in_features=self.config.F, out_channels=self.config.I,
+            num_repetitions=self.config.R, cardinality=cardinality, dropout=self.config.dropout,
+            tanh_squash=self.config.tanh_squash,
+            leaf_base_class=self.config.leaf_base_class,
+            leaf_base_kwargs=self.config.leaf_base_kwargs,
+            ratspn=self.config.is_ratspn,
+        )
 
     @property
     def device(self):
