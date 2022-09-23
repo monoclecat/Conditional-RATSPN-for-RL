@@ -852,7 +852,7 @@ class RatSpn(nn.Module):
 
     def huber_entropy_lb(self, layer_index: int = None, verbose=True,
                          detach_weights: bool = False, add_sub_weight_ent: bool = False,
-                         detach_weight_ent_subtraction: bool = False, marginal_mask: th.Tensor = None):
+                         marginal_mask: th.Tensor = None):
         """
         Calculate the entropy lower bound of the SPN as in Huber '08.
 
@@ -862,8 +862,6 @@ class RatSpn(nn.Module):
             detach_weights: If True, the sum weights are detached for computing the entropy lower bound.
             add_sub_weight_ent: If True, the weight entropies are added and subtracted to the lower bound to
                 introduce a grad that keeps weight entropies of intermediate layers up
-            detach_weight_ent_subtraction: If True, the subtraction of the weight_entropy is detached instead of the
-                addition.
         Returns:
             Tuple of entropy lower bound and logging dict
 
@@ -935,10 +933,7 @@ class RatSpn(nn.Module):
 
                 if i <= self.max_layer_index and add_sub_weight_ent:
                     we_term = weight_entropy.unsqueeze(2).unsqueeze(-1)
-                    if detach_weight_ent_subtraction:
-                        log_probs = log_probs - we_term.detach() + we_term
-                    else:
-                        log_probs = log_probs - we_term + we_term.detach()
+                    log_probs = log_probs - we_term + we_term.detach()
 
                 if i == self.max_layer_index:
                     log_probs = log_probs.logsumexp(-1)
