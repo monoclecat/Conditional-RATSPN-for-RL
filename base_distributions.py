@@ -12,7 +12,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from utils import Sample
-from clipper import DistributionClipper
 from layers import AbstractLayer, Sum
 from type_checks import check_valid
 
