@@ -81,7 +81,7 @@ def joint_failure_sac(
     np.random.seed(seed)
     th.manual_seed(seed)
 
-    run_name = f"{'PRETRAINED' if load_model_path else ''}_{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
+    run_name = f"{'PRETRAINED_' if load_model_path else ''}{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
     run_name_seed = f"{run_name}_s{seed}"
     log_path = os.path.join(log_dir, proj_name)
     log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
