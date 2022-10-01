@@ -38,7 +38,7 @@ class CspnConfig(RatSpnConfig):
     conv_pooling_stride: int = 3
     sum_param_layers: list = None
     dist_param_layers: list = None
-    cond_layers_inner_act: Type[nn.Module] = nn.ReLU
+    cond_layers_inner_act: Type[nn.Module] = nn.LeakyReLU
 
     def __setattr__(self, key, value):
         if hasattr(self, key):
