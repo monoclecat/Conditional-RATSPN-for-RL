@@ -33,7 +33,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_abs_mean', '-mean', type=int, default=20)
     parser.add_argument('--objective', '-obj', type=str, help='Entropy objective to maximize.',
                         choices=['recursive_aux_no_grad', 'recursive',
-                                 'huber', 'huber_hack', 'huber_hack_reverse',
+                                 'huber', 'huber_hack',
                                  'naive'])
     parser.add_argument('--model_path', '-model', type=str,
                         help='Path to the pretrained model. If it is given, '
@@ -89,9 +89,6 @@ if __name__ == "__main__":
                        f"_seed{seed}"
         elif args.objective == 'huber_hack':
             exp_name = f"huber_hack_{args.run_name}" \
-                       f"_seed{seed}"
-        elif args.objective == 'huber_hack_reverse':
-            exp_name = f"huber_hack_reverse_{args.run_name}" \
                        f"_seed{seed}"
         elif args.objective == 'naive':
             exp_name = f"naive_{args.run_name}" \
@@ -159,9 +156,8 @@ if __name__ == "__main__":
             )
             huber_ent, huber_log = model.huber_entropy_lb(
                 verbose=True,
-                detach_weights=args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse',
-                add_sub_weight_ent=args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse',
-                detach_weight_ent_subtraction=args.objective == 'huber_hack_reverse'
+                detach_weights=args.objective == 'huber_hack',
+                add_sub_weight_ent=args.objective == 'huber_hack',
             )
             naive_ent = model.naive_entropy_approx(
                 sample_size=args.naive_sample_size, sample_with_grad=args.objective == 'naive'
@@ -185,7 +181,7 @@ if __name__ == "__main__":
 
             if args.objective == 'recursive' or args.objective == 'recursive_aux_no_grad':
                 loss = -recursive_ent.mean()
-            elif args.objective == 'huber' or args.objective == 'huber_hack' or args.objective == 'huber_hack_reverse':
+            elif args.objective == 'huber' or args.objective == 'huber_hack':
                 loss = -huber_ent.mean()
             elif args.objective == 'naive':
                 loss = -naive_ent.mean()
