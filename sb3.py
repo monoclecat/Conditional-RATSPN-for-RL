@@ -191,6 +191,13 @@ class CspnActor(BasePolicy):
             elif self.entropy_objective == 'huber':
                 entropy, ent_log = self.cspn.huber_entropy_lb(
                     condition=features, verbose=log_ent_metrics,
+                    detach_weights=False, add_sub_weight_ent=False,
+                    marginal_mask=failed_joints,
+                )
+            elif self.entropy_objective == 'augmented_huber':
+                entropy, ent_log = self.cspn.huber_entropy_lb(
+                    condition=features, verbose=log_ent_metrics,
+                    detach_weights=True, add_sub_weight_ent=True,
                     marginal_mask=failed_joints,
                 )
             else:
@@ -431,15 +438,16 @@ class CspnCallback(BaseCallback):
             actor: CspnActor = self.model.actor
             cspn: CSPN = self.model.actor.cspn
 
-            recursive_ent, recurs_log = cspn.recursive_entropy_approx(
-                condition=None, verbose=True,
-                sample_size=actor.recurs_ent_approx_sample_size,
-            )
-            naive_ent = cspn.naive_entropy_approx(
-                condition=None,
-                sample_size=actor.naive_ent_approx_sample_size,
-            )
-            huber_ent, huber_log = cspn.huber_entropy_lb(condition=None, verbose=True)
+            with th.no_grad():
+                recursive_ent, recurs_log = cspn.recursive_entropy_approx(
+                    condition=None, verbose=True,
+                    sample_size=actor.recurs_ent_approx_sample_size,
+                )
+                naive_ent = cspn.naive_entropy_approx(
+                    condition=None,
+                    sample_size=actor.naive_ent_approx_sample_size,
+                )
+                huber_ent, huber_log = cspn.huber_entropy_lb(condition=None, verbose=True)
             log = {**recurs_log, **huber_log}
             log.update({
                 'recursive_ent_approx': recursive_ent.detach().mean().item(),
