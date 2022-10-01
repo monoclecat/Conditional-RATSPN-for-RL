@@ -886,10 +886,11 @@ class RatSpn(nn.Module):
         log_probs = log_probs.sum(2)
 
         for i in range(1, layer_index+1):
+            layer = self.layer_index_to_obj(i)
             if i % 2 == 1 and i != self.max_layer_index+1:
                 # It is a CrossProduct layer
                 # Calculate the log_probs of the product nodes among themselves
-                left_scope, right_scope = CrossProduct.split_shuffled_scopes(log_probs, 1)
+                left_scope, right_scope = layer.split_shuffled_scopes(log_probs, 1)
                 w, d, o, _, R, _ = left_scope.shape  # first dim is o as well
                 left_scope = left_scope.unsqueeze(2).unsqueeze(-4)
                 right_scope = right_scope.unsqueeze(3).unsqueeze(-3)
@@ -904,7 +905,6 @@ class RatSpn(nn.Module):
                     log_probs = log_probs.view(w, d, o**2, o**2, R, R)
             else:
                 # Add log weights to log probs and sum in linear space
-                layer = self.layer_index_to_obj(i)
                 weight_entropy = - th.sum(layer.weights * layer.weights.exp(), dim=2)
                 if i < self.max_layer_index:
                     weights = layer.weights

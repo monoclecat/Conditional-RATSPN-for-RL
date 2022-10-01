@@ -488,9 +488,7 @@ class CrossProduct(AbstractLayer):
         Returns:
             th.Tensor: Output of shape [batch, ceil(in_features/2), in_channels^2].
         """
-        if self._pad > 0:
-            x = F.pad(x, pad=(0, 0, 0, 0, 0, self._pad), value=0)
-        left_scope, right_scope = CrossProduct.split_shuffled_scopes(x, scope_dim=-3, cardinality=self.cardinality)
+        left_scope, right_scope = self.split_shuffled_scopes(x, scope_dim=-3)
         left_scope = left_scope.unsqueeze(-2)
         right_scope = right_scope.unsqueeze(-3)
         # left + right with broadcasting: [*n, w, d/2, c, 1, r] + [*n, w, d/2, 1, c, r] -> [*n, w, d/2, c, c, r]
@@ -605,8 +603,7 @@ class CrossProduct(AbstractLayer):
     def __repr__(self):
         return "CrossProduct(in_features={}, out_shape={})".format(self.in_features, self.out_shape)
 
-    @staticmethod
-    def split_shuffled_scopes(t: th.Tensor, scope_dim: int, cardinality: int = 2):
+    def split_shuffled_scopes(self, t: th.Tensor, scope_dim: int):
         """
         The scopes in the tensor are split into a left scope and a right scope, where
         the scope dimension contains the shuffled scopes of the left side and the right side,
@@ -614,11 +611,11 @@ class CrossProduct(AbstractLayer):
         """
         shape_before_scope = t.shape[:scope_dim]
         shape_after_scope = t.shape[scope_dim + 1:]
-        if padding := t.size(scope_dim) % cardinality != 0:
-            pad = th.zeros(*shape_before_scope, padding, *shape_after_scope, device=t.device)
+        if self._pad > 0:
+            pad = th.zeros(*shape_before_scope, self._pad, *shape_after_scope, device=t.device)
             t = th.cat((t, pad), dim=scope_dim)
         left_scope_right_scope = t.view(
-            *shape_before_scope, t.size(scope_dim) // cardinality, cardinality, *shape_after_scope
+            *shape_before_scope, t.size(scope_dim) // self.cardinality, self.cardinality, *shape_after_scope
         )
         index_dim = scope_dim + 1 if scope_dim > 0 else scope_dim
         left_scope, right_scope = th.split(left_scope_right_scope, 1, dim=index_dim)
