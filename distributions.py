@@ -74,6 +74,7 @@ class RatNormal(Leaf):
             max_mean = 6.0
         self.min_mean = check_valid(min_mean, float, upper_bound=max_mean, allow_none=True)
         self.max_mean = check_valid(max_mean, float, min_mean, allow_none=True)
+        self._means_sigmoid_bound = True
 
     @property
     def device(self):
@@ -83,8 +84,11 @@ class RatNormal(Leaf):
         if means is None:
             means = self.mean_param
         if self.min_mean is not None or self.max_mean is not None:
-            mean_ratio = th.sigmoid(means)
-            means = self.min_mean + (self.max_mean - self.min_mean) * mean_ratio
+            if self._means_sigmoid_bound:
+                mean_ratio = th.sigmoid(means)
+                means = self.min_mean + (self.max_mean - self.min_mean) * mean_ratio
+            else:
+                means = th.clamp(means, self.min_mean, self.max_mean)
         return means
 
     def bounded_stds(self, stds: th.Tensor = None):
