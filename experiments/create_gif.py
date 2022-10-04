@@ -19,7 +19,7 @@ if __name__ == "__main__":
         print(f"Creating gif and saving it to {cwd}")
         frames = [Image.open(image) for image in sorted(glob.glob(f"{cwd}/*.jpg"))]
         assert len(frames) > 0, f"No frames in frame directory {cwd}."
-        frames[0].save(f"{gif_save_path}.gif", format="GIF", append_images=frames, save_all=True,
+        frames[0].save(f"{gif_save_path}_{args.duration}s.gif", format="GIF", append_images=frames, save_all=True,
                        duration=args.duration * 1000 / len(frames), loop=0)
         if False:
             os.system(
