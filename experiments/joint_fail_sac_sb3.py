@@ -81,7 +81,7 @@ def joint_failure_sac(
     np.random.seed(seed)
     th.manual_seed(seed)
 
-    run_name = f"{'PRETRAINED_' if load_model_path else ''}{'MLP' if mlp_actor else 'CSPN'}_{run_name}"
+    run_name = f"{'PRETRAINED' if load_model_path else 'MLP' if mlp_actor else 'CSPN'}_{run_name}"
     run_name_seed = f"{run_name}_s{seed}"
     log_path = os.path.join(log_dir, proj_name)
     log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
@@ -142,7 +142,9 @@ def joint_failure_sac(
             'learning_starts': model.learning_starts,
             'device': model.device,
             'learning_rate': model.learning_rate,
-            'policy_kwargs': {
+        }
+        if isinstance(model.actor, CspnActor):
+            sac_kwargs['policy_kwargs'] = {
                 'cspn_args': {
                     'R': model.actor.cspn.config.R,
                     'D': model.actor.cspn.config.D,
@@ -157,7 +159,6 @@ def joint_failure_sac(
                     'naive_ent_approx_sample_size': model.actor.naive_ent_approx_sample_size,
                 }
             }
-        }
     else:
         sac_kwargs = {
             'env': env,
@@ -245,7 +246,7 @@ if __name__ == "__main__":
                         help='Name of this run for WandB. The seed will be automatically appended. ')
     parser.add_argument('--log_dir', type=str, default='../../cspn_rl_experiments',
                         help='Directory to save logs to.')
-    parser.add_argument('--load_model_path', type=str, help='Path to the pretrained model.')
+    parser.add_argument('--load_model_path', '-model', type=str, help='Path to the pretrained model.')
     parser.add_argument('--no_wandb', action='store_true', help="Don't log this run in WandB")
     parser.add_argument('--no_video', action='store_true', help="Don't record videos of the agent.")
     # SAC arguments
@@ -254,7 +255,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning_starts', type=int, default=1000,
                         help='Nr. of steps to act randomly in the beginning.')
     parser.add_argument('--buffer_size', type=int, default=1_000_000, help='replay buffer size')
-    parser.add_argument('--joint_fail_prob', type=float, default=0.05, help="Joints can fail with this probability")
+    parser.add_argument('--joint_fail_prob', '-jf', type=float, default=0.05, help="Joints can fail with this probability")
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,
