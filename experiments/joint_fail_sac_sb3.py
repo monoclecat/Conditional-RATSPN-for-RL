@@ -1,6 +1,7 @@
+import re
 import time
 
-import gym
+import yaml
 import numpy as np
 import os
 import platform
@@ -15,190 +16,228 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.torch_layers import FlattenExtractor, NatureCNN
-# from stable_baselines3.common.callbacks import CheckpointCallback
 
 from cspn import CSPN, print_cspn_params
 from sb3 import *
 from utils import non_existing_folder_name
 from envs.joint_failure_wrapper import wrap_in_float_and_joint_fail
+from dataclasses import dataclass
 
 
-def joint_failure_sac(
-        seed: int,
-        mlp_actor: bool,
-        num_envs: int,
-        timesteps: int,
-        save_interval: int,
-        log_interval: int,
-        env_name: str,
-        device: str,
-        proj_name: str,
-        run_name: str,
-        log_dir: str,
-        load_model_path: Optional[str],
-        no_wandb: bool,
-        no_video: bool,
-        ent_coef: float,
-        learning_rate: float,
-        learning_starts: int,
-        buffer_size: int,
-        joint_fail_prob: float,
-        repetitions: Optional[int],
-        cspn_depth: Optional[int],
-        num_dist: Optional[int],
-        num_sums: Optional[int],
-        dropout: float,
-        feat_layers: Optional[List[int]],
-        sum_param_layers: Optional[List[int]],
-        dist_param_layers: Optional[List[int]],
-        objective: str,
-        recurs_sample_size: int,
-        naive_sample_size: int,
+@dataclass
+class RunConfig:
+    buffer_size: int
+    cspn_depth: int
+    device: str
+    dist_param_layers: list
+    dropout: float
+    ent_coef: float
+    env_name: str
+    feat_layers: list
+    joint_fail_prob: float
+    learning_rate: float
+    learning_starts: int
+    log_dir: str
+    log_interval: int
+    mlp_actor: bool
+    naive_sample_size: int
+    no_video: bool
+    no_wandb: bool
+    num_dist: int
+    num_envs: int
+    num_sums: int
+    objective: str
+    proj_name: str
+    recurs_sample_size: int
+    repetitions: int
+    sample_failing_joints: bool
+    save_interval: int
+    seed: int
+    sum_param_layers: list
+    total_timesteps: int
+    run_id: str = None
+
+    @staticmethod
+    def from_yaml(path: str):
+        assert os.path.exists(path)
+        with open(path, 'r') as f:
+            config: dict = yaml.safe_load(f)
+        return RunConfig(**config)
+
+    def to_yaml(self, path: str):
+        assert not os.path.exists(path)
+        with open(path, 'w') as f:
+            yaml.dump(vars(self), f)
+
+
+def get_max_step_from_sb3_model_checkpoints(model_path):
+    step_expr = re.compile('.*[^0-9](?P<step>[0-9]+)_*steps.*zip$')
+    matches = [step_expr.match(p) for p in os.listdir(model_path)]
+    steps = [int(m.group('step')) for m in matches if m is not None]
+    return max(steps)
+
+
+def create_joint_fail_env(
+        joint_fail_prob: float, sample_failing_joints: bool, env_name: str, num_envs: int, no_video: bool,
+        log_dir: str, save_interval: int,
 ):
-    if not save_interval:
-        save_interval = timesteps
-
-    assert os.environ.get('LD_PRELOAD') is None, "The LD_PRELOAD environment variable may not be set externally."
-    if no_video:
-        os.environ['LD_PRELOAD'] = os.environ.get('CONDA_PREFIX') + '/lib/libGLEW.so'
-
-    if timesteps == 0:
-        learn = False
-    else:
-        learn = True
-        assert timesteps >= save_interval, "Total timesteps cannot be lower than save_interval!"
-        assert timesteps % save_interval == 0, "save_interval must be a divisor of total timesteps."
-
-    if load_model_path:
-        assert os.path.exists(load_model_path), f"The model_path doesn't exist! {load_model_path}"
-    if log_dir:
-        assert os.path.exists(log_dir), f"The log_dir doesn't exist! {log_dir}"
-
-    if not no_wandb:
-        wandb.login(key=os.environ['WANDB_API_KEY'])
-
-    print(f"Seed: {seed}")
-    np.random.seed(seed)
-    th.manual_seed(seed)
-
-    run_name = f"{'PRETRAINED' if load_model_path else 'MLP' if mlp_actor else 'CSPN'}_{run_name}"
-    run_name_seed = f"{run_name}_s{seed}"
-    log_path = os.path.join(log_dir, proj_name)
-    log_path = os.path.join(log_path, non_existing_folder_name(log_path, run_name_seed))
-    monitor_path = os.path.join(log_path, "monitor")
-    model_path = os.path.join(log_path, "models")
-    video_path = os.path.join(log_path, "video")
-    for d in [log_path, monitor_path, model_path, video_path]:
-        os.makedirs(d, exist_ok=True)
-
-    run = None
-    if not no_wandb:
-        run = wandb.init(
-            dir=log_path,
-            project=proj_name,
-            name=run_name_seed,
-            group=run_name,
-            sync_tensorboard=True,
-            monitor_gym=True,
-            reinit=True,
-            force=True,
-        )
-
-    joint_fail_kwargs = {'joint_failure_prob': joint_fail_prob, 'sample_failing_joints': True}
+    joint_fail_kwargs = {'joint_failure_prob': joint_fail_prob,
+                         'sample_failing_joints': sample_failing_joints}
     env = make_vec_env(
         env_id=env_name,
         n_envs=num_envs,
-        monitor_dir=monitor_path,
+        monitor_dir=os.path.join(log_dir, 'monitor'),
         wrapper_class=wrap_in_float_and_joint_fail,
         wrapper_kwargs=joint_fail_kwargs,
         # vec_env_cls=SubprocVecEnv,
         # vec_env_kwargs={'start_method': 'fork'},
     )
-    if not no_wandb:
-        run.config.update({
-            **joint_fail_kwargs,
-            'machine': platform.node(),
-        })
 
     if not no_video:
         # Without env as a VecVideoRecorder we need the env var LD_PRELOAD=$CONDA_PREFIX/lib/libGLEW.so
-        env = VecVideoRecorder(env, video_folder=video_path,
+        env = VecVideoRecorder(env, video_folder=os.path.join(log_dir, 'video'),
                                record_video_trigger=lambda x: x % save_interval == 0,
                                video_length=1000)
+    return env
 
-    if load_model_path:
-        model = EntropyLoggingSAC.load(load_model_path, env)
-        # model.tensorboard_log = None
-        # model.vi_aux_resp_grad_mode = vi_aux_resp_grad_mode
-        # model_name = f"sac_loadedpretrained_{env}_{proj_name}_{run_name_seed}"
-        model.seed = seed
-        model.learning_starts = learning_starts
-        # model.learning_rate = learning_rate
-        sac_kwargs = {
-            'env': model.env,
-            'seed': model.seed,
-            'verbose': model.verbose,
-            'ent_coef': model.ent_coef,
-            'learning_starts': model.learning_starts,
-            'device': model.device,
-            'learning_rate': model.learning_rate,
-        }
-        if isinstance(model.actor, CspnActor):
-            sac_kwargs['policy_kwargs'] = {
-                'cspn_args': {
-                    'R': model.actor.cspn.config.R,
-                    'D': model.actor.cspn.config.D,
-                    'I': model.actor.cspn.config.I,
-                    'S': model.actor.cspn.config.S,
-                    'dropout': model.actor.cspn.config.dropout,
-                    'sum_param_layers': model.actor.cspn.config.sum_param_layers,
-                    'dist_param_layers': model.actor.cspn.config.dist_param_layers,
-                    'cond_layers_inner_act': model.actor.cspn.config.cond_layers_inner_act,
-                    'entropy_objective': model.actor.entropy_objective,
-                    'recurs_ent_approx_sample_size': model.actor.recurs_ent_approx_sample_size,
-                    'naive_ent_approx_sample_size': model.actor.naive_ent_approx_sample_size,
-                }
-            }
-    else:
-        sac_kwargs = {
-            'env': env,
-            'seed': seed,
-            'verbose': 2,
-            'ent_coef': ent_coef,
-            'learning_starts': learning_starts,
-            'device': device,
-            'learning_rate': learning_rate,
-            'buffer_size': buffer_size,
-        }
-        cspn_args = {
-            'R': repetitions,
-            'D': cspn_depth,
-            'I': num_dist,
-            'S': num_sums,
-            'dropout': dropout,
-            'feat_layers': feat_layers,
-            'sum_param_layers': sum_param_layers,
-            'dist_param_layers': dist_param_layers,
-            'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if no_relu else nn.ReLU,
-            'entropy_objective': objective,
-            'recurs_ent_approx_sample_size': recurs_sample_size,
-            'naive_ent_approx_sample_size': naive_sample_size,
-        }
-        sac_kwargs['policy_kwargs'] = {
-            'actor_cspn_args': cspn_args,
-            'joint_failure_info_in_obs': True,
-            'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
-        }
-        model = EntropyLoggingSAC(policy=CustomMlpPolicy if mlp_actor else CspnPolicy, **sac_kwargs)
-        # model_name = f"sac_{'mlp' if mlp_actor else 'cspn'}_{env_name}_{exp_name}_s{seed}"
 
-    callback = [CheckpointCallback(
-        save_freq=save_interval,
+def continue_run(config: RunConfig):
+    model_path = os.path.join(config.log_dir, 'models')
+    assert os.path.exists(model_path)
+    last_saved_step = get_max_step_from_sb3_model_checkpoints(model_path)
+    files_of_last_saved_step = [p for p in os.listdir(model_path) if str(last_saved_step) in p]
+    model_checkpoint = [p for p in files_of_last_saved_step if p.endswith('zip')]
+    assert len(model_checkpoint) > 0
+    model_checkpoint = os.path.join(model_path, model_checkpoint[0])
+    replay_buffer = [p for p in files_of_last_saved_step if p.startswith('replay_buffer')]
+    assert len(replay_buffer) > 0
+    replay_buffer = os.path.join(model_path, replay_buffer[0])
+
+    run = None
+    if config.run_id is not None:
+        run = wandb.init(
+            id=config.run_id,
+            resume='must',
+            dir=config.log_dir,
+            project=config.proj_name,
+            sync_tensorboard=True,
+            monitor_gym=True,
+            reinit=True,
+            force=True,
+        )
+    env = create_joint_fail_env(
+        joint_fail_prob=config.joint_fail_prob, sample_failing_joints=config.sample_failing_joints,
+        env_name=config.env_name, num_envs=config.num_envs, no_video=config.no_video,
+        log_dir=config.log_dir, save_interval=config.save_interval,
+    )
+    model = EntropyLoggingSAC.load(model_checkpoint, env)
+    model.load_replay_buffer(replay_buffer)
+    train_model(
+        model=model, seed=config.seed, total_timesteps=config.total_timesteps, log_dir=config.log_dir,
+        save_interval_steps=config.save_interval, log_interval_episodes=config.log_interval, wandb_run=run,
+    )
+
+
+def start_new_run(config: RunConfig):
+    assert os.environ.get('LD_PRELOAD') is None, "The LD_PRELOAD environment variable may not be set externally."
+    if config.no_video:
+        os.environ['LD_PRELOAD'] = os.environ.get('CONDA_PREFIX') + '/lib/libGLEW.so'
+
+    assert config.total_timesteps >= config.save_interval, "Total timesteps cannot be lower than save_interval!"
+    assert config.total_timesteps % config.save_interval == 0, "save_interval must be a divisor of total timesteps."
+
+    if config.log_dir:
+        assert os.path.exists(config.log_dir), f"The log_dir doesn't exist! {config.log_dir}"
+
+    if not config.no_wandb:
+        wandb.login(key=os.environ['WANDB_API_KEY'])
+
+    run_name = os.path.split(config.log_dir)[1]
+    monitor_path = os.path.join(config.log_dir, "monitor")
+    model_path = os.path.join(config.log_dir, "models")
+    video_path = os.path.join(config.log_dir, "video")
+    for d in [config.log_dir, monitor_path, model_path, video_path]:
+        os.makedirs(d, exist_ok=True)
+
+    run = None
+    if not config.no_wandb:
+        run = wandb.init(
+            dir=config.log_dir,
+            project=config.proj_name,
+            name=run_name,
+            sync_tensorboard=True,
+            monitor_gym=True,
+            reinit=True,
+            force=True,
+        )
+        config.run_id = run.id
+        run.config.update({
+            **vars(config),
+            'machine': platform.node(),
+        })
+
+    config.to_yaml(os.path.join(config.log_dir, 'config.yaml'))
+
+    env = create_joint_fail_env(
+        joint_fail_prob=config.joint_fail_prob, sample_failing_joints=config.sample_failing_joints,
+        env_name=config.env_name, num_envs=config.num_envs, no_video=config.no_video, log_dir=config.log_dir,
+        save_interval=config.save_interval,
+    )
+
+    sac_kwargs = {
+        'env': env,
+        'seed': config.seed,
+        'verbose': 2,
+        'ent_coef': config.ent_coef,
+        'learning_starts': config.learning_starts,
+        'device': config.device,
+        'learning_rate': config.learning_rate,
+        'buffer_size': config.buffer_size,
+    }
+    cspn_args = {
+        'R': config.repetitions,
+        'D': config.cspn_depth,
+        'I': config.num_dist,
+        'S': config.num_sums,
+        'dropout': config.dropout,
+        'feat_layers': config.feat_layers,
+        'sum_param_layers': config.sum_param_layers,
+        'dist_param_layers': config.dist_param_layers,
+        'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if no_relu else nn.ReLU,
+        'entropy_objective': config.objective,
+        'recurs_ent_approx_sample_size': config.recurs_sample_size,
+        'naive_ent_approx_sample_size': config.naive_sample_size,
+    }
+    sac_kwargs['policy_kwargs'] = {
+        'actor_cspn_args': cspn_args,
+        'joint_failure_info_in_obs': True,
+        'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
+    }
+    if run is not None:
+        run.config.update(sac_kwargs)
+    model = EntropyLoggingSAC(policy=CustomMlpPolicy if config.mlp_actor else CspnPolicy, **sac_kwargs)
+    # model_name = f"sac_{'mlp' if mlp_actor else 'cspn'}_{env_name}_{exp_name}_s{seed}"
+    train_model(
+        model=model, seed=config.seed, total_timesteps=config.total_timesteps, log_dir=config.log_dir,
+        save_interval_steps=config.save_interval, log_interval_episodes=config.log_interval, wandb_run=run,
+    )
+
+
+def train_model(
+        model: EntropyLoggingSAC, seed: int, total_timesteps: int, log_dir: str, save_interval_steps: int,
+        log_interval_episodes: int = 4, wandb_run=None,
+):
+    np.random.seed(seed)
+    th.manual_seed(seed)
+
+    run_name = os.path.split(log_dir)[1]
+    model_path = os.path.join(log_dir, "models")
+    callback = [CheckpointCallbackSaveReplayBuffer(
+        save_freq=save_interval_steps,
         save_path=model_path,
         name_prefix=run_name
     )]
-    if not no_wandb:
-        run.config.update(sac_kwargs)
+    if wandb_run is not None:
         callback.append(WandbCallback(
             # gradient_save_freq=10000,
             # model_save_path=model_path,
@@ -206,7 +245,7 @@ def joint_failure_sac(
             verbose=2,
         ))
 
-    logger = configure(log_path, ["stdout", "csv", "tensorboard"])
+    logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
     logger.output_formats[0].max_length = 50
     model.set_logger(logger)
 
@@ -219,34 +258,37 @@ def joint_failure_sac(
 
     # noinspection PyTypeChecker
     model.learn(
-        total_timesteps=timesteps,
-        log_interval=log_interval,
-        reset_num_timesteps=load_model_path is not None,
-        tb_log_name=f"{proj_name}/{run_name_seed}",
+        total_timesteps=total_timesteps - model.num_timesteps,
+        log_interval=log_interval_episodes,
+        # Regarding reset_num_timesteps: https://stable-baselines3.readthedocs.io/en/master/guide/examples.html#id3
+        # We set it to False so that the logging keeps the correct step information
+        reset_num_timesteps=False,
+        tb_log_name=run_name,
         callback=callback,
     )
-    if run is not None:
-        run.finish()
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seeds', '-s', type=int, nargs='+', required=True)
+    parser.add_argument('--config', '-c', type=str,
+                        help='Path to an existing config. If provided, all other arguments will be ignored.')
+    parser.add_argument('--seeds', '-s', type=int, nargs='+')
     parser.add_argument('--mlp_actor', action='store_true', help='Use a MLP actor')
     parser.add_argument('--num_envs', type=int, default=1, help='Number of parallel environments to run.')
-    parser.add_argument('--timesteps', type=int, default=int(1e6), help='Total timesteps to train model.')
+    parser.add_argument('--total_timesteps', '-ts', type=int, default=int(1e6), help='Total timesteps to train model.')
     parser.add_argument('--save_interval', type=int, help='Save model and a video every save_interval timesteps.')
     parser.add_argument('--log_interval', type=int, default=4, help='Log interval')
-    parser.add_argument('--env_name', '-env', type=str, required=True, help='Gym environment to train on.')
+    parser.add_argument('--env_name', '-env', type=str, help='Gym environment to train on.')
     parser.add_argument('--device', '-dev', type=str, default='cuda', help='Device to run on. cpu or cuda.')
     parser.add_argument('--proj_name', '-proj', type=str, default='test_proj', help='Project name for WandB')
     parser.add_argument('--run_name', '-name', type=str, default='test_run',
                         help='Name of this run for WandB. The seed will be automatically appended. ')
     parser.add_argument('--log_dir', type=str, default='../../cspn_rl_experiments',
                         help='Directory to save logs to.')
-    parser.add_argument('--load_model_path', '-model', type=str, help='Path to the pretrained model.')
     parser.add_argument('--no_wandb', action='store_true', help="Don't log this run in WandB")
     parser.add_argument('--no_video', action='store_true', help="Don't record videos of the agent.")
     # SAC arguments
@@ -256,6 +298,7 @@ if __name__ == "__main__":
                         help='Nr. of steps to act randomly in the beginning.')
     parser.add_argument('--buffer_size', type=int, default=1_000_000, help='replay buffer size')
     parser.add_argument('--joint_fail_prob', '-jf', type=float, default=0.05, help="Joints can fail with this probability")
+    parser.add_argument('--sample_failing_joints', action='store_true', help="Sample replacements for failing joints")
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,
@@ -275,7 +318,20 @@ if __name__ == "__main__":
                         help='Number of samples to approximate recursive entropy with. ')
     parser.add_argument('--naive_sample_size', type=int, default=50,
                         help='Number of samples to approximate naive entropy with. ')
-    kwargs = vars(parser.parse_args())
-    seeds = kwargs.pop('seeds')
-    for seed in seeds:
-        joint_failure_sac(seed=seed, **kwargs)
+    args = parser.parse_args()
+    if args.config is not None:
+        assert os.path.exists(args.config) and args.config.endswith('yaml')
+        config = RunConfig.from_yaml(args.config)
+        continue_run(config)
+    else:
+        kwargs = vars(args)
+        seeds = kwargs.pop('seeds')
+        run_name = kwargs.pop('run_name')
+        kwargs.pop('config')
+        for seed in seeds:
+            run_name = f"{'MLP' if args.mlp_actor else 'CSPN'}_{run_name}"
+            run_name_seed = f"{run_name}_s{seed}"
+            log_dir = os.path.join(args.log_dir, args.proj_name)
+            log_dir = os.path.join(log_dir, non_existing_folder_name(log_dir, run_name_seed))
+            kwargs['log_dir'] = log_dir
+            start_new_run(RunConfig(seed=seed, **kwargs))
