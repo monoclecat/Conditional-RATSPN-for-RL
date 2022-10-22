@@ -1,5 +1,5 @@
 import stable_baselines3 as sb3
-import gym
+import os
 from stable_baselines3.sac.policies import SACPolicy, Actor
 from stable_baselines3.sac.sac import SAC
 from stable_baselines3.common.utils import polyak_update
@@ -256,9 +256,6 @@ class EntropyLoggingSAC(SAC):
     """
     def __init__(self, **kwargs):
         super(EntropyLoggingSAC, self).__init__(**kwargs)
-        if self.action_space.bounded_above.all() and ~self.action_space.bounded_above.any() or \
-                not self.action_space.bounded_above.all() and self.action_space.bounded_above.any():
-            raise NotImplementedError("Case not covered yet where only part of the action space is bounded")
 
     def learn(self, tb_log_name=None, callback=None, **kwargs) -> OffPolicyAlgorithm:
         if tb_log_name is None:
@@ -382,6 +379,13 @@ class EntropyLoggingSAC(SAC):
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
+    def _excluded_save_params(self) -> List[str]:
+        excluded = super(EntropyLoggingSAC, self)._excluded_save_params()
+        return excluded
+
+    def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
+        return super(EntropyLoggingSAC, self)._get_torch_save_params()
+
 
 class CspnCallback(BaseCallback):
     """
@@ -469,3 +473,39 @@ class CspnCallback(BaseCallback):
         This event is triggered before exiting the `learn()` method.
         """
         pass
+
+
+class CheckpointCallbackSaveReplayBuffer(CheckpointCallback):
+    """
+    Callback for saving a model every ``save_freq`` calls
+    to ``env.step()``.
+
+    .. warning::
+
+      When using multiple environments, each call to  ``env.step()``
+      will effectively correspond to ``n_envs`` steps.
+      To account for that, you can use ``save_freq = max(save_freq // n_envs, 1)``
+
+    :param save_freq:
+    :param save_path: Path to the folder where the model will be saved.
+    :param name_prefix: Common prefix to the saved models
+    :param verbose:
+    """
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            path = os.path.join(self.save_path, f"{self.name_prefix}_{self.num_timesteps}_steps")
+            self.model.save(path)
+            if self.verbose > 1:
+                print(f"Saving model checkpoint to {path}")
+            for f in os.listdir(self.save_path):
+                if f.startswith('replay_buffer'):
+                    existing_buf = os.path.join(self.save_path, f)
+                    try:
+                        os.remove(existing_buf)
+                    except FileNotFoundError:
+                        warnings.warn(f"Tried to delete the existing replay buffer under {existing_buf} but the file"
+                                      f"didn't exist!")
+                    break
+            self.model.save_replay_buffer(os.path.join(self.save_path, f"replay_buffer_{self.num_timesteps}_steps"))
+        return True
