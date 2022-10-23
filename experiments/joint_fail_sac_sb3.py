@@ -35,6 +35,7 @@ class RunConfig:
     env_name: str
     feat_layers: list
     joint_fail_prob: float
+    sample_failures_every: str
     learning_rate: float
     learning_starts: int
     log_dir: str
@@ -81,10 +82,11 @@ def get_max_step_from_sb3_model_checkpoints(model_path):
 
 def create_joint_fail_env(
         joint_fail_prob: float, sample_failing_joints: bool, env_name: str, num_envs: int, no_video: bool,
-        log_dir: str, save_interval: int,
+        sample_failures_every: str, log_dir: str, save_interval: int,
 ):
     joint_fail_kwargs = {'joint_failure_prob': joint_fail_prob,
-                         'sample_failing_joints': sample_failing_joints}
+                         'sample_failing_joints': sample_failing_joints,
+                         'sample_failures_every': sample_failures_every}
     env = make_vec_env(
         env_id=env_name,
         n_envs=num_envs,
@@ -156,6 +158,7 @@ def train_joint_fail_sac(config: RunConfig):
 
     env = create_joint_fail_env(
         joint_fail_prob=config.joint_fail_prob, sample_failing_joints=config.sample_failing_joints,
+        sample_failures_every=config.sample_failures_every,
         env_name=config.env_name, num_envs=config.num_envs, no_video=config.no_video, log_dir=config.log_dir,
         save_interval=config.save_interval,
     )
@@ -168,13 +171,13 @@ def train_joint_fail_sac(config: RunConfig):
         model_checkpoint = [p for p in files_of_last_saved_step if p.endswith('zip')]
         assert len(model_checkpoint) > 0
         model_checkpoint = os.path.join(model_path, model_checkpoint[0])
-        replay_buffer = [p for p in files_of_last_saved_step if p.startswith('replay_buffer')]
-        assert len(replay_buffer) > 0
-        replay_buffer = os.path.join(model_path, replay_buffer[0])
         model = EntropyLoggingSAC.load(model_checkpoint, env)
         if config.total_timesteps - model.num_timesteps <= 0:
             print("Model has already reached its total timesteps.")
             return
+        replay_buffer = [p for p in files_of_last_saved_step if p.startswith('replay_buffer')]
+        assert len(replay_buffer) > 0
+        replay_buffer = os.path.join(model_path, replay_buffer[0])
         model.load_replay_buffer(replay_buffer)
     else:
         sac_kwargs = {
