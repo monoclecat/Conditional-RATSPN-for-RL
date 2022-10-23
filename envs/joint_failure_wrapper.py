@@ -13,12 +13,18 @@ class JointFailureWrapper(gym.Wrapper):
     A wrapper for gym environments that lets joint fail with a certain probability.
     It is possible to sample the action of a failed joint instead.
     Information about the joint failure is appended to the observation.
+    args:
+        joint_failure_prob: Each joint in the agent can fail with this probability
+        sample_failing_joints: Failing joint actions will be resampled from a uniform distribution if True
+        sample_failures_every: 'step' or 'episode'
     """
-    def __init__(self, env, joint_failure_prob: float, sample_failing_joints: bool):
+    def __init__(self, env, joint_failure_prob: float, sample_failing_joints: bool, sample_failures_every: str):
         super().__init__(env)
-        self._next_joint_failure = self.no_joint_failures()
+        self._next_joint_failure = np.hstack((np.zeros(self.action_space.shape), np.zeros(self.action_space.shape)))
         self.joint_failure_prob = joint_failure_prob
         self.sample_failing_joints = sample_failing_joints
+        assert sample_failures_every in ['step', 'episode']
+        self.sample_failures_every = sample_failures_every
         self.orig_obs_space = self.observation_space
         new_low = np.hstack((
             self.orig_obs_space.low,
@@ -32,21 +38,17 @@ class JointFailureWrapper(gym.Wrapper):
         ))
         self.observation_space = gym.spaces.Box(low=new_low, high=new_high, dtype=np.float64)
 
-    def no_joint_failures(self):
-        return np.hstack((np.zeros(self.action_space.shape), np.zeros(self.action_space.shape)))
-
     def sample_joint_failures(self):
         failing_joints = (np.random.random_sample(self.action_space.shape) < self.joint_failure_prob)
         failing_joints = failing_joints.astype(self.observation_space.dtype)
         low = self.action_space.low
         high = self.action_space.high
         if self.sample_failing_joints:
-            uniform_sample = low + np.random.random_sample(self.action_space.shape) * (high - low)
-            uniform_sample = uniform_sample * failing_joints
+            action_replacement = low + np.random.random_sample(self.action_space.shape) * (high - low)
+            action_replacement = action_replacement * failing_joints
         else:
-            uniform_sample = np.zeros(self.action_space.shape)
-        self._next_joint_failure = np.hstack((failing_joints, uniform_sample))
-        return self._next_joint_failure
+            action_replacement = np.zeros(self.action_space.shape)
+        self._next_joint_failure = np.hstack((failing_joints, action_replacement))
 
     def step(self, action: np.ndarray):
         fails = self._next_joint_failure
@@ -56,12 +58,15 @@ class JointFailureWrapper(gym.Wrapper):
         action = action + samples
 
         observation, reward, done, info = super(JointFailureWrapper, self).step(action)
-        observation = np.hstack((observation, self.sample_joint_failures()))
+        if self.sample_failures_every == 'step':
+            self.sample_joint_failures()
+        observation = np.hstack((observation, self._next_joint_failure))
         return observation, reward, done, info
 
     def reset(self, **kwargs):
         observation = super(JointFailureWrapper, self).reset(**kwargs)
-        return np.hstack((observation, self.no_joint_failures()))
+        self.sample_joint_failures()
+        return np.hstack((observation, self._next_joint_failure))
 
 
 class FloatWrapper(gym.Wrapper):
