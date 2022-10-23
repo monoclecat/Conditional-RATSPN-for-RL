@@ -494,7 +494,7 @@ class CheckpointCallbackSaveReplayBuffer(CheckpointCallback):
 
     def _on_step(self) -> bool:
         if self.n_calls % self.save_freq == 0:
-            path = os.path.join(self.save_path, f"{self.name_prefix}_{self.num_timesteps}_steps")
+            path = os.path.join(self.save_path, f"{self.name_prefix}_{self.num_timesteps}_steps.zip")
             self.model.save(path)
             if self.verbose > 1:
                 print(f"Saving model checkpoint to {path}")
@@ -507,5 +507,5 @@ class CheckpointCallbackSaveReplayBuffer(CheckpointCallback):
                         warnings.warn(f"Tried to delete the existing replay buffer under {existing_buf} but the file"
                                       f"didn't exist!")
                     break
-            self.model.save_replay_buffer(os.path.join(self.save_path, f"replay_buffer_{self.num_timesteps}_steps"))
+            self.model.save_replay_buffer(os.path.join(self.save_path, f"replay_buffer_{self.num_timesteps}_steps.pkl"))
         return True
