@@ -65,16 +65,18 @@ class RunConfig:
         return RunConfig(**config)
 
     def to_yaml(self, path: str):
-        assert not os.path.exists(path)
         with open(path, 'w') as f:
             yaml.dump(vars(self), f)
 
 
 def get_max_step_from_sb3_model_checkpoints(model_path):
-    step_expr = re.compile('.*[^0-9](?P<step>[0-9]+)_*steps.*zip$')
+    step_expr = re.compile('.*[^0-9](?P<step>[0-9]+)_*steps')
     matches = [step_expr.match(p) for p in os.listdir(model_path)]
     steps = [int(m.group('step')) for m in matches if m is not None]
-    return max(steps)
+    if steps:
+        return max(steps)
+    else:
+        return None
 
 
 def create_joint_fail_env(
@@ -101,50 +103,13 @@ def create_joint_fail_env(
     return env
 
 
-def continue_run(config: RunConfig):
-    model_path = os.path.join(config.log_dir, 'models')
-    assert os.path.exists(model_path)
-    last_saved_step = get_max_step_from_sb3_model_checkpoints(model_path)
-    files_of_last_saved_step = [p for p in os.listdir(model_path) if str(last_saved_step) in p]
-    model_checkpoint = [p for p in files_of_last_saved_step if p.endswith('zip')]
-    assert len(model_checkpoint) > 0
-    model_checkpoint = os.path.join(model_path, model_checkpoint[0])
-    replay_buffer = [p for p in files_of_last_saved_step if p.startswith('replay_buffer')]
-    assert len(replay_buffer) > 0
-    replay_buffer = os.path.join(model_path, replay_buffer[0])
-
-    run = None
-    if config.run_id is not None:
-        run = wandb.init(
-            id=config.run_id,
-            resume='must',
-            dir=config.log_dir,
-            project=config.proj_name,
-            sync_tensorboard=True,
-            monitor_gym=True,
-            reinit=True,
-            force=True,
-        )
-    env = create_joint_fail_env(
-        joint_fail_prob=config.joint_fail_prob, sample_failing_joints=config.sample_failing_joints,
-        env_name=config.env_name, num_envs=config.num_envs, no_video=config.no_video,
-        log_dir=config.log_dir, save_interval=config.save_interval,
-    )
-    model = EntropyLoggingSAC.load(model_checkpoint, env)
-    model.load_replay_buffer(replay_buffer)
-    train_model(
-        model=model, seed=config.seed, total_timesteps=config.total_timesteps, log_dir=config.log_dir,
-        save_interval_steps=config.save_interval, log_interval_episodes=config.log_interval, wandb_run=run,
-    )
-
-
-def start_new_run(config: RunConfig):
+def train_joint_fail_sac(config: RunConfig):
     assert os.environ.get('LD_PRELOAD') is None, "The LD_PRELOAD environment variable may not be set externally."
     if config.no_video:
         os.environ['LD_PRELOAD'] = os.environ.get('CONDA_PREFIX') + '/lib/libGLEW.so'
 
-    assert config.total_timesteps >= config.save_interval, "Total timesteps cannot be lower than save_interval!"
-    assert config.total_timesteps % config.save_interval == 0, "save_interval must be a divisor of total timesteps."
+    if config.save_interval > config.total_timesteps:
+        config.save_interval = config.total_timesteps
 
     if config.log_dir:
         assert os.path.exists(config.log_dir), f"The log_dir doesn't exist! {config.log_dir}"
@@ -160,7 +125,18 @@ def start_new_run(config: RunConfig):
         os.makedirs(d, exist_ok=True)
 
     run = None
-    if not config.no_wandb:
+    if config.run_id is not None:
+        run = wandb.init(
+            id=config.run_id,
+            resume='must',
+            dir=config.log_dir,
+            project=config.proj_name,
+            sync_tensorboard=True,
+            monitor_gym=True,
+            reinit=True,
+            force=True,
+        )
+    elif not config.no_wandb:
         run = wandb.init(
             dir=config.log_dir,
             project=config.proj_name,
@@ -184,39 +160,56 @@ def start_new_run(config: RunConfig):
         save_interval=config.save_interval,
     )
 
-    sac_kwargs = {
-        'env': env,
-        'seed': config.seed,
-        'verbose': 2,
-        'ent_coef': config.ent_coef,
-        'learning_starts': config.learning_starts,
-        'device': config.device,
-        'learning_rate': config.learning_rate,
-        'buffer_size': config.buffer_size,
-    }
-    cspn_args = {
-        'R': config.repetitions,
-        'D': config.cspn_depth,
-        'I': config.num_dist,
-        'S': config.num_sums,
-        'dropout': config.dropout,
-        'feat_layers': config.feat_layers,
-        'sum_param_layers': config.sum_param_layers,
-        'dist_param_layers': config.dist_param_layers,
-        'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if no_relu else nn.ReLU,
-        'entropy_objective': config.objective,
-        'recurs_ent_approx_sample_size': config.recurs_sample_size,
-        'naive_ent_approx_sample_size': config.naive_sample_size,
-    }
-    sac_kwargs['policy_kwargs'] = {
-        'actor_cspn_args': cspn_args,
-        'joint_failure_info_in_obs': True,
-        'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
-    }
-    if run is not None:
-        run.config.update(sac_kwargs)
-    model = EntropyLoggingSAC(policy=CustomMlpPolicy if config.mlp_actor else CspnPolicy, **sac_kwargs)
-    # model_name = f"sac_{'mlp' if mlp_actor else 'cspn'}_{env_name}_{exp_name}_s{seed}"
+    model_path = os.path.join(config.log_dir, 'models')
+    if os.path.exists(model_path) and \
+            (last_saved_step := get_max_step_from_sb3_model_checkpoints(model_path)) is not None:
+        print(f"Continuing from step {last_saved_step}")
+        files_of_last_saved_step = [p for p in os.listdir(model_path) if str(last_saved_step) in p]
+        model_checkpoint = [p for p in files_of_last_saved_step if p.endswith('zip')]
+        assert len(model_checkpoint) > 0
+        model_checkpoint = os.path.join(model_path, model_checkpoint[0])
+        replay_buffer = [p for p in files_of_last_saved_step if p.startswith('replay_buffer')]
+        assert len(replay_buffer) > 0
+        replay_buffer = os.path.join(model_path, replay_buffer[0])
+        model = EntropyLoggingSAC.load(model_checkpoint, env)
+        if config.total_timesteps - model.num_timesteps <= 0:
+            print("Model has already reached its total timesteps.")
+            return
+        model.load_replay_buffer(replay_buffer)
+    else:
+        sac_kwargs = {
+            'env': env,
+            'seed': config.seed,
+            'verbose': 2,
+            'ent_coef': config.ent_coef,
+            'learning_starts': config.learning_starts,
+            'device': config.device,
+            'learning_rate': config.learning_rate,
+            'buffer_size': config.buffer_size,
+        }
+        cspn_args = {
+            'R': config.repetitions,
+            'D': config.cspn_depth,
+            'I': config.num_dist,
+            'S': config.num_sums,
+            'dropout': config.dropout,
+            'feat_layers': config.feat_layers,
+            'sum_param_layers': config.sum_param_layers,
+            'dist_param_layers': config.dist_param_layers,
+            'cond_layers_inner_act': nn.LeakyReLU,  # nn.Identity if no_relu else nn.ReLU,
+            'entropy_objective': config.objective,
+            'recurs_ent_approx_sample_size': config.recurs_sample_size,
+            'naive_ent_approx_sample_size': config.naive_sample_size,
+        }
+        sac_kwargs['policy_kwargs'] = {
+            'actor_cspn_args': cspn_args,
+            'joint_failure_info_in_obs': True,
+            'features_extractor_class': NatureCNN if len(env.observation_space.shape) > 1 else FlattenExtractor,
+        }
+        if run is not None:
+            run.config.update(sac_kwargs)
+        model = EntropyLoggingSAC(policy=CustomMlpPolicy if config.mlp_actor else CspnPolicy, **sac_kwargs)
+
     train_model(
         model=model, seed=config.seed, total_timesteps=config.total_timesteps, log_dir=config.log_dir,
         save_interval_steps=config.save_interval, log_interval_episodes=config.log_interval, wandb_run=run,
@@ -227,45 +220,47 @@ def train_model(
         model: EntropyLoggingSAC, seed: int, total_timesteps: int, log_dir: str, save_interval_steps: int,
         log_interval_episodes: int = 4, wandb_run=None,
 ):
-    np.random.seed(seed)
-    th.manual_seed(seed)
-
-    run_name = os.path.split(log_dir)[1]
-    model_path = os.path.join(log_dir, "models")
-    callback = [CheckpointCallbackSaveReplayBuffer(
-        save_freq=save_interval_steps,
-        save_path=model_path,
-        name_prefix=run_name
-    )]
-    if wandb_run is not None:
-        callback.append(WandbCallback(
-            # gradient_save_freq=10000,
-            # model_save_path=model_path,
-            # model_save_freq=save_interval,
-            verbose=2,
-        ))
-
-    logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
-    logger.output_formats[0].max_length = 50
-    model.set_logger(logger)
-
-    print(model.actor)
-    print(model.critic)
-    if isinstance(model.actor, CspnActor):
-        print_cspn_params(model.actor.cspn)
+    if total_timesteps - model.num_timesteps <= 0:
+        print("Model has already reached its total timesteps.")
     else:
-        print(f"Actor MLP has {sum(p.numel() for p in model.actor.parameters() if p.requires_grad)} parameters.")
+        np.random.seed(seed)
+        th.manual_seed(seed)
 
-    # noinspection PyTypeChecker
-    model.learn(
-        total_timesteps=total_timesteps - model.num_timesteps,
-        log_interval=log_interval_episodes,
-        # Regarding reset_num_timesteps: https://stable-baselines3.readthedocs.io/en/master/guide/examples.html#id3
-        # We set it to False so that the logging keeps the correct step information
-        reset_num_timesteps=False,
-        tb_log_name=run_name,
-        callback=callback,
-    )
+        run_name = os.path.split(log_dir)[1]
+        model_path = os.path.join(log_dir, "models")
+        callback = [CheckpointCallbackSaveReplayBuffer(
+            save_freq=save_interval_steps,
+            save_path=model_path,
+            name_prefix=run_name
+        )]
+        if wandb_run is not None:
+            callback.append(WandbCallback(
+                # gradient_save_freq=10000,
+                # model_save_path=model_path,
+                # model_save_freq=save_interval,
+                verbose=2,
+            ))
+
+        logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
+        logger.output_formats[0].max_length = 50
+        model.set_logger(logger)
+
+        print(model.actor)
+        print(model.critic)
+        if isinstance(model.actor, CspnActor):
+            print_cspn_params(model.actor.cspn)
+        else:
+            print(f"Actor MLP has {sum(p.numel() for p in model.actor.parameters() if p.requires_grad)} parameters.")
+        # noinspection PyTypeChecker
+        model.learn(
+            total_timesteps=total_timesteps - model.num_timesteps,
+            log_interval=log_interval_episodes,
+            # Regarding reset_num_timesteps: https://stable-baselines3.readthedocs.io/en/master/guide/examples.html#id3
+            # We set it to False so that the logging keeps the correct step information
+            reset_num_timesteps=False,
+            tb_log_name=run_name,
+            callback=callback,
+        )
     if wandb_run is not None:
         wandb_run.finish()
 
@@ -322,7 +317,7 @@ if __name__ == "__main__":
     if args.config is not None:
         assert os.path.exists(args.config) and args.config.endswith('yaml')
         config = RunConfig.from_yaml(args.config)
-        continue_run(config)
+        train_joint_fail_sac(config)
     else:
         kwargs = vars(args)
         seeds = kwargs.pop('seeds')
@@ -334,4 +329,4 @@ if __name__ == "__main__":
             log_dir = os.path.join(args.log_dir, args.proj_name)
             log_dir = os.path.join(log_dir, non_existing_folder_name(log_dir, run_name_seed))
             kwargs['log_dir'] = log_dir
-            start_new_run(RunConfig(seed=seed, **kwargs))
+            train_joint_fail_sac(RunConfig(seed=seed, **kwargs))
