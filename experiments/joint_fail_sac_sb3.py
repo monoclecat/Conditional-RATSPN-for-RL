@@ -140,7 +140,7 @@ def train_joint_fail_sac(config: RunConfig):
             force=True,
         )
     elif not config.no_wandb:
-        seed_regex = re.compile('_*s[0-9]+')
+        seed_regex = re.compile('_*s(|eed)[0-9]+')
         run_group = None
         if (match := seed_regex.search(run_name)) is not None:
             cut_out = match.span()
