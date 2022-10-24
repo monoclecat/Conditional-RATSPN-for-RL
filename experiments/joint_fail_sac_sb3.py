@@ -57,6 +57,7 @@ class RunConfig:
     sum_param_layers: list
     total_timesteps: int
     run_id: str = None
+    stop_after_nr_of_save_intervals: int = None
 
     @staticmethod
     def from_yaml(path: str):
@@ -139,10 +140,16 @@ def train_joint_fail_sac(config: RunConfig):
             force=True,
         )
     elif not config.no_wandb:
+        seed_regex = re.compile('s[0-9]+')
+        run_group = None
+        if (match := seed_regex.search(run_name)) is not None:
+            if (substring_end_index := match.span()[0]-1) > 0:
+                run_group = run_name[:substring_end_index]
         run = wandb.init(
             dir=config.log_dir,
             project=config.proj_name,
             name=run_name,
+            group=run_group,
             sync_tensorboard=True,
             monitor_gym=True,
             reinit=True,
@@ -216,12 +223,13 @@ def train_joint_fail_sac(config: RunConfig):
     train_model(
         model=model, seed=config.seed, total_timesteps=config.total_timesteps, log_dir=config.log_dir,
         save_interval_steps=config.save_interval, log_interval_episodes=config.log_interval, wandb_run=run,
+        stop_after_nr_of_save_intervals=config.stop_after_nr_of_save_intervals,
     )
 
 
 def train_model(
         model: EntropyLoggingSAC, seed: int, total_timesteps: int, log_dir: str, save_interval_steps: int,
-        log_interval_episodes: int = 4, wandb_run=None,
+        stop_after_nr_of_save_intervals: int = None, log_interval_episodes: int = 4, wandb_run=None,
 ):
     if total_timesteps - model.num_timesteps <= 0:
         print("Model has already reached its total timesteps.")
@@ -234,7 +242,8 @@ def train_model(
         callback = [CheckpointCallbackSaveReplayBuffer(
             save_freq=save_interval_steps,
             save_path=model_path,
-            name_prefix=run_name
+            name_prefix=run_name,
+            stop_after_nr_of_saves=stop_after_nr_of_save_intervals,
         )]
         if wandb_run is not None:
             callback.append(WandbCallback(
@@ -279,6 +288,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_envs', type=int, default=1, help='Number of parallel environments to run.')
     parser.add_argument('--total_timesteps', '-ts', type=int, default=int(1e6), help='Total timesteps to train model.')
     parser.add_argument('--save_interval', type=int, help='Save model and a video every save_interval timesteps.')
+    parser.add_argument('--stop_after_nr_of_save_intervals', type=int, default=None,
+                        help='Stop early after a number of save_intervals. Disable by leaving this None. ')
     parser.add_argument('--log_interval', type=int, default=4, help='Log interval')
     parser.add_argument('--env_name', '-env', type=str, help='Gym environment to train on.')
     parser.add_argument('--device', '-dev', type=str, default='cuda', help='Device to run on. cpu or cuda.')
@@ -297,6 +308,8 @@ if __name__ == "__main__":
     parser.add_argument('--buffer_size', type=int, default=1_000_000, help='replay buffer size')
     parser.add_argument('--joint_fail_prob', '-jf', type=float, default=0.05, help="Joints can fail with this probability")
     parser.add_argument('--sample_failing_joints', action='store_true', help="Sample replacements for failing joints")
+    parser.add_argument('--sample_failures_every', type=str, default='step', choices=['step', 'episode'],
+                        help='When to sample joint failures.')
     # CSPN arguments
     parser.add_argument('--repetitions', '-R', type=int, default=3, help='Number of parallel CSPNs to learn at once. ')
     parser.add_argument('--cspn_depth', '-D', type=int,

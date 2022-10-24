@@ -491,6 +491,10 @@ class CheckpointCallbackSaveReplayBuffer(CheckpointCallback):
     :param name_prefix: Common prefix to the saved models
     :param verbose:
     """
+    def __init__(self, *args, stop_after_nr_of_saves=None, **kwargs):
+        super(CheckpointCallbackSaveReplayBuffer, self).__init__(*args, **kwargs)
+        self.__stop_after_nr_of_saves = stop_after_nr_of_saves
+        self.__nr_of_saves = 0
 
     def _on_step(self) -> bool:
         if self.n_calls % self.save_freq == 0:
@@ -508,4 +512,11 @@ class CheckpointCallbackSaveReplayBuffer(CheckpointCallback):
                                       f"didn't exist!")
                     break
             self.model.save_replay_buffer(os.path.join(self.save_path, f"replay_buffer_{self.num_timesteps}_steps.pkl"))
-        return True
+            self.__nr_of_saves += 1
+        if self.__stop_after_nr_of_saves is None:
+            return True
+        else:
+            abort = self.__nr_of_saves >= self.__stop_after_nr_of_saves
+            if abort:
+                print(f"Stopping early because {self.__stop_after_nr_of_saves} save intervals have been reached.")
+            return not abort
