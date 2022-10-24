@@ -143,8 +143,8 @@ def train_joint_fail_sac(config: RunConfig):
         seed_regex = re.compile('_*s[0-9]+')
         run_group = None
         if (match := seed_regex.search(run_name)) is not None:
-            if (substring_end_index := match.span()[0]) > 0:
-                run_group = run_name[:substring_end_index]
+            cut_out = match.span()
+            run_group = run_name[:cut_out[0]] + run_name[cut_out[1]:]
         run = wandb.init(
             dir=config.log_dir,
             project=config.proj_name,
