@@ -17,6 +17,12 @@ if __name__ == "__main__":
                         help='Project name for wandb')
     parser.add_argument('--num_eval_ep', '-n', type=int, default=10,
                         help='Number of episodes to evaluate model on per joint fail prob.')
+    parser.add_argument('--min_fail_prob', type=float, default=0.0,
+                        help='Minimum joint failure prob to evaluate')
+    parser.add_argument('--max_fail_prob', type=float, default=0.5,
+                        help='Maximum joint failure prob to evaluate')
+    parser.add_argument('--fail_prob_steps', type=int, default=11,
+                        help='Steps to evaluate between min and max.')
     args = parser.parse_args()
     assert os.path.exists(args.root_dir)
     exp_dirs = find_exp_dirs(args.root_dir)
@@ -51,6 +57,7 @@ if __name__ == "__main__":
             log_dir=exp, proj_name=args.wandb_proj, model_path=model_path, num_eval_ep=args.num_eval_ep,
             env_name='Ant-v3', num_envs=1, no_video=True, sample_failing_joints=True,
             sample_failures_every='step', save_interval=-1, seed=10,
-            joint_fail_probs=list(np.arange(0, 1.01, 0.1)), no_wandb=False,
+            joint_fail_probs=list(np.linspace(args.min_fail_prob, args.max_fail_prob, args.fail_prob_steps)),
+            no_wandb=False,
         )
         eval_over_joint_fail_probs(config, train_config=experiment_config)
