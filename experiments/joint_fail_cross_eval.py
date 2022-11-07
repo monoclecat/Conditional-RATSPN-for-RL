@@ -152,11 +152,13 @@ if __name__ == "__main__":
                     max_step_model = model
         if max_step_model is None:
             print(log_prefix + f"No max_step_model found in {model_dir}!")
+            continue
         model_path = os.path.join(model_dir, max_step_model)
 
         wandb_run_dir = find_wandb_run_dir_in_exp_dir(exp)
         if wandb_run_dir is None:
             print(log_prefix + f"Couldn't find a wandb_run_dir")
+            continue
         with open(os.path.join(exp, 'wandb', wandb_run_dir, 'files', 'config.yaml'), 'r') as file:
             experiment_config = yaml.safe_load(file)
             experiment_config = without_intermediate_value_keys(experiment_config)
