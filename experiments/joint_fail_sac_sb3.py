@@ -26,34 +26,42 @@ from dataclasses import dataclass
 
 @dataclass
 class RunConfig:
+    log_dir: str
+    proj_name: str
+    env_name: str
+    num_envs: int
+    no_video: bool
+    sample_failures_every: str
+    sample_failing_joints: bool
+    save_interval: int
+    seed: int
+
+    def to_yaml(self, path: str):
+        with open(path, 'w') as f:
+            yaml.dump(vars(self), f)
+
+
+@dataclass
+class TrainConfig(RunConfig):
     buffer_size: int
     cspn_depth: int
     device: str
     dist_param_layers: list
     dropout: float
     ent_coef: float
-    env_name: str
     feat_layers: list
     joint_fail_prob: float
-    sample_failures_every: str
     learning_rate: float
     learning_starts: int
-    log_dir: str
     log_interval: int
     mlp_actor: bool
     naive_sample_size: int
-    no_video: bool
     no_wandb: bool
     num_dist: int
-    num_envs: int
     num_sums: int
     objective: str
-    proj_name: str
     recurs_sample_size: int
     repetitions: int
-    sample_failing_joints: bool
-    save_interval: int
-    seed: int
     sum_param_layers: list
     total_timesteps: int
     run_id: str = None
@@ -64,11 +72,7 @@ class RunConfig:
         assert os.path.exists(path)
         with open(path, 'r') as f:
             config: dict = yaml.safe_load(f)
-        return RunConfig(**config)
-
-    def to_yaml(self, path: str):
-        with open(path, 'w') as f:
-            yaml.dump(vars(self), f)
+        return TrainConfig(**config)
 
 
 def get_max_step_from_sb3_model_checkpoints(model_path):
@@ -106,7 +110,7 @@ def create_joint_fail_env(
     return env
 
 
-def train_joint_fail_sac(config: RunConfig):
+def train_joint_fail_sac(config: TrainConfig):
     assert os.environ.get('LD_PRELOAD') is None, "The LD_PRELOAD environment variable may not be set externally."
     if config.no_video:
         os.environ['LD_PRELOAD'] = os.environ.get('CONDA_PREFIX') + '/lib/libGLEW.so'
@@ -332,7 +336,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.config is not None:
         assert os.path.exists(args.config) and args.config.endswith('yaml')
-        config = RunConfig.from_yaml(args.config)
+        config = TrainConfig.from_yaml(args.config)
         train_joint_fail_sac(config)
     else:
         kwargs = vars(args)
@@ -345,4 +349,4 @@ if __name__ == "__main__":
             log_dir = os.path.join(args.log_dir, args.proj_name)
             log_dir = os.path.join(log_dir, non_existing_folder_name(log_dir, run_name_seed))
             kwargs['log_dir'] = log_dir
-            train_joint_fail_sac(RunConfig(seed=seed, **kwargs))
+            train_joint_fail_sac(TrainConfig(seed=seed, **kwargs))
