@@ -430,7 +430,6 @@ class RatSpn(nn.Module):
 
         # Check if evidence contains nans
         if evidence is not None:
-            assert (evidence != evidence).any(), "Evidence has no NaN values."
             # evidence needs shape
             # [*batch_dims, conditionals, self.config.F, output_channels, repetitions]
             # see RatSpn.forward() for more information
