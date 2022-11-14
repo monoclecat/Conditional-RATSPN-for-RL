@@ -1,6 +1,4 @@
 import os
-import random
-import sys
 import time
 import csv
 
@@ -15,12 +13,11 @@ from torch import optim
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
 
 from distributions import RatNormal
 from cspn import CSPN, CspnConfig, print_cspn_params
 from rat_spn import RatSpn, RatSpnConfig
-from experiments.train_mnist import count_params
+from mnist_experiments.train_mnist import count_params
 from utils import non_existing_folder_name
 
 

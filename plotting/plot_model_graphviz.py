@@ -16,12 +16,7 @@ from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 import matplotlib
 
-from distributions import RatNormal
-from cspn import CSPN, CspnConfig, print_cspn_params
-from rat_spn import RatSpn, RatSpnConfig
-from experiments.train_mnist import count_params
-from utils import non_existing_folder_name
-from mnist_gen_train import *
+from mnist_experiments.mnist_gen_train import *
 import graphviz
 from graphviz import nohtml
 from layers import *

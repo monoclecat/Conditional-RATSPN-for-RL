@@ -1,15 +1,7 @@
-import numpy as np
-from scipy.stats import multivariate_normal as normal_pdf
-import torch as th
-import matplotlib.pyplot as plt
 from rat_spn import RatSpn, RatSpnConfig
 from distributions import RatNormal
-from experiments.train_mnist import count_params
-from experiments.mnist_gen_train import time_delta
+from mnist_experiments.train_mnist import count_params
 from torch import optim
-import torch.distributions as dist
-import gif
-import os
 import csv
 import time
 from utils import *

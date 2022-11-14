@@ -1,28 +1,19 @@
 import os
-import random
-import sys
 import time
-import csv
 
 import torch
 import wandb
-import imageio
 import numpy as np
-import skimage
 import torch as th
-import torchvision
 from torch import optim
 import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
 
 from distributions import RatNormal
 from cspn import CSPN, CspnConfig, print_cspn_params
 from rat_spn import RatSpn, RatSpnConfig
-from experiments.train_mnist import count_params
+from mnist_experiments.train_mnist import count_params
 from utils import non_existing_folder_name
-from experiments.mnist_gen_train import (
+from mnist_experiments.mnist_gen_train import (
     sample_root_children, evaluate_sampling, horizontal_bar_mask, evaluate_model, plot_samples, CsvLogger
 )
 

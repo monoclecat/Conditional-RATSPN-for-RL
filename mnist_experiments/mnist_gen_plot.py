@@ -1,13 +1,7 @@
 import os
 import csv
-import numpy as np
-import torch as th
-import gif
 import matplotlib
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-import re
-from utils import non_existing_folder_name
 import pandas as pd
 
 if __name__ == "__main__":
