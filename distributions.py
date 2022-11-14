@@ -196,9 +196,6 @@ class RatNormal(Leaf):
     def var(self):
         return self.stds ** 2
 
-    def set_no_tanh_log_prob_correction(self):
-        self._no_tanh_log_prob_correction = False
-
     def forward(self, x, detach_params: bool = False):
         """
         Forward pass through the leaf layer.
@@ -383,12 +380,6 @@ class IndependentMultivariate(Leaf):
         # Pass through product layer
         x = self.prod(x, reduction=reduction)
         return x
-
-    def entropy(self):
-        ent = self.base_leaf.entropy().unsqueeze(0)
-        ent = self.pad_input(ent)
-        ent = self.prod(ent, reduction='sum')
-        return ent
 
     def sample(self, mode: str = None, ctx: Sample = None):
         if not ctx.is_root:

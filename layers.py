@@ -242,38 +242,6 @@ class Sum(AbstractLayer):
     def sample_onehot_style(self, ctx: Sample = None) -> Sample:
         return self.sample(mode='onehot', ctx=ctx)
 
-    def depr_forward_grad(self, child_grads):
-        weights = self.consolidated_weights.unsqueeze(2)
-        return [(g.unsqueeze_(4) * weights).sum(dim=3) for g in child_grads]
-
-    def depr_compute_moments(self, child_moments: List[th.Tensor]):
-        assert self.consolidated_weights is not None, "No consolidated weights are set for this Sum node!"
-        # Create an extra dimension for the mean vector so all elements of the mean vector are multiplied by the same
-        # weight for that feature and output channel.
-        weights = self.consolidated_weights.unsqueeze(2)
-        # Weights is of shape [n, d, 1, ic, oc, r]
-
-        mean, var, skew = [m.unsqueeze(4) if m is not None else None for m in child_moments]
-        # moments have shape [n, d, cardinality, ic, r]
-        # Create an extra 'output channels' dimension, as the weights are separate for each output channel.
-        self._mean = mean * weights
-        # _mean has shape [n, d, cardinality, ic, oc, r]
-        self._mean = self._mean.sum(dim=3)
-        # _mean has shape [n, d, cardinality, oc, r]
-
-        centered_mean = mean - self._mean.unsqueeze(4)
-        self._var = var + centered_mean**2
-        self._var = self._var * weights
-        self._var = self._var.sum(dim=3)
-
-        self._skew = 3*centered_mean*var + centered_mean**3
-        if skew is not None:
-            self._skew = self._skew + skew
-        self._skew = self._skew * weights
-        self._skew = self._skew.sum(dim=3)
-
-        return self._mean, self._var, self._skew
-
     def __repr__(self):
         return "Sum(in_channels={}, in_features={}, out_channels={}, dropout={}, out_shape={})".format(
             self.in_channels, self.in_features, self.out_channels, self.dropout, self.out_shape
@@ -304,11 +272,6 @@ class Product(AbstractLayer):
 
         self._out_features = np.ceil(self.in_features / self.cardinality).astype(int)
         self.out_shape = f"(N, {self._out_features}, in_channels, {self.num_repetitions})"
-
-    # @property
-    # def __device(self):
-        # """Hack to obtain the current device, this layer lives on."""
-        # return self._conv_weights.device
 
     def forward(self, x: th.Tensor, reduction = 'sum', **kwargs):
         """

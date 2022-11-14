@@ -251,9 +251,6 @@ class CSPN(RatSpn):
             if isinstance(lay, CrossProduct):
                 lay.one_hot_in_channel_mapping = F.one_hot(lay.unraveled_channel_indices).float().requires_grad_(False)
 
-    def set_no_tanh_log_prob_correction(self):
-        self._leaf.base_leaf.set_no_tanh_log_prob_correction()
-
     def set_params(self, feat_inp: th.Tensor):
         """
             Sets the weights of the sum and dist nodes, using the input from the conditional passed through the
