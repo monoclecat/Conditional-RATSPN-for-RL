@@ -10,7 +10,7 @@ from tqdm import tqdm
 import re
 from utils import non_existing_folder_name
 import wandb
-from experiments.entropy_density_plot import get_ents_from_metrics, set_axis_ticks_and_labels
+from entropy_experiments.entropy_density_plot import get_ents_from_metrics, set_axis_ticks_and_labels
 
 
 def max_nodes(probs: np.ndarray):
