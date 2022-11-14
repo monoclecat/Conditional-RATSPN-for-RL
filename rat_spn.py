@@ -1,15 +1,8 @@
 import logging
-from typing import Dict, Type, List, Union, Optional, Tuple, Callable
-import math
 
-import numpy as np
 import torch as th
-from dataclasses import dataclass
-from torch import nn
 from torch.nn import functional as F
 from torch import distributions as dist
-import scipy.optimize
-import matplotlib.pyplot as plt
 
 from layers import CrossProduct, Sum
 from type_checks import check_valid

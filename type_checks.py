@@ -16,6 +16,7 @@ class InvalidTypeException(Exception):
             f"Value {value} was of type {type(value)} but expected to be of type {expected_type} (or a subclass of this type) ."
         )
 
+
 class InvalidStackedSpnConfigurationException(Exception):
     def __init__(self, expected, observed, parameter_name):
         super().__init__(f"The StackedSpn has received an invalid configuration: Expected {parameter_name}={expected} but got {parameter_name}={observed}.")
@@ -52,7 +53,8 @@ def _check_type_core(value: Any, expected_type):
         raise InvalidTypeException(value, expected_type)
     elif expected_type == int and not isinstance(value, int):
         raise InvalidTypeException(value, expected_type)
-        
+
+
 def _check_type_numpy(value: Any, expected_type):
     # Check float
     if expected_type == float:

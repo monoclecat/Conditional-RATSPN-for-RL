@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Type, Tuple, Optional
+from typing import Type, Tuple, Optional
 
 import numpy as np
 import torch as th
@@ -10,7 +10,6 @@ from torch import nn
 from layers import CrossProduct, Sum
 
 from rat_spn import RatSpn, RatSpnConfig
-import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 

@@ -1,12 +1,10 @@
 import logging
-from abc import ABC, abstractmethod
-from typing import List, Union, Tuple
+from typing import List, Union
 
 import numpy as np
 import torch as th
 from torch import nn
 from torch.nn import functional as F
-import torch.distributions as dist
 
 from type_checks import check_valid
 from utils import Sample
@@ -410,12 +408,10 @@ class CrossProduct(AbstractLayer):
     """
     Layerwise implementation of a RAT Product node.
 
-    Builds the the combination of all children in two regions:
+    Builds the combination of all children in two regions:
     res = []
     for n1 in R1, n2 in R2:
         res += [n1 * n2]
-
-    TODO: Generalize to k regions (cardinality = k).
     """
 
     def __init__(self, in_features: int, in_channels: int, num_repetitions: int = 1):

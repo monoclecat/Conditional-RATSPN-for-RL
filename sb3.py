@@ -1,50 +1,29 @@
-import stable_baselines3 as sb3
 import os
-from stable_baselines3.sac.policies import SACPolicy, Actor
+from stable_baselines3.sac.policies import SACPolicy
 from stable_baselines3.sac.sac import SAC
 from stable_baselines3.common.utils import polyak_update
-from stable_baselines3.common.policies import BasePolicy, ContinuousCritic, BaseModel
-from stable_baselines3.common.noise import ActionNoise
+from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import (
     BaseFeaturesExtractor,
-    FlattenExtractor,
-    NatureCNN,
-    get_actor_critic_arch,
 )
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule, TrainFreq, RolloutReturn
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
-from stable_baselines3.common.type_aliases import Schedule
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import List, Tuple
 
 import gym
 import torch as th
 import torch.nn.functional as F
 from torch import nn
 import numpy as np
-from typing import Any, Callable, Dict, Optional, Type, Union, Iterable
+from typing import Any, Dict, Optional, Type
 
 from cspn import CspnConfig, CSPN
 from distributions import RatNormal
-from stable_baselines3.common.utils import zip_strict
 
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
-
-
-def polyak_update(
-        params: Iterable[th.nn.Parameter],
-        target_params: Iterable[th.nn.Parameter],
-        tau: float,
-) -> None:
-    with th.no_grad():
-        # zip does not raise an exception if length of parameters does not match.
-        for param, target_param in zip_strict(params, target_params):
-            if param.dtype != th.long:
-                target_param.data.mul_(1 - tau)
-                th.add(target_param.data, param.data, alpha=tau, out=target_param.data)
 
 
 class CspnActor(BasePolicy):
