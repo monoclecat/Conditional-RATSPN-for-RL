@@ -14,31 +14,11 @@ from utils import Sample
 logger = logging.getLogger(__name__)
 
 
-class AbstractLayer(nn.Module, ABC):
+class AbstractLayer(nn.Module):
     def __init__(self, in_features: int, num_repetitions: int = 1):
         super().__init__()
         self.in_features = check_valid(in_features, int, 1)
         self.num_repetitions = check_valid(num_repetitions, int, 1)
-
-    @abstractmethod
-    def sample(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
-        """
-        Sample from this layer.
-        Args:
-            ctx: Sampling context.
-
-        Returns:
-            th.Tensor: Generated samples.
-        """
-        pass
-
-    @abstractmethod
-    def sample_index_style(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
-        pass
-
-    @abstractmethod
-    def sample_onehot_style(self, ctx: Sample = None) -> Union[Sample, th.Tensor]:
-        pass
 
 
 class Sum(AbstractLayer):

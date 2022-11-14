@@ -8,12 +8,60 @@ from torch import distributions as dist
 from torch import nn
 from torch.nn import functional as F
 
-from base_distributions import Leaf, dist_forward
-from layers import Product, Sum
+from layers import Product, AbstractLayer
 from type_checks import check_valid
 from utils import Sample
 
 logger = logging.getLogger(__name__)
+
+
+class Leaf(AbstractLayer):
+    """
+    Abstract layer that maps each input feature into a specified
+    representation, e.g. Gaussians.
+
+    Implementing layers shall be valid distributions.
+
+    If the input at a specific position is NaN, the variable will be marginalized.
+    """
+
+    def __init__(self, in_features: int, out_channels: int, num_repetitions: int = 1, dropout=0.0):
+        """
+        Create the leaf layer.
+
+        Args:
+            in_features: Number of input features.
+            out_channels: Number of parallel representations for each input feature.
+            num_repetitions: Number of parallel repetitions of this layer.
+            dropout: Dropout probability.
+        """
+        super().__init__(in_features=in_features, num_repetitions=num_repetitions)
+        self.out_channels = check_valid(out_channels, int, 1)
+        dropout = check_valid(dropout, float, 0.0, 1.0)
+        self.dropout = nn.Parameter(th.tensor(dropout), requires_grad=False)
+
+        self.out_shape = f"(N, {in_features}, {out_channels})"
+
+        # Marginalization constant
+        self.marginalization_constant = nn.Parameter(th.zeros(1), requires_grad=False)
+
+        # Dropout bernoulli
+        self._bernoulli_dist = th.distributions.Bernoulli(probs=self.dropout)
+
+    def _apply_dropout(self, x: th.Tensor) -> th.Tensor:
+        # Apply dropout sampled from a bernoulli during training (model.train() has been called)
+        if self.dropout > 0.0 and self.training:
+            dropout_indices = self._bernoulli_dist.sample(x.shape).bool()
+            x[dropout_indices] = 0.0
+        return x
+
+    def _marginalize_input(self, x: th.Tensor) -> th.Tensor:
+        # Marginalize nans set by user
+        x = th.where(~th.isnan(x), x, self.marginalization_constant)
+        return x
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(in_features={self.in_features}, out_channels={self.out_channels}, dropout={self.dropout}, out_shape={self.out_shape})"
 
 
 class RatNormal(Leaf):
@@ -262,10 +310,6 @@ class RatNormal(Leaf):
     def sample_onehot_style(self, ctx: Sample = None) -> th.Tensor:
         return self.sample(mode='onehot', ctx=ctx)
 
-    def _get_base_distribution(self) -> th.distributions.Distribution:
-        gauss = dist.Normal(self.means, self.stds)
-        return gauss
-
 
 class IndependentMultivariate(Leaf):
     def __init__(
@@ -345,9 +389,6 @@ class IndependentMultivariate(Leaf):
         ent = self.pad_input(ent)
         ent = self.prod(ent, reduction='sum')
         return ent
-
-    def _get_base_distribution(self):
-        raise Exception("IndependentMultivariate does not have an explicit PyTorch base distribution.")
 
     def sample(self, mode: str = None, ctx: Sample = None):
         if not ctx.is_root:

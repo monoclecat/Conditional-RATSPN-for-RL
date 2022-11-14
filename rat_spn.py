@@ -11,7 +11,6 @@ from torch import distributions as dist
 import scipy.optimize
 import matplotlib.pyplot as plt
 
-from base_distributions import Leaf
 from layers import CrossProduct, Sum
 from type_checks import check_valid
 from utils import *
@@ -80,9 +79,6 @@ class RatSpnConfig:
         self.I = check_valid(self.I, int, 1)
         self.dropout = check_valid(self.dropout, float, 0.0, 1.0)
         assert self.leaf_base_class is not None, Exception("RatSpnConfig.leaf_base_class parameter was not set!")
-        assert isinstance(self.leaf_base_class, type) and issubclass(
-            self.leaf_base_class, Leaf
-        ), f"Parameter RatSpnConfig.leaf_base_class must be a subclass type of Leaf but was {self.leaf_base_class}."
 
         if 2 ** self.D > self.F:
             raise Exception(f"The tree depth D={self.D} must be <= {np.floor(np.log2(self.F))} (log2(in_features).")
@@ -435,15 +431,8 @@ class RatSpn(nn.Module):
             # see RatSpn.forward() for more information
             n = (*n, *evidence.shape[:-4])
 
-        with provide_evidence(self, evidence, requires_grad=(mode == 'onehot')):  # May be None but that's ok
+        with provide_evidence(self, evidence, requires_grad=(mode == 'onehot')):
             # If class is given, use it as base index
-            # if class_index is not None:
-                # Create new sampling context
-                # raise NotImplementedError("This case has not been touched yet. Please verify.")
-                # ctx = Sample(n=n,
-                                      # parent_indices=class_index.repeat(n, 1).unsqueeze(-1).to(self.device),
-                                      # repetition_indices=th.zeros((n, class_index.shape[0]), dtype=int, device=self.device),
-                                      # is_mpe=is_mpe)
             ctx = Sample(
                 n=n, is_mpe=is_mpe, sampling_mode=mode, needs_squashing=self.config.tanh_squash,
                 sampled_with_evidence=evidence is not None,
