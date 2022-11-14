@@ -1,16 +1,23 @@
 import re
+import os
 import yaml
 import platform
+from typing import List, Dict
+import numpy as np
+import torch as th
+import torch.nn as nn
 import wandb
 from wandb.integration.sb3 import WandbCallback
 
+from stable_baselines3.common.torch_layers import NatureCNN, FlattenExtractor
 from stable_baselines3.common.vec_env import VecVideoRecorder
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.evaluation import evaluate_policy
 
 from cspn import print_cspn_params
-from sb3 import *
+from sac_rl_experiments.sb3 import EntropyLoggingSAC, CheckpointCallbackSaveReplayBuffer, \
+    CustomMlpPolicy, CspnPolicy, CspnActor
 from utils import non_existing_folder_name
 from sac_rl_experiments.joint_failure_wrapper import wrap_in_float_and_joint_fail
 from dataclasses import dataclass
@@ -187,6 +194,7 @@ def eval_over_joint_fail_probs(config: JointFailProbEvalConfig, train_config: Di
 
     if wandb_run is not None:
         wandb_run.finish()
+
 
 def get_max_step_from_sb3_model_checkpoints(model_path):
     step_expr = re.compile('.*[^0-9](?P<step>[0-9]+)_*steps')
@@ -423,7 +431,8 @@ if __name__ == "__main__":
     parser.add_argument('--learning_starts', type=int, default=1000,
                         help='Nr. of steps to act randomly in the beginning.')
     parser.add_argument('--buffer_size', type=int, default=1_000_000, help='replay buffer size')
-    parser.add_argument('--joint_fail_prob', '-jf', type=float, default=0.05, help="Joints can fail with this probability")
+    parser.add_argument('--joint_fail_prob', '-jf', type=float, default=0.05,
+                        help="Joints can fail with this probability")
     parser.add_argument('--sample_failing_joints', action='store_true', help="Sample replacements for failing joints")
     parser.add_argument('--sample_failures_every', type=str, default='step', choices=['step', 'episode'],
                         help='When to sample joint failures.')
