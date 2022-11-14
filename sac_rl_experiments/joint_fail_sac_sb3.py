@@ -19,7 +19,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from cspn import CSPN, print_cspn_params
 from sb3 import *
 from utils import non_existing_folder_name
-from envs.joint_failure_wrapper import wrap_in_float_and_joint_fail
+from sac_rl_experiments.joint_failure_wrapper import wrap_in_float_and_joint_fail
 from dataclasses import dataclass
 
 
